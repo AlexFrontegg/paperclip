@@ -8622,7 +8622,12 @@ export function toolAccessService(
         ? connection.config.sourceTemplateKey.trim()
         : "";
     if (sourceTemplateKey) return sourceTemplateKey;
-    const url = metadataUrl ?? remoteEndpoint(connection.config);
+    return oauthProviderKeyFromUrl(
+      metadataUrl ?? remoteEndpoint(connection.config),
+    );
+  }
+
+  function oauthProviderKeyFromUrl(url: string): string {
     try {
       return (
         new URL(url).hostname
@@ -10060,6 +10065,7 @@ export function toolAccessService(
     refreshToken?: string | null;
     /** RFC 8707 resource indicator: the MCP server this token is for. */
     resource?: string | null;
+    audience?: string | null;
   }) {
     const body = new URLSearchParams();
     if (input.grantType === "client_credentials") {
@@ -10095,6 +10101,7 @@ export function toolAccessService(
     // authorization server audience-restricts the access token (and any refresh
     // exchange) to this MCP server.
     if (input.resource) body.set("resource", input.resource);
+    if (input.audience) body.set("audience", input.audience);
 
     // The token URL can come from a connection row written before the endpoint
     // gate existed, so a client secret / authorization code never leaves
@@ -10177,6 +10184,47 @@ export function toolAccessService(
       tokenType:
         typeof record.token_type === "string" ? record.token_type : "Bearer",
       raw: record,
+    };
+  }
+
+  function usesOAuthClientCredentials(oauth: Record<string, unknown>) {
+    return (
+      oauth.grantType === "client_credentials" ||
+      oauth.clientCredentials === true
+    );
+  }
+
+  /**
+   * A client-credentials connection uses its refresh token first when the
+   * provider issued one, and requests a new token with the client credentials
+   * when it has none or the provider rejects it.
+   */
+  async function renewOAuthToken(
+    input: Omit<Parameters<typeof exchangeOAuthToken>[0], "grantType"> & {
+      clientCredentials: boolean;
+    },
+  ) {
+    const { clientCredentials, ...request } = input;
+    if (!clientCredentials || request.refreshToken) {
+      try {
+        return {
+          token: await exchangeOAuthToken({
+            ...request,
+            grantType: "refresh_token",
+          }),
+          grantType: "refresh_token" as const,
+        };
+      } catch (error) {
+        if (!clientCredentials || !(error instanceof HttpError)) throw error;
+      }
+    }
+    return {
+      token: await exchangeOAuthToken({
+        ...request,
+        grantType: "client_credentials",
+        refreshToken: null,
+      }),
+      grantType: "client_credentials" as const,
     };
   }
 
@@ -10394,13 +10442,9 @@ export function toolAccessService(
       return connection;
     const expiresAtMs = oauthExpiresAtMs(connection);
     if (expiresAtMs && expiresAtMs > Date.now() + 60_000) return connection;
-    const grantType =
-      oauth.grantType === "client_credentials" ||
-      oauth.clientCredentials === true
-        ? ("client_credentials" as const)
-        : ("refresh_token" as const);
+    const clientCredentials = usesOAuthClientCredentials(oauth);
     const refreshRef = oauthSecretRef(connection, "oauth.refresh_token");
-    if (grantType !== "client_credentials" && !refreshRef) {
+    if (!clientCredentials && !refreshRef) {
       throw new HttpError(
         422,
         "OAuth credentials have expired and no refresh token is available",
@@ -10451,9 +10495,9 @@ export function toolAccessService(
             },
           )
         : null;
-    let token: Awaited<ReturnType<typeof exchangeOAuthToken>>;
+    let renewal: Awaited<ReturnType<typeof renewOAuthToken>>;
     try {
-      token = await exchangeOAuthToken({
+      renewal = await renewOAuthToken({
         tokenUrl: oauth.tokenUrl,
         clientId: client.clientId,
         clientSecret: client.clientSecret,
@@ -10461,7 +10505,7 @@ export function toolAccessService(
           oauth,
           client.clientSecret,
         ),
-        grantType,
+        clientCredentials,
         scopes:
           normalizeOauthScopes(oauth.scopes).length > 0
             ? normalizeOauthScopes(oauth.scopes)
@@ -10473,6 +10517,7 @@ export function toolAccessService(
           typeof oauth.resource === "string" && oauth.resource
             ? oauth.resource
             : null,
+        audience: typeof oauth.audience === "string" ? oauth.audience : null,
       });
     } catch (error) {
       if (
@@ -10511,6 +10556,7 @@ export function toolAccessService(
       }
       throw error;
     }
+    const { token } = renewal;
     // Rotating providers invalidate the submitted refresh token immediately.
     // Persist its replacement before the new access token can be returned to a
     // caller, so a crash cannot leave the grant with only the consumed token.
@@ -10535,11 +10581,13 @@ export function toolAccessService(
       value: token.accessToken,
       actor,
     });
+    const keepsRefreshToken =
+      !nextRefreshRef && renewal.grantType === "refresh_token";
     const nextCredentialSecretRefs = [
       ...connection.credentialSecretRefs.filter(
         (ref) =>
           ref.configPath !== "oauth.access_token" &&
-          (!nextRefreshRef || ref.configPath !== "oauth.refresh_token"),
+          (keepsRefreshToken || ref.configPath !== "oauth.refresh_token"),
       ),
       accessRef,
       ...(nextRefreshRef ? [nextRefreshRef] : []),
@@ -10551,10 +10599,9 @@ export function toolAccessService(
       ...connection.config,
       oauth: {
         ...withoutOAuthRefreshLease(oauth),
-        grantType:
-          grantType === "client_credentials"
-            ? grantType
-            : (oauth.grantType ?? "authorization_code"),
+        grantType: clientCredentials
+          ? "client_credentials"
+          : (oauth.grantType ?? "authorization_code"),
         expiresAt,
         scope: token.scope ?? oauth.scope ?? null,
         tokenType: token.tokenType,
@@ -11028,9 +11075,16 @@ export function toolAccessService(
     ) {
       return initialGrant;
     }
+    const clientCredentials = usesOAuthClientCredentials(oauth);
+    const forceRefresh =
+      input.forceRefresh === true ||
+      (clientCredentials &&
+        !initialGrant.credentialSecretRefs.some(
+          (ref) => ref.configPath === "oauth.access_token",
+        ));
     const expiresAtMs = oauthGrantExpiresAtMs(initialGrant, connection);
     if (
-      !input.forceRefresh &&
+      !forceRefresh &&
       (expiresAtMs === null || expiresAtMs > Date.now() + 60_000)
     ) {
       return initialGrant;
@@ -11040,7 +11094,7 @@ export function toolAccessService(
       const lease = await acquireOAuthGrantRefreshLease(
         connection,
         initialGrant,
-        input.forceRefresh === true,
+        forceRefresh,
       );
       if (!lease.leaseId) return lease.grant;
       try {
@@ -11048,7 +11102,7 @@ export function toolAccessService(
         const refreshRef = grant.credentialSecretRefs.find(
           (ref) => ref.configPath === "oauth.refresh_token",
         );
-        if (!refreshRef) {
+        if (!refreshRef && !clientCredentials) {
           throw unprocessable(
             "OAuth credentials have expired and no refresh token is available",
             {
@@ -11058,13 +11112,15 @@ export function toolAccessService(
             },
           );
         }
-        const refreshSecret = await resolveOAuthGrantSecret(
-          connection,
-          grant,
-          refreshRef,
-          input.actor,
-          input,
-        );
+        const refreshSecret = refreshRef
+          ? await resolveOAuthGrantSecret(
+              connection,
+              grant,
+              refreshRef,
+              input.actor,
+              input,
+            )
+          : null;
         const credentialActor: ActorInfo | undefined =
           grant.kind === "user" && grant.subjectUserId
             ? { actorType: "user", actorId: grant.subjectUserId }
@@ -11079,9 +11135,9 @@ export function toolAccessService(
             `OAuth client id is not configured for ${oauthProvider}`,
           );
         const grantOauth = oauthGrantConfig(grant);
-        let token: Awaited<ReturnType<typeof exchangeOAuthToken>>;
+        let renewal: Awaited<ReturnType<typeof renewOAuthToken>>;
         try {
-          token = await exchangeOAuthToken({
+          renewal = await renewOAuthToken({
             tokenUrl: oauthTokenUrl,
             clientId: client.clientId,
             clientSecret: client.clientSecret,
@@ -11089,21 +11145,25 @@ export function toolAccessService(
               oauth,
               client.clientSecret,
             ),
-            grantType: "refresh_token",
+            clientCredentials,
             scopes:
               normalizeOauthScopes(grantOauth.scopes).length > 0
                 ? normalizeOauthScopes(grantOauth.scopes)
                 : normalizeOauthScopes(oauth.scopes).length > 0
                   ? normalizeOauthScopes(oauth.scopes)
                   : normalizeOauthScopes(oauth.scope),
-            refreshToken: refreshSecret.value,
+            refreshToken: refreshSecret?.value ?? null,
             resource:
               typeof oauth.resource === "string" && oauth.resource
                 ? oauth.resource
                 : null,
+            audience:
+              typeof oauth.audience === "string" ? oauth.audience : null,
           });
         } catch (error) {
           if (
+            refreshRef &&
+            refreshSecret &&
             error instanceof HttpError &&
             asRecord(error.details).code === "oauth_reauthorization_required"
           ) {
@@ -11222,6 +11282,7 @@ export function toolAccessService(
           }
           throw error;
         }
+        const { token } = renewal;
 
         let nextRefreshRef: ToolCredentialSecretRef | null = null;
         if (token.refreshToken) {
@@ -11252,11 +11313,13 @@ export function toolAccessService(
               ? (grant.subjectUserId ?? undefined)
               : undefined,
         });
+        const keepsRefreshToken =
+          !nextRefreshRef && renewal.grantType === "refresh_token";
         const nextCredentialSecretRefs = [
           ...grant.credentialSecretRefs.filter(
             (ref) =>
               ref.configPath !== "oauth.access_token" &&
-              (!nextRefreshRef || ref.configPath !== "oauth.refresh_token"),
+              (keepsRefreshToken || ref.configPath !== "oauth.refresh_token"),
           ),
           accessRef,
           ...(nextRefreshRef ? [nextRefreshRef] : []),
@@ -12256,11 +12319,24 @@ export function toolAccessService(
     // with a client the operator preregistered in the provider's console. Record
     // the client id now; the secret becomes an encrypted Paperclip secret below.
     if (input.oauthClient) {
+      const clientCredentialsTokenUrl =
+        input.authMode === "oauth_client_credentials"
+          ? assertOAuthEndpointUrl("token", input.oauthClient.tokenUrl)
+          : null;
       config.oauth = {
         clientId: input.oauthClient.clientId.trim(),
         clientRegistrationSource:
           "manual" satisfies OAuthClientRegistrationSource,
         clientCompanyId: companyId,
+        ...(clientCredentialsTokenUrl
+          ? {
+              grantType: "client_credentials",
+              provider: oauthProviderKeyFromUrl(clientCredentialsTokenUrl),
+              tokenUrl: clientCredentialsTokenUrl,
+              scopes: normalizeOauthScopes(input.oauthClient.scope),
+              audience: input.oauthClient.audience ?? null,
+            }
+          : {}),
       };
     }
     if (isGoogleSheetsRobotMethod) {
@@ -12867,6 +12943,7 @@ export function toolAccessService(
           input.authMode !== "none" &&
           input.authMode !== "bearer" &&
           input.authMode !== "custom_headers" &&
+          input.authMode !== "oauth_client_credentials" &&
           error instanceof HttpError &&
           asRecord(error.details).code === "oauth_challenge"
         ) {
