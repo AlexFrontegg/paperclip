@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  EMPTY_CLIENT_CREDENTIALS_FIELDS,
   canSubmitGenericConnect,
   customHeaderError,
   defaultGenericMcpName,
@@ -21,6 +22,7 @@ function draft(overrides: Partial<GenericConnectDraft> = {}): GenericConnectDraf
     headers: [newCustomHeaderRow()],
     oauthClientId: "",
     oauthClientSecret: "",
+    clientCredentials: EMPTY_CLIENT_CREDENTIALS_FIELDS,
     ...overrides,
   };
 }
@@ -185,6 +187,33 @@ describe("genericConnectPayload", () => {
     })).oauthClient).toEqual({ clientId: "cid", clientSecret: "shh" });
   });
 
+  it("sends the token URL, scope and audience only for client credentials", () => {
+    const clientCredentials = {
+      tokenUrl: " https://auth.example.test/oauth/token ",
+      scope: "tools.read",
+      audience: "",
+    };
+    expect(genericConnectPayload(draft({
+      authMode: "oauth_client_credentials",
+      oauthClientId: "cid",
+      oauthClientSecret: "shh",
+      clientCredentials,
+    }))).toEqual(expect.objectContaining({
+      authMode: "oauth_client_credentials",
+      oauthClient: {
+        clientId: "cid",
+        clientSecret: "shh",
+        tokenUrl: "https://auth.example.test/oauth/token",
+        scope: "tools.read",
+      },
+    }));
+    expect(genericConnectPayload(draft({
+      authMode: "oauth",
+      oauthClientId: "cid",
+      clientCredentials,
+    })).oauthClient).toEqual({ clientId: "cid" });
+  });
+
   it("does not carry a bearer key into a custom-header or no-auth submission", () => {
     // Switching modes must not leak a value the operator typed under a different
     // one — the wizard clears it, and the payload builder does not resurrect it.
@@ -221,6 +250,18 @@ describe("canSubmitGenericConnect", () => {
       authMode: "custom_headers",
       headers: [{ id: "a", name: "Host", value: "abc" }],
     }))).toBe(false);
+  });
+
+  it("requires a client ID, secret and token URL for client credentials", () => {
+    const complete = {
+      authMode: "oauth_client_credentials" as const,
+      oauthClientId: "cid",
+      oauthClientSecret: "shh",
+      clientCredentials: { ...EMPTY_CLIENT_CREDENTIALS_FIELDS, tokenUrl: "https://auth.example.test/oauth/token" },
+    };
+    expect(canSubmitGenericConnect(draft(complete))).toBe(true);
+    expect(canSubmitGenericConnect(draft({ ...complete, oauthClientSecret: "" }))).toBe(false);
+    expect(canSubmitGenericConnect(draft({ ...complete, clientCredentials: EMPTY_CLIENT_CREDENTIALS_FIELDS }))).toBe(false);
   });
 
   it("allows no-auth and browser sign-in without any value", () => {
