@@ -118,6 +118,11 @@ and when the MCP server rejects it with a 401:
 The connection does not need a reconnect while the client credentials stay
 valid.
 
+Paperclip always uses the client ID and secret you entered, even when the
+deployment sets `PAPERCLIP_TOOL_OAUTH_*` client variables. If the MCP server
+still rejects a new token, the error asks you to check the scope and audience.
+Paperclip does not replace your token URL with one the MCP server advertises.
+
 Every value you enter becomes a Paperclip secret. Values are write-only: they
 never appear in stored config JSON, logs, activity details, API responses after
 write, or UI readback. Only header *names* are shown in review and diagnostics.
