@@ -2871,7 +2871,7 @@ function sanitizeHttpFailure(error: unknown): {
     if (code === "grant_credential_invalid" || code === "oauth_insufficient_scope") {
       return { status: code === "grant_credential_invalid" ? "missing_secret" : "degraded", message: error.message, code };
     }
-    if (code === "slack_mcp_access_disabled") {
+    if (code === "slack_mcp_access_disabled" || code === "oauth_client_credentials_rejected") {
       return { status: "error", message: error.message, code };
     }
     if (code === "user_authorization_required") {
@@ -6823,6 +6823,21 @@ export function toolAccessService(
           { code: "slack_mcp_access_disabled", setupUrl: connectionSetupUrl(connection) },
         );
       }
+      // The operator chose the token URL, so a challenge must not replace it.
+      if (
+        response.status === 401 &&
+        usesOAuthClientCredentials(oauthConfig(connection))
+      ) {
+        throw unprocessable(
+          "The app rejected the access token from the token URL. Check the scope and audience.",
+          {
+            code: "oauth_client_credentials_rejected",
+            status: response.status,
+            setupUrl: connectionSetupUrl(connection),
+            reconnectUrl: connectionReconnectUrl(connection),
+          },
+        );
+      }
       const authenticate = response.headers.get("www-authenticate") ?? "";
       if (
         response.status === 401 &&
@@ -8432,14 +8447,21 @@ export function toolAccessService(
     provider: string,
     actor?: ActorInfo,
   ) {
-    const configured = configuredOAuthClientForConnection(connection, provider);
-    if (configured.clientId) return configured;
     const oauth = oauthConfig(connection);
+    // A deployment client must never be sent to a token URL an operator typed.
+    const operatorClientCredentials =
+      oauth.clientRegistrationSource === "manual" &&
+      usesOAuthClientCredentials(oauth);
+    const configured = configuredOAuthClientForConnection(connection, provider);
+    if (configured.clientId && !operatorClientCredentials) return configured;
     const clientId =
       typeof oauth.clientId === "string" && oauth.clientId.trim()
         ? oauth.clientId.trim()
         : null;
-    if (!clientId) return configured;
+    if (!clientId)
+      return operatorClientCredentials
+        ? { ...configured, clientId: null, clientSecret: null }
+        : configured;
     // CIMD clients and public DCR clients have no token-endpoint secret. A DCR
     // authorization server may instead issue a confidential client (for
     // example, `client_secret_basic`); in that case the registration secret is
@@ -12897,7 +12919,6 @@ export function toolAccessService(
           input.authMode !== "none" &&
           input.authMode !== "bearer" &&
           input.authMode !== "custom_headers" &&
-          input.authMode !== "oauth_client_credentials" &&
           error instanceof HttpError &&
           asRecord(error.details).code === "oauth_challenge"
         ) {

@@ -224,6 +224,15 @@ describe("genericConnectPayload", () => {
   });
 });
 
+describe("client credentials guidance", () => {
+  it("points a rejected token at scope and audience, not at a key", () => {
+    expect(genericConnectGuidance("oauth_client_credentials_rejected", null)).toMatchObject({
+      title: "The server rejected the token",
+      focus: "none",
+    });
+  });
+});
+
 describe("canSubmitGenericConnect", () => {
   it("needs a link", () => {
     expect(canSubmitGenericConnect(draft({ link: "" }))).toBe(false);

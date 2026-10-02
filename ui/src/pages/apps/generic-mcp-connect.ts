@@ -136,6 +136,12 @@ export function genericConnectGuidance(
         body: "It asked us to authenticate but didn't offer a sign-in Paperclip can complete on its own. Add the key or headers its docs list under Advanced authentication.",
         focus: "credentials",
       };
+    case "oauth_client_credentials_rejected":
+      return {
+        title: "The server rejected the token",
+        body: "Paperclip got a token from the token URL, but the server didn't accept it. Check the scope and audience its docs list.",
+        focus: "none",
+      };
     case "oauth_manual_client_required":
     case "oauth_manual_client_rebinding_required":
       return {
