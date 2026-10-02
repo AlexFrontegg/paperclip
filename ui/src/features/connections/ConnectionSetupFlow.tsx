@@ -96,7 +96,9 @@ import {
   genericConnectPayload,
   newCustomHeaderRow,
   oauthCallbackUrlForBrowser,
+  EMPTY_CLIENT_CREDENTIALS_FIELDS,
   type CustomHeaderRow,
+  type GenericClientCredentialsFields,
   type GenericConnectDraft,
   type GenericConnectGuidance,
   type GenericMcpAuthMode,
@@ -661,6 +663,7 @@ function StandardConnectionSetupFlow({
   const [linkHeaders, setLinkHeaders] = useState<CustomHeaderRow[]>(() => [newCustomHeaderRow()]);
   const [linkOAuthClientId, setLinkOAuthClientId] = useState("");
   const [linkOAuthClientSecret, setLinkOAuthClientSecret] = useState("");
+  const [linkClientCredentials, setLinkClientCredentials] = useState(EMPTY_CLIENT_CREDENTIALS_FIELDS);
   const [linkAdvancedOpen, setLinkAdvancedOpen] = useState(false);
   const [linkGuidance, setLinkGuidance] = useState<GenericConnectGuidance | null>(null);
   const [genericOAuthPending, setGenericOAuthPending] = useState(false);
@@ -874,6 +877,7 @@ function StandardConnectionSetupFlow({
     setLinkHeaders([newCustomHeaderRow()]);
     setLinkOAuthClientId("");
     setLinkOAuthClientSecret("");
+    setLinkClientCredentials(EMPTY_CLIENT_CREDENTIALS_FIELDS);
     setLinkAdvancedOpen(false);
     setLinkGuidance(null);
     setGenericOAuthPending(false);
@@ -1317,6 +1321,7 @@ function StandardConnectionSetupFlow({
           headers: linkHeaders,
           oauthClientId: linkOAuthClientId,
           oauthClientSecret: linkOAuthClientSecret,
+          clientCredentials: linkClientCredentials,
         });
         const connectionName = connectionNameForGrantKind(
           genericPayload.name ?? defaultGenericMcpName(linkUrl) ?? "Custom app",
@@ -2507,6 +2512,8 @@ function StandardConnectionSetupFlow({
           onOAuthClientIdChange={setLinkOAuthClientId}
           oauthClientSecret={linkOAuthClientSecret}
           onOAuthClientSecretChange={setLinkOAuthClientSecret}
+          clientCredentials={linkClientCredentials}
+          onClientCredentialsChange={setLinkClientCredentials}
           advancedOpen={linkAdvancedOpen}
           onAdvancedOpenChange={setLinkAdvancedOpen}
           guidance={linkGuidance}
@@ -3129,6 +3136,8 @@ function LinkConnectStep({
   onOAuthClientIdChange,
   oauthClientSecret,
   onOAuthClientSecretChange,
+  clientCredentials,
+  onClientCredentialsChange,
   advancedOpen,
   onAdvancedOpenChange,
   guidance,
@@ -3152,6 +3161,8 @@ function LinkConnectStep({
   onOAuthClientIdChange: (next: string) => void;
   oauthClientSecret: string;
   onOAuthClientSecretChange: (next: string) => void;
+  clientCredentials: GenericClientCredentialsFields;
+  onClientCredentialsChange: (next: GenericClientCredentialsFields) => void;
   advancedOpen: boolean;
   onAdvancedOpenChange: (next: boolean) => void;
   guidance: GenericConnectGuidance | null;
@@ -3175,7 +3186,9 @@ function LinkConnectStep({
     headers,
     oauthClientId,
     oauthClientSecret,
+    clientCredentials,
   };
+  const usesClientCredentials = authMode === "oauth_client_credentials";
   const canSubmit = canSubmitGenericConnect(draft);
   // PAP-659 bucket H: the address alone is the whole default path. `needsKey` is
   // now set by the server's probe after a credential challenge, never guessed at
@@ -3302,11 +3315,12 @@ function LinkConnectStep({
               </div>
             ) : null}
 
-            {authMode === "oauth" ? (
+            {authMode === "oauth" || usesClientCredentials ? (
               <div className="space-y-4">
                 <p className="text-xs text-muted-foreground">
-                  Paperclip sets sign-in up on its own whenever the server allows it. Only fill these in when the
-                  server's docs tell you to register Paperclip yourself first.
+                  {usesClientCredentials
+                    ? "Paperclip gets an access token from the token URL with this client ID and secret, and gets a new one when it expires."
+                    : "Paperclip sets sign-in up on its own whenever the server allows it. Only fill these in when the server's docs tell you to register Paperclip yourself first."}
                 </p>
                 <div>
                   <label className="text-sm font-medium text-foreground" htmlFor="generic-mcp-client-id">
@@ -3317,7 +3331,7 @@ function LinkConnectStep({
                     value={oauthClientId}
                     onChange={(e) => onOAuthClientIdChange(e.target.value)}
                     autoComplete="off"
-                    placeholder="Optional"
+                    placeholder={usesClientCredentials ? "Required" : "Optional"}
                     className="mt-2 h-11 font-mono"
                   />
                 </div>
@@ -3331,10 +3345,27 @@ function LinkConnectStep({
                     autoComplete="off"
                     value={oauthClientSecret}
                     onChange={(e) => onOAuthClientSecretChange(e.target.value)}
-                    placeholder="Optional"
+                    placeholder={usesClientCredentials ? "Required" : "Optional"}
                     className="mt-2 h-11 font-mono"
                   />
                 </div>
+                {usesClientCredentials
+                  ? CLIENT_CREDENTIALS_FIELDS.map((field) => (
+                      <div key={field.key}>
+                        <label className="text-sm font-medium text-foreground" htmlFor={`generic-mcp-${field.key}`}>
+                          {field.label}
+                        </label>
+                        <Input
+                          id={`generic-mcp-${field.key}`}
+                          value={clientCredentials[field.key]}
+                          onChange={(e) => onClientCredentialsChange({ ...clientCredentials, [field.key]: e.target.value })}
+                          autoComplete="off"
+                          placeholder={field.placeholder}
+                          className="mt-2 h-11 font-mono"
+                        />
+                      </div>
+                    ))
+                  : null}
               </div>
             ) : null}
           </CollapsibleContent>
@@ -3388,6 +3419,17 @@ const GENERIC_AUTH_MODE_OPTIONS: Array<{ mode: GenericMcpAuthMode; label: string
     label: "Browser sign-in",
     hint: "You\u2019ll sign in at the provider. Add a client ID and secret only if the provider requires you to register Paperclip first.",
   },
+  {
+    mode: "oauth_client_credentials",
+    label: "Client credentials",
+    hint: "For servers that accept an OAuth client ID and secret with no sign-in. The secret is stored as a Paperclip secret and can\u2019t be read back.",
+  },
+];
+
+const CLIENT_CREDENTIALS_FIELDS: Array<{ key: keyof GenericClientCredentialsFields; label: string; placeholder: string }> = [
+  { key: "tokenUrl", label: "Token URL", placeholder: "https://auth.example.com/oauth/token" },
+  { key: "scope", label: "Scope", placeholder: "Optional" },
+  { key: "audience", label: "Audience", placeholder: "Optional" },
 ];
 
 function SegmentedOption({

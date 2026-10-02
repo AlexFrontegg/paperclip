@@ -187,6 +187,14 @@ export function customHeaderError(rows: CustomHeaderRow[]): string | null {
   return null;
 }
 
+export interface GenericClientCredentialsFields {
+  tokenUrl: string;
+  scope: string;
+  audience: string;
+}
+
+export const EMPTY_CLIENT_CREDENTIALS_FIELDS: GenericClientCredentialsFields = { tokenUrl: "", scope: "", audience: "" };
+
 export interface GenericConnectDraft {
   link: string;
   name: string;
@@ -197,6 +205,7 @@ export interface GenericConnectDraft {
   headers: CustomHeaderRow[];
   oauthClientId: string;
   oauthClientSecret: string;
+  clientCredentials: GenericClientCredentialsFields;
 }
 
 export interface GenericConnectPayload {
@@ -204,7 +213,7 @@ export interface GenericConnectPayload {
   name?: string;
   authMode?: GenericMcpAuthMode;
   credentialValues?: Record<string, string>;
-  oauthClient?: { clientId: string; clientSecret?: string };
+  oauthClient?: { clientId: string; clientSecret?: string; tokenUrl?: string; scope?: string; audience?: string };
 }
 
 /**
@@ -230,6 +239,9 @@ export function genericConnectPayload(draft: GenericConnectDraft): GenericConnec
   const trimmedName = draft.name.trim();
   const clientId = draft.oauthClientId.trim();
   const clientSecret = draft.oauthClientSecret.trim();
+  const tokenUrl = draft.clientCredentials.tokenUrl.trim();
+  const scope = draft.clientCredentials.scope.trim();
+  const audience = draft.clientCredentials.audience.trim();
   return {
     link: draft.link,
     ...(trimmedName ? { name: trimmedName } : {}),
@@ -237,6 +249,17 @@ export function genericConnectPayload(draft: GenericConnectDraft): GenericConnec
     ...(Object.keys(credentialValues).length > 0 ? { credentialValues } : {}),
     ...(draft.authMode === "oauth" && clientId
       ? { oauthClient: { clientId, ...(clientSecret ? { clientSecret } : {}) } }
+      : {}),
+    ...(draft.authMode === "oauth_client_credentials"
+      ? {
+          oauthClient: {
+            clientId,
+            clientSecret,
+            tokenUrl,
+            ...(scope ? { scope } : {}),
+            ...(audience ? { audience } : {}),
+          },
+        }
       : {}),
   };
 }
@@ -249,6 +272,9 @@ export function canSubmitGenericConnect(draft: GenericConnectDraft): boolean {
   if (draft.authMode === "custom_headers") {
     const filled = draft.headers.filter((row) => row.name.trim() && row.value.trim());
     return filled.length > 0 && customHeaderError(draft.headers) === null;
+  }
+  if (draft.authMode === "oauth_client_credentials") {
+    return Boolean(draft.oauthClientId.trim() && draft.oauthClientSecret.trim() && draft.clientCredentials.tokenUrl.trim());
   }
   // "oauth" here means the operator is supplying a preregistered client, and
   // "none" means they are asserting the server is public — neither needs a value.
