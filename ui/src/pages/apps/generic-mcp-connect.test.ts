@@ -281,7 +281,13 @@ describe("canSubmitGenericConnect", () => {
       oauthClientSecret: "shh",
       clientCredentials: { ...EMPTY_CLIENT_CREDENTIALS_FIELDS, tokenUrl },
     });
-    for (const tokenUrl of ["auth.example.test/token", "ftp://auth.example.test/token", "https://user:pass@auth.example.test/token"]) {
+    for (const tokenUrl of [
+      "auth.example.test/token",
+      "ftp://auth.example.test/token",
+      "https://user:pass@auth.example.test/token",
+      "http://user:pass@10.0.0.5:3100/oauth/token",
+      "http://10.0.0.5:3100/oauth/token#section",
+    ]) {
       expect(clientCredentialsTokenUrlError(tokenUrl)).toBe("Enter a full token URL, such as https://auth.example.com/oauth/token.");
       expect(canSubmitGenericConnect(withTokenUrl(tokenUrl))).toBe(false);
     }

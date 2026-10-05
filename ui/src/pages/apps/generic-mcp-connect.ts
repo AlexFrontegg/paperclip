@@ -272,9 +272,10 @@ export function genericConnectPayload(draft: GenericConnectDraft): GenericConnec
 
 /** Catches a mistyped URL; whether plain http is allowed depends on the deployment, so the server decides that. */
 export function clientCredentialsTokenUrlError(tokenUrl: string): string | null {
-  if (!tokenUrl.trim()) return null;
-  const check = checkOAuthEndpointUrl(tokenUrl);
-  return check.ok || check.reason === "insecure_transport"
+  const trimmedTokenUrl = tokenUrl.trim();
+  if (!trimmedTokenUrl) return null;
+  // Exempting the URL's own origin skips only the http rule, so every other part is still checked
+  return checkOAuthEndpointUrl(trimmedTokenUrl, { allowInsecureOrigins: [trimmedTokenUrl] }).ok
     ? null
     : "Enter a full token URL, such as https://auth.example.com/oauth/token.";
 }
