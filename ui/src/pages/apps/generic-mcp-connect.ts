@@ -1,4 +1,4 @@
-import { checkMcpRemoteHeaderName, checkMcpRemoteHeaderValue, mcpRemoteHeaderRejectionMessage } from "@paperclipai/shared";
+import { checkMcpRemoteHeaderName, checkMcpRemoteHeaderValue, checkOAuthEndpointUrl, mcpRemoteHeaderRejectionMessage } from "@paperclipai/shared";
 import type { GenericMcpAuthMode } from "@paperclipai/shared";
 
 /**
@@ -270,6 +270,14 @@ export function genericConnectPayload(draft: GenericConnectDraft): GenericConnec
   };
 }
 
+/** The server makes the final check; this catches a typo before the operator submits. */
+export function clientCredentialsTokenUrlError(tokenUrl: string): string | null {
+  if (!tokenUrl.trim()) return null;
+  return checkOAuthEndpointUrl(tokenUrl, { allowInsecureLoopback: true }).ok
+    ? null
+    : "Enter a valid https:// token URL.";
+}
+
 /** Can "Check link" be pressed? */
 export function canSubmitGenericConnect(draft: GenericConnectDraft): boolean {
   if (!draft.link.trim()) return false;
@@ -280,7 +288,9 @@ export function canSubmitGenericConnect(draft: GenericConnectDraft): boolean {
     return filled.length > 0 && customHeaderError(draft.headers) === null;
   }
   if (draft.authMode === "oauth_client_credentials") {
-    return Boolean(draft.oauthClientId.trim() && draft.oauthClientSecret.trim() && draft.clientCredentials.tokenUrl.trim());
+    const { tokenUrl } = draft.clientCredentials;
+    return Boolean(draft.oauthClientId.trim() && draft.oauthClientSecret.trim() && tokenUrl.trim())
+      && clientCredentialsTokenUrlError(tokenUrl) === null;
   }
   // "oauth" here means the operator is supplying a preregistered client, and
   // "none" means they are asserting the server is public — neither needs a value.

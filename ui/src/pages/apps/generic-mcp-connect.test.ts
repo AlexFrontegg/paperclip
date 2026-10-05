@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_CLIENT_CREDENTIALS_FIELDS,
   canSubmitGenericConnect,
+  clientCredentialsTokenUrlError,
   customHeaderError,
   defaultGenericMcpName,
   endpointHost,
@@ -271,6 +272,21 @@ describe("canSubmitGenericConnect", () => {
     expect(canSubmitGenericConnect(draft(complete))).toBe(true);
     expect(canSubmitGenericConnect(draft({ ...complete, oauthClientSecret: "" }))).toBe(false);
     expect(canSubmitGenericConnect(draft({ ...complete, clientCredentials: EMPTY_CLIENT_CREDENTIALS_FIELDS }))).toBe(false);
+  });
+
+  it("rejects a malformed or insecure token URL before submission", () => {
+    const withTokenUrl = (tokenUrl: string) => draft({
+      authMode: "oauth_client_credentials",
+      oauthClientId: "cid",
+      oauthClientSecret: "shh",
+      clientCredentials: { ...EMPTY_CLIENT_CREDENTIALS_FIELDS, tokenUrl },
+    });
+    for (const tokenUrl of ["auth.example.test/token", "http://auth.example.test/token", "ftp://auth.example.test/token"]) {
+      expect(clientCredentialsTokenUrlError(tokenUrl)).toBe("Enter a valid https:// token URL.");
+      expect(canSubmitGenericConnect(withTokenUrl(tokenUrl))).toBe(false);
+    }
+    expect(clientCredentialsTokenUrlError("")).toBeNull();
+    expect(clientCredentialsTokenUrlError("https://auth.example.test/oauth/token")).toBeNull();
   });
 
   it("allows no-auth and browser sign-in without any value", () => {

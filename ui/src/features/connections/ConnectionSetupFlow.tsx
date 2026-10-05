@@ -89,6 +89,7 @@ import { parseGoogleSheetIds } from "@/pages/apps/google-sheets";
 import { connectionNameForGrantKind } from "@/pages/apps/connection-identity";
 import {
   canSubmitGenericConnect,
+  clientCredentialsTokenUrlError,
   customHeaderError,
   defaultGenericMcpName,
   endpointHost,
@@ -3189,6 +3190,7 @@ function LinkConnectStep({
     clientCredentials,
   };
   const usesClientCredentials = authMode === "oauth_client_credentials";
+  const tokenUrlError = usesClientCredentials ? clientCredentialsTokenUrlError(clientCredentials.tokenUrl) : null;
   const canSubmit = canSubmitGenericConnect(draft);
   // PAP-659 bucket H: the address alone is the whole default path. `needsKey` is
   // now set by the server's probe after a credential challenge, never guessed at
@@ -3363,6 +3365,9 @@ function LinkConnectStep({
                           placeholder={field.placeholder}
                           className="mt-2 h-11 font-mono"
                         />
+                        {field.key === "tokenUrl" && tokenUrlError ? (
+                          <p className="mt-1 text-xs text-destructive">{tokenUrlError}</p>
+                        ) : null}
                       </div>
                     ))
                   : null}
