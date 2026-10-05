@@ -10216,6 +10216,15 @@ export function toolAccessService(
     );
   }
 
+  /** The provider refused the refresh request; a timeout or server error leaves the refresh token usable. */
+  function isRejectedRefreshGrant(error: unknown) {
+    if (!(error instanceof HttpError)) return false;
+    const details = asRecord(error.details);
+    if (details.code === "oauth_reauthorization_required") return true;
+    const status = typeof details.status === "number" ? details.status : 0;
+    return details.code === "oauth_token_exchange_failed" && status >= 400 && status < 500 && status !== 429;
+  }
+
   /**
    * A client-credentials connection uses its refresh token first when the
    * provider issued one, and requests a new token with the client credentials
@@ -10237,7 +10246,7 @@ export function toolAccessService(
           grantType: "refresh_token" as const,
         };
       } catch (error) {
-        if (!clientCredentials || !(error instanceof HttpError)) throw error;
+        if (!clientCredentials || !isRejectedRefreshGrant(error)) throw error;
       }
     }
     return {

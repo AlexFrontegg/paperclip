@@ -305,6 +305,7 @@ function installClientCredentialsFixture() {
     mcpAuthorizations,
     issueRefreshToken: true,
     rejectRefreshToken: false,
+    failRefreshTokenTemporarily: false,
     revokeAccessToken() {
       acceptedAccessToken = null;
     },
@@ -317,6 +318,9 @@ function installClientCredentialsFixture() {
       tokenRequests.push(body);
       if (body.get("grant_type") === "refresh_token" && fixture.rejectRefreshToken) {
         return jsonResponse({ error: "invalid_grant" }, 400);
+      }
+      if (body.get("grant_type") === "refresh_token" && fixture.failRefreshTokenTemporarily) {
+        return jsonResponse({ error: "temporarily_unavailable" }, 503);
       }
       issuedTokens += 1;
       acceptedAccessToken = `cc-access-${issuedTokens}`;
@@ -1948,6 +1952,21 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
       const grant = await organizationGrant(connected.connectionId);
       expect(grant.status).toBe("active");
       expect(credentialPaths(grant)).toEqual(["oauth.access_token", "oauth.client_secret"]);
+    });
+
+    it("keeps the refresh token when the token URL fails temporarily", async () => {
+      const fixture = installClientCredentialsFixture();
+      const company = await createCompany(db);
+      const service = toolAccessService(db);
+      const connected = await service.connectGalleryApp(company.id, clientCredentialsInput);
+      await expireAccessToken(connected.connectionId);
+      fixture.failRefreshTokenTemporarily = true;
+
+      await service.refreshCatalog(connected.connectionId, { actorType: "user", actorId: "board-user" }).catch(() => undefined);
+
+      expect(fixture.tokenRequests.map((body) => body.get("grant_type"))).toEqual(["client_credentials", "refresh_token"]);
+      const grant = await organizationGrant(connected.connectionId);
+      expect(credentialPaths(grant)).toEqual(["oauth.access_token", "oauth.client_secret", "oauth.refresh_token"]);
     });
 
     it("renews the token when the MCP server rejects it before it expires", async () => {
