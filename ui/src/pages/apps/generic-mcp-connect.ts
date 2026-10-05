@@ -270,12 +270,13 @@ export function genericConnectPayload(draft: GenericConnectDraft): GenericConnec
   };
 }
 
-/** The server makes the final check; this catches a typo before the operator submits. */
+/** Catches a mistyped URL; whether plain http is allowed depends on the deployment, so the server decides that. */
 export function clientCredentialsTokenUrlError(tokenUrl: string): string | null {
   if (!tokenUrl.trim()) return null;
-  return checkOAuthEndpointUrl(tokenUrl, { allowInsecureLoopback: true }).ok
+  const check = checkOAuthEndpointUrl(tokenUrl);
+  return check.ok || check.reason === "insecure_transport"
     ? null
-    : "Enter a valid https:// token URL.";
+    : "Enter a full token URL, such as https://auth.example.com/oauth/token.";
 }
 
 /** Can "Check link" be pressed? */

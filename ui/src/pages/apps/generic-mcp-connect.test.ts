@@ -274,19 +274,22 @@ describe("canSubmitGenericConnect", () => {
     expect(canSubmitGenericConnect(draft({ ...complete, clientCredentials: EMPTY_CLIENT_CREDENTIALS_FIELDS }))).toBe(false);
   });
 
-  it("rejects a malformed or insecure token URL before submission", () => {
+  it("rejects a malformed token URL before submission and leaves the http policy to the server", () => {
     const withTokenUrl = (tokenUrl: string) => draft({
       authMode: "oauth_client_credentials",
       oauthClientId: "cid",
       oauthClientSecret: "shh",
       clientCredentials: { ...EMPTY_CLIENT_CREDENTIALS_FIELDS, tokenUrl },
     });
-    for (const tokenUrl of ["auth.example.test/token", "http://auth.example.test/token", "ftp://auth.example.test/token"]) {
-      expect(clientCredentialsTokenUrlError(tokenUrl)).toBe("Enter a valid https:// token URL.");
+    for (const tokenUrl of ["auth.example.test/token", "ftp://auth.example.test/token", "https://user:pass@auth.example.test/token"]) {
+      expect(clientCredentialsTokenUrlError(tokenUrl)).toBe("Enter a full token URL, such as https://auth.example.com/oauth/token.");
       expect(canSubmitGenericConnect(withTokenUrl(tokenUrl))).toBe(false);
     }
+    for (const tokenUrl of ["https://auth.example.test/oauth/token", "http://10.0.0.5:3100/oauth/token"]) {
+      expect(clientCredentialsTokenUrlError(tokenUrl)).toBeNull();
+      expect(canSubmitGenericConnect(withTokenUrl(tokenUrl))).toBe(true);
+    }
     expect(clientCredentialsTokenUrlError("")).toBeNull();
-    expect(clientCredentialsTokenUrlError("https://auth.example.test/oauth/token")).toBeNull();
   });
 
   it("allows no-auth and browser sign-in without any value", () => {
