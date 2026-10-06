@@ -1,6 +1,6 @@
 # 2026-10-06 Usage-Limit Fallback
 
-Status: Proposed
+Status: Implemented (v1)
 Date: 2026-10-06
 Related:
 - `doc/plans/2026-04-06-smart-model-routing.md` (mentions a fallback model slot as the better long-term shape)
@@ -103,7 +103,7 @@ reads `stateJson` today, so no migration is needed.
 
 ```ts
 { activeUntil: ISODate, activatedAt: ISODate, sourceRunId: string,
-  primaryAdapterType: string, reason: "provider_quota", fallbackRuns: number }
+  primaryAdapterType: string, fallbackAdapterType: string, reason: "provider_quota" }
 ```
 
 Writes are atomic (`jsonb_set`, keeping the later `activeUntil`), because an agent can
@@ -133,8 +133,13 @@ When it activates:
   `recovery/service.ts:530`).
 - Keep the normal short retry delay instead of `retryNotBefore`, and mark the
   retry context `usageLimitFallback: true`.
-- Log a run event and an activity entry, and post one issue comment such as
-  "Claude usage limit reached; continuing on Codex until 14:00".
+- Log a run event and an `agent.usage_limit_fallback_activated` activity entry.
+  No issue comment is posted: a comment authored by the agent could wake
+  watchers or be published to a chat channel. The agent header shows the
+  state instead (§7).
+- If the fallback account cannot be selected right now, the fallback is not
+  activated; the retry waits for the reset as before, and a run event records
+  why.
 
 A `provider_quota` failure on the fallback lane follows today's behaviour, which is
 to wait for its own reset. It never re-activates or extends the fallback.
@@ -149,11 +154,14 @@ adapterDispatch: { adapterType, lane: "primary" | "fallback",
                    primaryAdapterType, fallbackUntil? }
 ```
 
-- Lane = `fallback` if the state is active (`now < activeUntil`) and the fallback is
-  configured and enabled. Otherwise the lane is `primary`.
+- Lane = `fallback` if the state is active (`now < activeUntil`), the fallback is
+  configured and enabled, and its AI account can be selected. Otherwise the lane
+  is `primary`. Checking the account at claim keeps a broken fallback account
+  from failing the run as `configuration_incomplete`, which would escalate to
+  the board; instead the primary runs, hits its limit, and waits as before.
 - If the state has expired, clear it in the same transaction. This is the switch-back.
-- The lane is fixed for the life of the run. Hot restarts and retries of that
-  run keep it.
+- The lane is fixed for the life of the run, including hot restarts. A retry is
+  a new run, so its lane is decided again at its own claim.
 
 ### 5.4 Execution
 
@@ -189,11 +197,10 @@ with the effective agent's adapter, not the raw agent row:
 
 ### 5.6 Run display and attribution
 
-- Run lists take `adapterType` from the agent row (`routes/agents.ts:6920`,
-  `services/activity.ts:399`). The UI then parses transcripts with it
-  (`useLiveRunTranscripts.ts:550`, `AgentDetail.tsx:4418`). Change both APIs to
-  return the run's dispatched adapter, so Codex runs render with the Codex
-  parser.
+- Live and issue run lists return the run's dispatched adapter, falling back to
+  the agent row for older runs. Run list and run detail responses also carry
+  `dispatchedAdapterType`, which the agent page's log viewer uses, so fallback
+  runs render with the fallback adapter's parser.
 - Costs already record provider, model and biller from the adapter result
   (`heartbeat.ts:19948-20022`). Fallback runs are attributed to the fallback
   account through `context.aiConnection` when a binding is set.
@@ -230,9 +237,10 @@ switch loses little.
   - The text "Switches back when the primary limit resets".
 - Saving goes through `buildAgentUpdatePatch` (`ui/src/lib/agent-config-patch.ts`)
   as part of `runtimeConfig`.
-- Agent header (`ui/src/pages/AgentDetail.tsx:1249-1255`) shows a badge
-  "Running on fallback (Codex) until 14:00" while active, and an optional
-  "Return to primary now" action that clears the state.
+- Agent header (`ui/src/pages/AgentDetail.tsx`) shows "Usage limit reached:
+  running on Codex until <time>" while active, with a "Return to <primary>"
+  action (`POST /agents/:id/usage-limit-fallback/clear`, board only, logged as
+  `agent.usage_limit_fallback_cleared`).
 - Run cards and lists show the adapter actually used.
 
 ## 8. Testing
@@ -266,6 +274,13 @@ switch loses little.
 - Follow-up (v1.1): probe the primary's usage (`probeAiConnectionUsage`,
   `ai-connection-usage.ts:331`) for subscription connections. That allows
   switching back early, and setting `activeUntil` from the real weekly reset time.
+
+- A fallback to a second account on the same adapter shares that adapter's
+  task sessions. A session from the other account cannot be resumed, so the
+  adapter retries with a fresh session, which costs one attempt.
+- Stop metadata built outside a run (cancel, reaper) uses the agent row's
+  adapter. That is harmless for the `claude_local`/`codex_local` pair, which
+  share the same stop handling.
 
 ## 10. Rollout
 

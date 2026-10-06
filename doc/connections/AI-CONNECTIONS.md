@@ -218,6 +218,31 @@ units, absent percentages, and proto3 zero messages. The disposable database
 and encrypted vault were removed. These checks started no provider turn and
 exchanged no refresh tokens.
 
+## Usage-limit fallback
+
+An agent on `claude_local` or `codex_local` can name a fallback in
+`runtimeConfig.usageLimitFallback`: another of those adapters, an optional AI
+account for it, and a model. The agent's Adapter section sets it up under
+**Switch when the usage limit is reached**.
+
+When a run on the primary fails with `provider_quota`, Paperclip turns on the
+fallback until the provider's reset time (one hour if the provider gives none)
+and retries immediately on the fallback. The agent row, its role, chat bindings
+and tasks do not change. Each run records the adapter it used in
+`adapterDispatch`. The first run claimed after the reset time uses the primary
+again. If the fallback account cannot be selected, the fallback is not used and
+the retry waits for the reset as before.
+
+The fallback inherits the primary's instructions, skills, working directory,
+environment, workspace, confinement and timeouts. Adapter-specific settings
+such as model, effort and command come from the fallback config. A switched run
+starts a fresh provider session from the task's history; provider sessions never
+move between adapters.
+
+The agent header shows when the fallback is active. **Return to <primary>**
+(`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:
+[usage-limit fallback plan](../plans/2026-10-06-usage-limit-fallback.md).
+
 ## Runtime isolation
 
 Provider authentication failures, including `acpx_auth_required`, adapter login
