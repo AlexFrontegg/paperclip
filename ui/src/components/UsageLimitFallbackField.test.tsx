@@ -82,6 +82,25 @@ describe("UsageLimitFallbackField", () => {
   });
 });
 
+describe("UsageLimitFallbackField safety controls", () => {
+  const enabledCodex: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset" };
+
+  it("still lets the user turn the fallback off after switching the primary to an unsupported adapter", async () => {
+    await mountField({ primaryAdapterType: "gemini_local", value: enabledCodex });
+    expect(container.textContent).toContain("works only with Claude Code and Codex agents");
+    flushSync(() => container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-toggle']")!.click());
+    expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, enabled: false });
+  });
+
+  it("shows the Codex bypass setting explicitly and lets the user turn it off", async () => {
+    await mountField({ value: enabledCodex });
+    const toggle = container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-codex-bypass']");
+    expect(toggle).not.toBeNull();
+    flushSync(() => toggle!.click());
+    expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, adapterConfig: { dangerouslyBypassApprovalsAndSandbox: false } });
+  });
+});
+
 describe("UsageLimitFallbackStatus", () => {
   const stateJson = (activeUntil: string) => ({ usageLimitFallback: {
     activeUntil,

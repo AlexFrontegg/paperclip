@@ -67,7 +67,11 @@ New optional key in `agents.runtimeConfig` (the schema already accepts extra key
 usageLimitFallback?: {
   enabled: boolean;
   adapterType: "claude_local" | "codex_local";   // v1 allow-list
-  adapterConfig: { model?: string; [effortKey]?: string };  // fallback-specific keys only
+  adapterConfig: {                               // engine-specific keys only (strict)
+    model?, effort?, modelReasoningEffort?, fastMode?, search?, chrome?,
+    maxTurnsPerRun?, dangerouslySkipPermissions?,
+    dangerouslyBypassApprovalsAndSandbox?, networkAllowlist?
+  };
   aiConnection?: AiConnectionBinding;            // validated for the fallback adapter
   switchBack: "on_reset";                        // v1: only option
 }
@@ -76,20 +80,29 @@ usageLimitFallback?: {
 - The fallback may use the same adapter as the primary with a different account
   (for example a second Claude subscription or an Anthropic API key), or a
   different adapter (Claude Code → Codex).
-- Effective fallback `adapterConfig` = the shared keys inherited from the primary
-  config (`paperclipSkillSync`, instructions keys from `agent-instructions.ts:11-14`,
-  `cwd`, `workspaceStrategy`, env), plus the fallback-specific keys, normalized
-  with the same per-adapter save-time code the primary uses
-  (`server/src/routes/agents.ts:2545, 2966, 3096`). This keeps skills and
-  instructions on the fallback.
+- The fallback can never set paths, commands, env or workspace settings; those
+  always come from the primary. That keeps the agent-key guards on the primary
+  config (no host workspace commands, no instruction paths) the only way to set
+  them, and keeps secrets out of the fallback block.
+- Effective fallback `adapterConfig`:
+  - same adapter (a second account): the whole primary config plus the fallback
+    keys, so permissions, turn caps and commands stay as configured;
+  - another adapter: the shared keys (`paperclipSkillSync`, instructions keys,
+    `cwd`, workspace, env, confinement, timeouts) plus the fallback keys. The
+    primary's provider credentials, homes and routing (`AI_AUTH_ENV_KEYS`) are
+    removed from the inherited env.
+- Saving applies the adapter's create defaults to the fallback keys, so a Codex
+  fallback gets `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent;
+  the UI shows that setting explicitly.
 
 Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`):
 
 - The fallback adapter must be in the v1 allow-list and selectable
   (`assertSelectableAdapterType`).
 - `isAiConnectionCompatible` and `validateManagedAgentBinding(...fallback.adapterType...)`
-  must pass for the fallback binding. This is checked on every save, not only when the
-  primary is unhealthy.
+  must pass for the fallback binding whenever the fallback is enabled, including
+  when a fallback saved as disabled is turned on. Create and hire install the
+  fallback account for the new agent, like the primary account.
 - A PATCH that omits `usageLimitFallback` preserves it, like `aiConnection`
   (`routes/agents.ts:5562`).
 
@@ -154,14 +167,23 @@ adapterDispatch: { adapterType, lane: "primary" | "fallback",
                    primaryAdapterType, fallbackUntil? }
 ```
 
-- Lane = `fallback` if the state is active (`now < activeUntil`), the fallback is
-  configured and enabled, and its AI account can be selected. Otherwise the lane
-  is `primary`. Checking the account at claim keeps a broken fallback account
-  from failing the run as `configuration_incomplete`, which would escalate to
-  the board; instead the primary runs, hits its limit, and waits as before.
-- If the state has expired, clear it in the same transaction. This is the switch-back.
+- Lane = `fallback` if the state is active (`now < activeUntil`), not suspended,
+  the fallback is configured and enabled, and this run's responsible user can use
+  its AI account. Otherwise the lane is `primary`.
+- An expired state or a changed config is cleared here; this is the switch-back.
+  A suspended state, or an account this run's user cannot use, sends only this
+  run to the primary and leaves the agent's state in place, so one run cannot
+  flip the whole agent.
 - The lane is fixed for the life of the run, including hot restarts. A retry is
   a new run, so its lane is decided again at its own claim.
+
+### 5.3a When the fallback itself cannot run
+
+A fallback-lane run that fails with `configuration_incomplete` or an AI sign-in
+failure suspends the fallback for the rest of the window (`suspendedReason`).
+Its retry is scheduled for `activeUntil`, the primary's reset, so the agent
+waits as it would without a fallback instead of failing every run or
+escalating to the board. A suspended state is not reactivated until it expires.
 
 ### 5.4 Execution
 
@@ -189,9 +211,16 @@ with the effective agent's adapter, not the raw agent row:
     matches the run's effective adapter.
   - Explicit resume params from a prior run (`heartbeat.ts:27112-27123`): drop
     them when the prior run's lane adapter differs from this run's.
-- Switch back: when a primary-lane run's task session is older than fallback runs
-  on the same task key, force a fresh session with handoff. Otherwise Claude would
-  resume a conversation that is missing the Codex turns.
+- After a fallback turn, the primary's task session for that task is cleared,
+  so the primary resumes fresh with the handoff after the switch-back.
+- A new activation (not an extension) clears the fallback adapter's task
+  sessions, so a later window never resumes a conversation that misses the
+  primary's turns since. A user session reset clears the task's sessions for
+  every adapter.
+- A fallback run with no managed account drops the primary's account
+  attribution that the retry copied, and sign-in recovery resolves the account
+  through the run's lane, so a fallback sign-in failure never marks the
+  primary's account for reconnection.
 - `updateRuntimeState` (`heartbeat.ts:19985`) records the effective adapter
   together with the session id, so the guard above stays correct.
 
@@ -278,9 +307,14 @@ switch loses little.
 - A fallback to a second account on the same adapter shares that adapter's
   task sessions. A session from the other account cannot be resumed, so the
   adapter retries with a fresh session, which costs one attempt.
-- Stop metadata built outside a run (cancel, reaper) uses the agent row's
-  adapter. That is harmless for the `claude_local`/`codex_local` pair, which
-  share the same stop handling.
+- Activation happens only in the bounded transient retry path: a quota failure
+  after its retry budget is used up waits for the reset, and switching uses one
+  of the two bounded attempts.
+- A fallback-lane quota failure waits for the fallback's own reset even if the
+  primary resets earlier.
+- Telemetry, Sentry reports and the run detail header still label runs with the
+  agent's adapter; cancel, the run lists, the log viewer and the issue live view
+  use the run's dispatched adapter.
 
 ## 10. Rollout
 

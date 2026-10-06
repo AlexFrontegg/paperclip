@@ -51,7 +51,23 @@ export function UsageLimitFallbackField({
     enabled: enabled,
   });
 
-  if (!isUsageLimitFallbackAdapterType(primaryAdapterType)) return null;
+  if (!isUsageLimitFallbackAdapterType(primaryAdapterType)) {
+    if (!enabled || !value) return null;
+    // Keep a way to turn off a fallback that the new primary adapter cannot use, or saving would be blocked.
+    return (
+      <div className="space-y-2 rounded-md border border-destructive/40 px-3 py-2.5" data-testid="usage-limit-fallback">
+        <p className="text-xs text-destructive">
+          The usage-limit fallback works only with Claude Code and Codex agents. Turn it off to save this adapter.
+        </p>
+        <ToggleField
+          label="Switch when the usage limit is reached"
+          checked
+          onChange={(next) => onChange({ ...value, enabled: next })}
+          toggleTestId="usage-limit-fallback-toggle"
+        />
+      </div>
+    );
+  }
 
   const base: UsageLimitFallbackConfig = value ?? {
     enabled: false,
@@ -101,6 +117,15 @@ export function UsageLimitFallbackField({
             value={base.aiConnection}
             onChange={(binding) => onChange({ ...base, aiConnection: binding })}
           />
+          {fallbackAdapterType === "codex_local" && (
+            <ToggleField
+              label="Bypass Codex approvals and sandbox"
+              hint="Matches new Codex agents. Turn off to keep Codex's own approval prompts and sandbox for fallback runs."
+              checked={base.adapterConfig.dangerouslyBypassApprovalsAndSandbox !== false}
+              onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslyBypassApprovalsAndSandbox: next } })}
+              toggleTestId="usage-limit-fallback-codex-bypass"
+            />
+          )}
           <Field label="Fallback model">
             <ModelDropdown
               models={models}

@@ -233,11 +233,15 @@ and tasks do not change. Each run records the adapter it used in
 again. If the fallback account cannot be selected, the fallback is not used and
 the retry waits for the reset as before.
 
-The fallback inherits the primary's instructions, skills, working directory,
-environment, workspace, confinement and timeouts. Adapter-specific settings
-such as model, effort and command come from the fallback config. A switched run
-starts a fresh provider session from the task's history; provider sessions never
-move between adapters.
+The fallback config holds only engine-specific settings (model, effort, the
+sandbox and permission flags, turn cap, network allowlist). A fallback on
+another adapter inherits the primary's instructions, skills, working directory,
+environment, workspace, confinement and timeouts, minus the primary's provider
+credentials; a second account on the same adapter inherits everything. A
+switched run starts a fresh provider session from the task's history; provider
+sessions never move between adapters. If the fallback cannot run (sign-in or
+configuration failure), it is suspended until the primary resets and the work
+waits as it would without a fallback.
 
 The agent header shows when the fallback is active. **Return to <primary>**
 (`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:

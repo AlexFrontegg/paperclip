@@ -47,6 +47,11 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
     patch.replaceAdapterConfig = true;
   }
 
+  // Runtime fields first, so heartbeat and debug edits in the same save merge on top instead of being replaced.
+  if (Object.keys(overlay.runtime).length > 0) {
+    Object.assign(patch, overlay.runtime);
+  }
+
   if (
     Object.keys(overlay.heartbeat).length > 0
     || Object.keys(overlay.debug).length > 0
@@ -71,10 +76,6 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
     }
 
     patch.runtimeConfig = nextRuntimeConfig;
-  }
-
-  if (Object.keys(overlay.runtime).length > 0) {
-    Object.assign(patch, overlay.runtime);
   }
 
   return patch;
