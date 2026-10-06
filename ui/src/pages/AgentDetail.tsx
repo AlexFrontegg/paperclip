@@ -65,6 +65,7 @@ import { formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../li
 import { cn } from "../lib/utils";
 import { describeRunRetryState } from "../lib/runRetryState";
 import { Button } from "@/components/ui/button";
+import { UsageLimitFallbackStatus } from "../components/UsageLimitFallbackField";
 import { Tabs } from "@/components/ui/tabs";
 import { PageTabBar } from "../components/PageTabBar";
 import { AuditFeed } from "./audit/AuditFeed";
@@ -913,6 +914,10 @@ export function AgentDetail() {
     queryFn: () => agentsApi.runtimeState(resolvedAgentId!, resolvedCompanyId ?? undefined),
     enabled: Boolean(resolvedAgentId) && needsOverviewData,
   });
+  const clearUsageLimitFallback = useMutation({
+    mutationFn: () => agentsApi.clearUsageLimitFallback(resolvedAgentId!, resolvedCompanyId ?? undefined),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(resolvedAgentId ?? routeAgentRef) }),
+  });
 
   const { data: heartbeats } = useQuery({
     queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
@@ -1252,6 +1257,11 @@ export function AgentDetail() {
                 : null}
               <span>{getAdapterDisplay(agent.adapterType).label}</span><span>·</span>
               <span>{agent.title || roleLabels[agent.role] || agent.role}</span>
+              <UsageLimitFallbackStatus
+                stateJson={runtimeState?.stateJson}
+                pending={clearUsageLimitFallback.isPending}
+                onReturnToPrimary={() => clearUsageLimitFallback.mutate()}
+              />
             </div>
           </div>
         </div>
@@ -4415,7 +4425,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
   // on adapterType alone would stale the transcript with the fallback parser.
   // We subscribe to adapter registry changes to force transcript recomputation.
   const [parserTick, setParserTick] = useState(0);
-  const adapter = getUIAdapter(adapterType);
+  const adapter = getUIAdapter(run.dispatchedAdapterType ?? adapterType);
 
   useEffect(() => {
     return onAdapterChange(() => setParserTick((t) => t + 1));

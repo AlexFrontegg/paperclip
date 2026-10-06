@@ -223,6 +223,8 @@ export const agentsApi = {
     api.get<AgentTaskSession[]>(agentPath(id, companyId, "/task-sessions")),
   resetSession: (id: string, taskKey?: string | null, companyId?: string) =>
     api.post<void>(agentPath(id, companyId, "/runtime-state/reset-session"), { taskKey: taskKey ?? null }),
+  clearUsageLimitFallback: (id: string, companyId?: string) =>
+    api.post<AgentRuntimeState>(agentPath(id, companyId, "/usage-limit-fallback/clear"), {}),
   adapterModels: (
     companyId: string,
     type: string,

@@ -6,7 +6,7 @@ import express from "express";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, companyMemberships, createDb, heartbeatRuns, principalPermissionGrants } from "@paperclipai/db";
+import { agentRuntimeState, agents, companies, companyMemberships, createDb, heartbeatRuns, principalPermissionGrants } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentRoutes } from "../routes/agents.js";
 import { errorHandler } from "../middleware/index.js";
@@ -149,6 +149,36 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     const response = await patch(f.app, f.agentId, { adapterType: "gemini_local", adapterConfig: {} });
     expect(response.status).toBe(422);
     expect(JSON.stringify(response.body)).toMatch(/supported only for claude_local and codex_local/);
+  });
+
+  it("lets a board user return the agent to its primary right away", async () => {
+    const f = await fixture();
+    await db.insert(agentRuntimeState).values({
+      agentId: f.agentId,
+      companyId: f.companyId,
+      adapterType: "claude_local",
+      stateJson: { usageLimitFallback: {
+        activeUntil: "2030-04-22T21:00:00.000Z",
+        activatedAt: "2030-04-22T09:00:00.000Z",
+        sourceRunId: randomUUID(),
+        primaryAdapterType: "claude_local",
+        fallbackAdapterType: "codex_local",
+        reason: "provider_quota",
+      } },
+    });
+    const board = express();
+    board.use(express.json());
+    board.use((req, _res, next) => {
+      req.actor = { type: "board", userId: f.userId, companyIds: [f.companyId], source: "local_implicit", isInstanceAdmin: true };
+      next();
+    });
+    board.use("/api", agentRoutes(db));
+    board.use(errorHandler);
+    const response = await request(board).post(`/api/agents/${f.agentId}/usage-limit-fallback/clear`).send({});
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.stateJson).not.toHaveProperty("usageLimitFallback");
+    const [row] = await db.select().from(agentRuntimeState).where(eq(agentRuntimeState.agentId, f.agentId));
+    expect(row!.stateJson).not.toHaveProperty("usageLimitFallback");
   });
 
   it("allows a disabled fallback with any primary", async () => {

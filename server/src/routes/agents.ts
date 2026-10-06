@@ -9,6 +9,8 @@ import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnecti
 import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, type UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
 import { aiConnectionService } from "../services/ai-connections.js";
+import { clearUsageLimitFallbackState } from "../services/usage-limit-fallback.js";
+import { claimedAdapterType } from "../services/conversation-continuation.js";
 import { defaultAiConnectionForHire } from "../services/agent-ai-connection-default.js";
 import { assertAiConnectionCreateAccess, canInstallSharedAiConnectionForNewAgent, responsibleUserForAiRequest, validateAiApiKey } from "./ai-connections.js";
 import { isAiConnectionCompatible } from "@paperclipai/shared";
@@ -4507,6 +4509,25 @@ export function agentRoutes(
     res.json(state);
   });
 
+  router.post("/agents/:id/usage-limit-fallback/clear", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
+    if (!agent) return;
+    await assertBoardCanManageAgentsForCompany(req, agent.companyId);
+    await clearUsageLimitFallbackState(db, id);
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "agent.usage_limit_fallback_cleared",
+      entityType: "agent",
+      entityId: id,
+      details: {},
+    });
+    res.json(await heartbeat.getRuntimeState(id));
+  });
+
   // Fingerprint the whole validated hire request so a retried POST inside the
   // same run (e.g. an agent that misread the 201 body and re-sent the payload)
   // resolves to the hire it already created instead of spawning a "Name 2"
@@ -7100,7 +7121,7 @@ export function agentRoutes(
       run.companyId,
       run.id,
       redactCurrentUserValue(
-        { ...decoratedRun, execution: await executionProjectionForRun(db, run.companyId, run.id), identityHistory: await listRunIdentityContexts(db, run.companyId, run.id), retryExhaustedReason, outputSilence: await heartbeat.buildRunOutputSilence(run) },
+        { ...decoratedRun, dispatchedAdapterType: claimedAdapterType(run), execution: await executionProjectionForRun(db, run.companyId, run.id), identityHistory: await listRunIdentityContexts(db, run.companyId, run.id), retryExhaustedReason, outputSilence: await heartbeat.buildRunOutputSilence(run) },
         await getCurrentUserRedactionOptions(),
       ),
     ));

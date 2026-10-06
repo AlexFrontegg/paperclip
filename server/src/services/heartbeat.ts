@@ -3381,6 +3381,9 @@ const heartbeatRunSummaryListColumns = {
 } as const;
 
 const heartbeatRunListContextColumns = {
+  dispatchedAdapterType: sql<
+    string | null
+  >`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
   contextIssueId: sql<
     string | null
   >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("contextIssueId"),
