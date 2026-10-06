@@ -1,5 +1,6 @@
 import { agentAppearanceSchema } from "../agent-appearance.js";
 import { aiConnectionBindingSchema } from "../ai-connections.js";
+import { usageLimitFallbackConfigSchema } from "../usage-limit-fallback.js";
 import { z } from "zod";
 import {
   AGENT_ICON_NAMES,
@@ -71,6 +72,7 @@ export const createAgentInstructionsBundleSchema = z.object({
 
 export const agentRuntimeConfigSchema = z.object({
   aiConnection: aiConnectionBindingSchema.optional(),
+  usageLimitFallback: usageLimitFallbackConfigSchema.optional(),
   debug: z.object({
     providerTrace: z.literal("raw").optional(),
   }).strict().optional(),
