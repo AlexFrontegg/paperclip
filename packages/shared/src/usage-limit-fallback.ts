@@ -60,13 +60,11 @@ export const usageLimitFallbackStateSchema = z.object({
   primaryAdapterType: z.string().min(1),
   fallbackAdapterType: z.string().min(1),
   reason: z.literal("provider_quota"),
-  notifiedIssueIds: z.array(z.string()).default([]),
 });
 
 export type UsageLimitFallbackState = z.infer<typeof usageLimitFallbackStateSchema>;
 
 export const USAGE_LIMIT_FALLBACK_STATE_KEY = "usageLimitFallback";
-export const USAGE_LIMIT_FALLBACK_MAX_NOTIFIED_ISSUES = 200;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

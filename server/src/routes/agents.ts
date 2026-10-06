@@ -7005,7 +7005,8 @@ export function agentRoutes(
       agentId: heartbeatRuns.agentId,
       agentName: agentsTable.name,
       agentAppearance: agentsTable.appearance,
-      adapterType: agentsTable.adapterType,
+      // The adapter the run actually used; a usage-limit fallback run differs from the agent row.
+      adapterType: sql<string>`coalesce(${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType', ${agentsTable.adapterType})`.as("adapterType"),
       logBytes: heartbeatRuns.logBytes,
       livenessState: heartbeatRuns.livenessState,
       livenessReason: heartbeatRuns.livenessReason,
@@ -7654,7 +7655,8 @@ export function agentRoutes(
         agentId: heartbeatRuns.agentId,
         agentName: agentsTable.name,
         agentAppearance: agentsTable.appearance,
-        adapterType: agentsTable.adapterType,
+        // The adapter the run actually used; a usage-limit fallback run differs from the agent row.
+        adapterType: sql<string>`coalesce(${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType', ${agentsTable.adapterType})`.as("adapterType"),
         logBytes: heartbeatRuns.logBytes,
         livenessState: heartbeatRuns.livenessState,
         livenessReason: heartbeatRuns.livenessReason,

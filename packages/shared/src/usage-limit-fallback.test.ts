@@ -122,8 +122,8 @@ describe("usage-limit fallback state", () => {
     reason: "provider_quota",
   };
 
-  it("reads the state from agent runtime stateJson and defaults notifiedIssueIds", () => {
-    expect(readUsageLimitFallbackState({ usageLimitFallback: state })).toEqual({ ...state, notifiedIssueIds: [] });
+  it("reads the state from agent runtime stateJson", () => {
+    expect(readUsageLimitFallbackState({ usageLimitFallback: state })).toEqual(state);
     expect(readUsageLimitFallbackState({})).toBeNull();
     expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, reason: "other" } })).toBeNull();
   });
