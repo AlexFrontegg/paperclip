@@ -155,6 +155,22 @@ describe("usageLimitFallbackConfigProblem", () => {
     })).toMatch(/different adapter or a different AI account/);
   });
 
+  it("rejects the same account even when the binding keys are in a different order", () => {
+    const reordered = {
+      grantId: sharedClaudeBinding.grantId,
+      connectionId: sharedClaudeBinding.connectionId,
+      mode: "shared",
+      method: "subscription",
+      provider: "anthropic",
+    } as const;
+    const fallback = { ...codexFallback, adapterType: "claude_local" as const, aiConnection: reordered };
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "claude_local",
+      primaryAiConnection: sharedClaudeBinding,
+      fallback,
+    })).toMatch(/different adapter or a different AI account/);
+  });
+
   it("rejects a primary adapter outside the allow-list", () => {
     expect(usageLimitFallbackConfigProblem({ primaryAdapterType: "paperclip_runner", fallback: codexFallback })).toMatch(/supported only/);
   });

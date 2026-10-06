@@ -107,8 +107,21 @@ export function buildUsageLimitFallbackAdapterConfig(
   return { ...inherited, ...fallback.adapterConfig };
 }
 
-function sameBinding(left: AiConnectionBinding | undefined, right: AiConnectionBinding | undefined): boolean {
-  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** Compares JSON values regardless of object key order, since jsonb does not preserve it. */
+export function sameJsonValue(left: unknown, right: unknown): boolean {
+  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
+}
+
+export function sameAiConnectionBinding(left: AiConnectionBinding | undefined, right: AiConnectionBinding | undefined): boolean {
+  return sameJsonValue(left, right);
 }
 
 /** Explains why a fallback cannot be used with this primary, or returns null when it can. */
@@ -120,7 +133,7 @@ export function usageLimitFallbackConfigProblem(input: {
   if (!isUsageLimitFallbackAdapterType(input.primaryAdapterType)) {
     return `Usage-limit fallback is supported only for ${USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.join(" and ")} agents`;
   }
-  if (input.fallback.adapterType === input.primaryAdapterType && sameBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
+  if (input.fallback.adapterType === input.primaryAdapterType && sameAiConnectionBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
     return "The fallback must use a different adapter or a different AI account than the primary";
   }
   return null;
