@@ -31,6 +31,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const executions: Execution[] = [];
   let claudeHitsLimit = true;
+  let codexErrorCode: string | null = null;
 
   function record(adapterType: string, ctx: AdapterExecutionContext) {
     executions.push({
@@ -75,7 +76,16 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       ...codex,
       execute: async (ctx) => {
         record("codex_local", ctx);
-        return { exitCode: 0, signal: null, timedOut: false };
+        if (!codexErrorCode) return { exitCode: 0, signal: null, timedOut: false };
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: "Codex is not signed in.",
+          errorCode: codexErrorCode,
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+        };
       },
     });
   }, 30_000);
@@ -84,6 +94,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     executions.length = 0;
     claudeHitsLimit = true;
+    codexErrorCode = null;
   });
 
   afterAll(async () => {
@@ -219,6 +230,56 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(sessions.filter((session) => session.adapterType === "claude_local" && session.taskKey === taskKey)).toEqual([]);
   });
 
+  async function activeFallback(agent: typeof agents.$inferSelect, until = RESET_AT) {
+    const activation = await activateUsageLimitFallback(db, {
+      agent,
+      run: { id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null } as typeof heartbeatRuns.$inferSelect,
+      retryNotBefore: new Date(until),
+      now: new Date(),
+    });
+    expect(activation.activated).toBe(true);
+  }
+
+  it("suspends a fallback that cannot sign in and makes the retry wait for the primary's reset", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    codexErrorCode = "codex_auth_required";
+    const run = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+    const failed = await waitForRun(run!.id);
+    expect(failed.errorCode).toBe("codex_auth_required");
+    const retry = await retryOf(run!.id);
+    expect(retry.scheduledRetryAt!.toISOString()).toBe(RESET_AT);
+    expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBe("codex_auth_required");
+    expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
+  });
+
+  it("drops the primary's account attribution from a fallback run that has no managed account", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    const run = await heartbeat.invoke(agent.id, "on_demand", {
+      aiConnection: { provider: "anthropic", method: "subscription", connectionId: randomUUID(), grantId: randomUUID(), identity: "primary" },
+    }, "manual");
+    const finished = await waitForRun(run!.id);
+    expect(dispatchOf(finished)?.lane).toBe("fallback");
+    expect((finished.contextSnapshot as Record<string, unknown>).aiConnection).toBeUndefined();
+  });
+
+  it("starts the fallback fresh in a new window by clearing its old task sessions", async () => {
+    const agent = await seedAgent();
+    await db.insert(agentTaskSessions).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: "codex_local",
+      taskKey: "issue-task",
+      sessionParamsJson: { sessionId: "codex-old-window" },
+      sessionDisplayId: "codex-old-window",
+    });
+    await activeFallback(agent);
+    const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+    expect(sessions.filter((session) => session.adapterType === "codex_local")).toEqual([]);
+  });
+
   describe("state", () => {
     const quotaRun = (overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) =>
       ({ id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null, ...overrides }) as typeof heartbeatRuns.$inferSelect;
@@ -270,7 +331,44 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     });
   });
 
+  it("sends only this run to the primary when its user cannot use the fallback account, and keeps the agent's fallback", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    const withAccount = {
+      ...agent,
+      runtimeConfig: { ...(agent.runtimeConfig as Record<string, unknown>), usageLimitFallback: { ...codexFallback, aiConnection: { provider: "openai", method: "api_key", mode: "responsible_user" } } },
+    } as typeof agent;
+    expect(await resolveAdapterDispatchForClaim(db, withAccount, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
+  });
+
   describe("effectiveAgentForRun", () => {
+    it("strips the primary's provider credentials and routing from a fallback on another adapter", async () => {
+      const agent = await seedAgent();
+      const withEnv = {
+        ...agent,
+        adapterConfig: { ...(agent.adapterConfig as Record<string, unknown>), env: { ANTHROPIC_API_KEY: { type: "plain", value: "x" }, ANTHROPIC_BASE_URL: { type: "plain", value: "https://proxy" }, CLAUDE_CONFIG_DIR: { type: "plain", value: "/c" }, GITHUB_TOKEN: { type: "plain", value: "g" } } },
+      } as typeof agent;
+      const effective = effectiveAgentForRun(withEnv, { runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback" } } });
+      expect(Object.keys((effective.adapterConfig as Record<string, any>).env)).toEqual(["GITHUB_TOKEN"]);
+    });
+
+    it("keeps every primary setting for a second account on the same adapter", async () => {
+      const agent = await seedAgent({
+        aiConnection: { provider: "anthropic", method: "api_key", mode: "responsible_user" },
+        usageLimitFallback: {
+          enabled: true,
+          adapterType: "claude_local",
+          adapterConfig: {},
+          aiConnection: { provider: "anthropic", method: "subscription", mode: "responsible_user" },
+          switchBack: "on_reset",
+        },
+      });
+      const effective = effectiveAgentForRun(agent, { runnerProfileJson: { adapterDispatch: { adapterType: "claude_local", lane: "fallback" } } });
+      expect(effective.adapterConfig).toEqual(agent.adapterConfig);
+      expect((effective.runtimeConfig as Record<string, unknown>).aiConnection).toEqual({ provider: "anthropic", method: "subscription", mode: "responsible_user" });
+    });
+
     it("overlays the fallback and removes the primary's AI connection when the fallback has none", async () => {
       const agent = await seedAgent({
         aiConnection: { provider: "anthropic", method: "api_key", mode: "responsible_user" },

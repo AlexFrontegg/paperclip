@@ -38,7 +38,7 @@ import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
-import { activateUsageLimitFallback, effectiveAgentForRun, readRunAdapterDispatch, resolveAdapterDispatchForClaim } from "./usage-limit-fallback.js";
+import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -3637,6 +3637,9 @@ const heartbeatRunIssueSummaryColumns = {
   issueId: sql<
     string | null
   >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+  dispatchedAdapterType: sql<
+    string | null
+  >`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {
@@ -15410,6 +15413,40 @@ export function heartbeatService(
     };
   }
 
+  /** A fallback run that cannot start suspends the fallback; its retry waits for the primary's reset like a plain quota wait. */
+  async function suspendBrokenUsageLimitFallback(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+  ): Promise<boolean> {
+    if (readRunAdapterDispatch(failedRun)?.lane !== "fallback" || !isUsageLimitFallbackSetupFailure(failedRun.errorCode)) return false;
+    const now = new Date();
+    const state = await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
+    if (!state) return false;
+    await appendRunEvent(failedRun, {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: `Usage-limit fallback cannot run (${failedRun.errorCode}); waiting for the primary until ${state.activeUntil}`,
+      payload: { usageLimitFallback: state },
+    });
+    await logActivity(db, {
+      companyId: failedRun.companyId,
+      actorType: "system",
+      actorId: "heartbeat",
+      agentId: failedRun.agentId,
+      runId: failedRun.id,
+      action: "agent.usage_limit_fallback_suspended",
+      entityType: "agent",
+      entityId: failedRun.agentId,
+      details: { ...state },
+    });
+    await scheduleBoundedRetryForRun(failedRun, storedAgent, {
+      now,
+      delayMs: Math.max(0, Date.parse(state.activeUntil) - now.getTime()),
+    });
+    return true;
+  }
+
   async function scheduleBoundedRetryForRun(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -21765,6 +21802,10 @@ export function heartbeatService(
         for (const key of AI_AUTH_ENV_KEYS) secretKeys.add(key);
         context.aiConnection = { ...managedAiRuntime.attribution, identity: managedAiRuntime.identity };
         await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+      } else if (readRunAdapterDispatch(run)?.lane === "fallback" && context.aiConnection) {
+        // The retry copied the primary's account attribution; this fallback run uses no managed account.
+        delete context.aiConnection;
+        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) - 'aiConnection'` }).where(eq(heartbeatRuns.id, run.id));
       }
       if (secretManifest.length > 0) {
         context.paperclipSecrets = {
@@ -25882,6 +25923,11 @@ export function heartbeatService(
             }
           } else if (
             outcome === "failed" &&
+            await suspendBrokenUsageLimitFallback(livenessRun, storedAgent)
+          ) {
+            // The retry now waits for the primary's reset.
+          } else if (
+            outcome === "failed" &&
             readTransientRecoveryContractFromRun(livenessRun)
           ) {
             await scheduleBoundedRetryForRun(livenessRun, agent);
@@ -26320,6 +26366,7 @@ export function heartbeatService(
             livenessRun,
             agent,
           );
+          await suspendBrokenUsageLimitFallback(livenessRun, storedAgent);
           await releaseIssueExecutionAndPromote(livenessRun, {
             // Native recovery owns the original heartbeat run through
             // exhaustion. Once its durable coordinator has classified a
@@ -29684,7 +29731,7 @@ export function heartbeatService(
                 processGroupId: running.processGroupId,
                 // Codex handles Ctrl-C by cancelling its tool sessions. SIGTERM
                 // can leave commands in their separate process groups alive.
-                signal: !control && agent?.adapterType === "codex_local" ? "SIGINT" : undefined,
+                signal: !control && (claimedAdapterType(run) ?? agent?.adapterType) === "codex_local" ? "SIGINT" : undefined,
                 graceMs: cancellationTerminationGraceMs(
                   running.graceSec,
                   options.terminationGraceMs,
@@ -30188,7 +30235,6 @@ export function heartbeatService(
         taskKey
           ? {
               taskKey,
-              adapterType: agent.adapterType,
               includeIssueAliases: true,
             }
           : undefined,

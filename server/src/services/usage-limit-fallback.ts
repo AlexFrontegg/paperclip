@@ -1,5 +1,5 @@
-import { eq, sql } from "drizzle-orm";
-import { agentRuntimeState, type agents, type heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, eq, sql } from "drizzle-orm";
+import { agentRuntimeState, agentTaskSessions, type agents, type heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   aiConnectionBindingSchema,
   buildUsageLimitFallbackAdapterConfig,
@@ -12,6 +12,8 @@ import {
   type UsageLimitFallbackLane,
   type UsageLimitFallbackState,
 } from "@paperclipai/shared";
+import { AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
+import { isAiAuthenticationFailure } from "./ai-auth-failure.js";
 import { aiConnectionService } from "./ai-connections.js";
 
 /** Same wait recovery uses when a provider gives no reset time. */
@@ -47,6 +49,15 @@ export function runUsageLimitLane(run: Pick<RunRow, "runnerProfileJson">): Usage
   return readRunAdapterDispatch(run)?.lane === "fallback" ? "fallback" : "primary";
 }
 
+function fallbackAdapterConfig(agent: AgentRow, fallback: UsageLimitFallbackConfig): Record<string, unknown> {
+  const config = buildUsageLimitFallbackAdapterConfig(agent.adapterConfig, fallback, agent.adapterType);
+  if (fallback.adapterType === agent.adapterType || !isRecord(config.env)) return config;
+  // Another adapter must never pick up the primary's provider credentials, homes or routing.
+  const env = { ...config.env };
+  for (const key of AI_AUTH_ENV_KEYS) delete env[key];
+  return { ...config, env };
+}
+
 /** The agent as a run executes it: on the fallback lane, the fallback adapter, settings and AI connection. */
 export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerProfileJson">): AgentRow {
   if (runUsageLimitLane(run) !== "fallback") return agent;
@@ -58,9 +69,14 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
   return {
     ...agent,
     adapterType: fallback.adapterType,
-    adapterConfig: buildUsageLimitFallbackAdapterConfig(agent.adapterConfig, fallback),
+    adapterConfig: fallbackAdapterConfig(agent, fallback),
     runtimeConfig: runtimeConfig as AgentRow["runtimeConfig"],
   };
+}
+
+/** Failures that show the fallback itself cannot run, as opposed to a problem with the work. */
+export function isUsageLimitFallbackSetupFailure(errorCode: string | null | undefined): boolean {
+  return errorCode === "configuration_incomplete" || isAiAuthenticationFailure(errorCode);
 }
 
 export async function readAgentUsageLimitFallbackState(db: Db, agentId: string): Promise<UsageLimitFallbackState | null> {
@@ -79,9 +95,21 @@ export async function clearUsageLimitFallbackState(db: Db, agentId: string, acti
     .where(sql`${agentRuntimeState.agentId} = ${agentId} and ${matchesActivation}`);
 }
 
+/** Stops using a fallback that cannot run for the rest of the window, so the agent waits for the primary's reset. */
+export async function suspendUsageLimitFallback(db: Db, agentId: string, reason: string, now: Date): Promise<UsageLimitFallbackState | null> {
+  const state = await readAgentUsageLimitFallbackState(db, agentId);
+  if (!state || !isUsageLimitFallbackStateActive(state, now)) return null;
+  const suspended: UsageLimitFallbackState = { ...state, suspendedReason: reason };
+  await db
+    .update(agentRuntimeState)
+    .set({ stateJson: sql`jsonb_set(${agentRuntimeState.stateJson}, ${`{${USAGE_LIMIT_FALLBACK_STATE_KEY}}`}::text[], ${JSON.stringify(suspended)}::jsonb)`, updatedAt: now })
+    .where(sql`${agentRuntimeState.agentId} = ${agentId} and ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY} ->> 'activatedAt' = ${state.activatedAt}`);
+  return suspended;
+}
+
 async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback: UsageLimitFallbackConfig, responsibleUserId: string | null): Promise<boolean> {
   if (!fallback.aiConnection) return true;
-  const effectiveConfig = buildUsageLimitFallbackAdapterConfig(agent.adapterConfig, fallback);
+  const effectiveConfig = fallbackAdapterConfig(agent, fallback);
   try {
     await aiConnectionService(db).select({
       companyId: agent.companyId,
@@ -100,23 +128,25 @@ async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback:
 }
 
 /**
- * Decides the lane when a run is claimed. Expired or unusable fallback state is cleared here,
- * which is the switch-back; the next primary quota failure then waits as it would without a fallback.
+ * Decides the lane when a run is claimed. An expired state or a changed config is cleared here,
+ * which is the switch-back. A suspended fallback, or one this run's responsible user cannot use,
+ * sends only this run to the primary and leaves the agent's fallback in place.
  */
 export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, run: Pick<RunRow, "responsibleUserId">, now: Date): Promise<UsageLimitAdapterDispatch> {
   const primary = { adapterType: agent.adapterType };
   const state = await readAgentUsageLimitFallbackState(db, agent.id);
   if (!state) return primary;
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  const usable = fallback
+  const current = fallback
     && isUsageLimitFallbackStateActive(state, now)
     && state.primaryAdapterType === agent.adapterType
-    && state.fallbackAdapterType === fallback.adapterType
-    && await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null);
-  if (!usable) {
+    && state.fallbackAdapterType === fallback.adapterType;
+  if (!current) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
     return primary;
   }
+  if (state.suspendedReason) return primary;
+  if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) return primary;
   return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil: state.activeUntil };
 }
 
@@ -138,6 +168,10 @@ export async function activateUsageLimitFallback(db: Db, input: {
   const primaryAiConnection = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
   const problem = usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
   if (problem) return { activated: false, reason: problem };
+  const existing = await readAgentUsageLimitFallbackState(db, agent.id);
+  if (existing?.suspendedReason && isUsageLimitFallbackStateActive(existing, now)) {
+    return { activated: false, reason: `fallback_suspended:${existing.suspendedReason}` };
+  }
   if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) {
     return { activated: false, reason: "fallback_ai_connection_unavailable" };
   }
@@ -148,6 +182,7 @@ export async function activateUsageLimitFallback(db: Db, input: {
     const [row] = await tx.select().from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agent.id)).for("update");
     const current = readUsageLimitFallbackState(row?.stateJson);
     const currentActive = isUsageLimitFallbackStateActive(current, now) ? current : null;
+    if (currentActive?.suspendedReason) return null;
     const keepCurrentEnd = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
     const next: UsageLimitFallbackState = {
       activeUntil: keepCurrentEnd ? currentActive.activeUntil : proposedUntil.toISOString(),
@@ -169,7 +204,16 @@ export async function activateUsageLimitFallback(db: Db, input: {
         stateJson: { [USAGE_LIMIT_FALLBACK_STATE_KEY]: next },
       });
     }
+    if (!currentActive && fallback.adapterType !== agent.adapterType) {
+      // A new window starts the fallback fresh; its sessions from an earlier window miss the primary's turns since.
+      await tx.delete(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, agent.companyId),
+        eq(agentTaskSessions.agentId, agent.id),
+        eq(agentTaskSessions.adapterType, fallback.adapterType),
+      ));
+    }
     return next;
   });
+  if (!state) return { activated: false, reason: "fallback_suspended" };
   return { activated: true, state };
 }

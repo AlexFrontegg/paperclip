@@ -1,12 +1,11 @@
 import { z } from "zod";
 import { aiConnectionBindingSchema, type AiConnectionBinding } from "./ai-connections.js";
-import { envConfigSchema } from "./validators/secret.js";
 
 export const USAGE_LIMIT_FALLBACK_ADAPTER_TYPES = ["claude_local", "codex_local"] as const;
 export type UsageLimitFallbackAdapterType = (typeof USAGE_LIMIT_FALLBACK_ADAPTER_TYPES)[number];
 export type UsageLimitFallbackLane = "primary" | "fallback";
 
-// Settings the fallback inherits from the primary so the agent keeps its instructions, skills, workspace and confinement.
+// Settings a fallback on another adapter inherits so the agent keeps its instructions, skills, workspace and confinement.
 export const USAGE_LIMIT_FALLBACK_INHERITED_CONFIG_KEYS = [
   "cwd",
   "instructionsBundleMode",
@@ -32,16 +31,19 @@ export const USAGE_LIMIT_FALLBACK_INHERITED_CONFIG_KEYS = [
   "graceSec",
 ] as const;
 
-const fallbackAdapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
-  if (value.env === undefined) return;
-  if (!envConfigSchema.safeParse(value.env).success) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "usageLimitFallback.adapterConfig.env must be a map of valid env bindings",
-      path: ["env"],
-    });
-  }
-});
+// Only engine-specific settings: paths, commands, env and workspace settings always come from the primary.
+const fallbackAdapterConfigSchema = z.object({
+  model: z.string().trim().min(1).optional(),
+  effort: z.string().trim().min(1).optional(),
+  modelReasoningEffort: z.string().trim().min(1).optional(),
+  fastMode: z.boolean().optional(),
+  search: z.boolean().optional(),
+  chrome: z.boolean().optional(),
+  maxTurnsPerRun: z.number().int().min(0).optional(),
+  dangerouslySkipPermissions: z.boolean().optional(),
+  dangerouslyBypassApprovalsAndSandbox: z.boolean().optional(),
+  networkAllowlist: z.array(z.string().trim().min(1)).optional(),
+}).strict();
 
 export const usageLimitFallbackConfigSchema = z.object({
   enabled: z.boolean(),
@@ -60,6 +62,8 @@ export const usageLimitFallbackStateSchema = z.object({
   primaryAdapterType: z.string().min(1),
   fallbackAdapterType: z.string().min(1),
   reason: z.literal("provider_quota"),
+  /** Set when the fallback itself cannot run; the agent then waits for the primary's reset. */
+  suspendedReason: z.string().min(1).optional(),
 });
 
 export type UsageLimitFallbackState = z.infer<typeof usageLimitFallbackStateSchema>;
@@ -93,11 +97,14 @@ export function isUsageLimitFallbackStateActive(state: UsageLimitFallbackState |
   return Number.isFinite(activeUntil) && activeUntil > now.getTime();
 }
 
+/** A fallback on the same adapter keeps every primary setting; one on another adapter keeps only the shared ones. */
 export function buildUsageLimitFallbackAdapterConfig(
   primaryAdapterConfig: unknown,
-  fallback: Pick<UsageLimitFallbackConfig, "adapterConfig">,
+  fallback: Pick<UsageLimitFallbackConfig, "adapterType" | "adapterConfig">,
+  primaryAdapterType: string,
 ): Record<string, unknown> {
   const primary = isRecord(primaryAdapterConfig) ? primaryAdapterConfig : {};
+  if (fallback.adapterType === primaryAdapterType) return { ...primary, ...fallback.adapterConfig };
   const inherited: Record<string, unknown> = {};
   for (const key of USAGE_LIMIT_FALLBACK_INHERITED_CONFIG_KEYS) {
     if (primary[key] !== undefined) inherited[key] = primary[key];

@@ -3425,10 +3425,10 @@ export function agentRoutes(
     previousFallback?: unknown;
     environmentId: string | null | undefined;
     newAgent: boolean;
-  }): Promise<UsageLimitFallbackConfig | undefined> {
+  }): Promise<{ fallback: UsageLimitFallbackConfig; connectionId?: string } | undefined> {
     if (input.fallback === undefined) return undefined;
     const fallback = usageLimitFallbackConfigSchema.parse(input.fallback);
-    if (!fallback.enabled) return fallback;
+    if (!fallback.enabled) return { fallback };
     const problem = usageLimitFallbackConfigProblem({
       primaryAdapterType: input.primaryAdapterType,
       primaryAiConnection: input.primaryAiConnection,
@@ -3436,25 +3436,24 @@ export function agentRoutes(
     });
     if (problem) throw unprocessable(problem, { code: "usage_limit_fallback_invalid" });
     await assertSelectableAdapterType(fallback.adapterType);
-    const adapterConfig = await normalizeMediatedAdapterConfigForPersistence({
-      companyId: input.companyId,
-      adapterType: fallback.adapterType,
-      adapterConfig: applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
-    });
+    const adapterConfig = usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
+      applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
+    );
     const normalized: UsageLimitFallbackConfig = { ...fallback, adapterConfig };
-    if (!normalized.aiConnection) return normalized;
-    const effectiveConfig = buildUsageLimitFallbackAdapterConfig(input.primaryAdapterConfig, normalized);
+    if (!normalized.aiConnection) return { fallback: normalized };
+    const effectiveConfig = buildUsageLimitFallbackAdapterConfig(input.primaryAdapterConfig, normalized, input.primaryAdapterType);
     if (!isAiConnectionCompatible(normalized.aiConnection, normalized.adapterType, effectiveConfig.model, effectiveConfig.provider, effectiveConfig.acpxAgent)) {
       throw unprocessable("Select a fallback AI connection compatible with the fallback adapter and model", { code: "usage_limit_fallback_invalid" });
     }
+    // A disabled fallback is stored unvalidated, so only a previously enabled one can skip the account check.
     const previous = usageLimitFallbackConfigSchema.safeParse(input.previousFallback).data;
-    const bindingChanged = !previous
+    const bindingChanged = !previous?.enabled
       || previous.adapterType !== normalized.adapterType
       || !sameJsonValue(previous.aiConnection, normalized.aiConnection);
-    if (bindingChanged) {
-      await validateManagedAgentBinding(req, input.companyId, input.agentId, normalized.adapterType, effectiveConfig, normalized.aiConnection, input.environmentId, false, input.newAgent);
-    }
-    return normalized;
+    const connectionId = bindingChanged || input.newAgent
+      ? await validateManagedAgentBinding(req, input.companyId, input.agentId, normalized.adapterType, effectiveConfig, normalized.aiConnection, input.environmentId, false, input.newAgent)
+      : undefined;
+    return { fallback: normalized, connectionId };
   }
 
   router.post(
@@ -4708,7 +4707,7 @@ export function agentRoutes(
         environmentId: normalizedHireInput.defaultEnvironmentId,
         newAgent: true,
       });
-      if (hireFallback && normalizedHireInput.runtimeConfig) normalizedHireInput.runtimeConfig.usageLimitFallback = hireFallback;
+      if (hireFallback && normalizedHireInput.runtimeConfig) normalizedHireInput.runtimeConfig.usageLimitFallback = hireFallback.fallback;
       const createdAgent = await svc.create(
         companyId,
         {
@@ -4720,6 +4719,7 @@ export function agentRoutes(
         },
         {
           aiConnectionInstall: managedHireConnectionId ? { connectionId: managedHireConnectionId, createdByUserId: responsibleUserForAiRequest(req) } : undefined,
+          fallbackAiConnectionInstall: hireFallback?.connectionId ? { connectionId: hireFallback.connectionId, createdByUserId: responsibleUserForAiRequest(req) } : undefined,
           claudeLogin: {
             storedSessionId: hireStoredSessionId ?? null,
             ownerUserId: req.actor.type === "agent" ? null : (req.actor.userId ?? null),
@@ -4968,7 +4968,7 @@ export function agentRoutes(
       environmentId: createInput.defaultEnvironmentId,
       newAgent: true,
     });
-    if (createFallback) normalizedRuntimeConfig.usageLimitFallback = createFallback;
+    if (createFallback) normalizedRuntimeConfig.usageLimitFallback = createFallback.fallback;
     const createdAgent = await svc.create(
       companyId,
       {
@@ -4982,6 +4982,7 @@ export function agentRoutes(
       },
       {
         aiConnectionInstall: managedConnectionId ? { connectionId: managedConnectionId, createdByUserId: responsibleUserForAiRequest(req) } : undefined,
+        fallbackAiConnectionInstall: createFallback?.connectionId ? { connectionId: createFallback.connectionId, createdByUserId: responsibleUserForAiRequest(req) } : undefined,
         claudeLogin: {
           storedSessionId: createStoredSessionId ?? null,
           ownerUserId: req.actor.type === "agent" ? null : (req.actor.userId ?? null),
@@ -5675,7 +5676,7 @@ export function agentRoutes(
         environmentId: (patchData.defaultEnvironmentId !== undefined ? patchData.defaultEnvironmentId : existing.defaultEnvironmentId) as string | null,
         newAgent: false,
       });
-      if (patchFallback && requestedRuntimeConfig) requestedRuntimeConfig.usageLimitFallback = patchFallback;
+      if (patchFallback && requestedRuntimeConfig) requestedRuntimeConfig.usageLimitFallback = patchFallback.fallback;
     }
     if (requestedRuntimeConfig) patchData.runtimeConfig = requestedRuntimeConfig;
     if (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId")) {
@@ -7770,7 +7771,7 @@ export function agentRoutes(
       agentName: agent.name,
       agentAppearance: agent.appearance,
       avatarUrl: agent.avatarUrl,
-      adapterType: agent.adapterType,
+      adapterType: run.dispatchedAdapterType ?? agent.adapterType,
       outputSilence: await heartbeat.buildRunOutputSilence({ ...run, companyId: issue.companyId }),
     });
   });
