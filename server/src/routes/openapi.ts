@@ -3628,6 +3628,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/usage-limit-fallback/clear",
+  tags: ["agents"],
+  summary: "Return the agent to its primary adapter before the usage-limit fallback ends",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/agents/{id}/task-sessions",
   tags: ["agents"],

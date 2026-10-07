@@ -1,5 +1,6 @@
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
-import { aiConnectionBindingSchema } from "@paperclipai/shared";
+import { UsageLimitFallbackField } from "./UsageLimitFallbackField";
+import { aiConnectionBindingSchema, usageLimitFallbackConfigSchema } from "@paperclipai/shared";
 import { testAgentSetup } from "@/lib/test-agent-setup";
 import { setupEfforts } from "../lib/agent-setup-fields";
 import { RuntimeTestCard } from "./RuntimeTestCard";
@@ -593,6 +594,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   // ---- Resolve values ----
   const config = !isCreate ? ((props.agent.adapterConfig ?? {}) as Record<string, unknown>) : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
+  // Saved runtime config plus unsaved edits, so changing one runtime field never drops another pending one.
+  const pendingRuntimeConfig = { ...runtimeConfig, ...((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined) ?? {}) };
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
   const debug = !isCreate ? ((runtimeConfig.debug ?? {}) as Record<string, unknown>) : {};
 
@@ -1661,7 +1664,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           {!isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={adapterType === "paperclip_runner" ? eff("adapterConfig", "provider", config.provider) === "codex" ? "codex_local" : eff("adapterConfig", "provider", config.provider) === "opencode" ? "opencode_local" : eff("adapterConfig", "provider", config.provider) === "acpx" && eff("adapterConfig", "acpxAgent", config.acpxAgent) === "grok" ? "grok_local" : eff("adapterConfig", "provider", config.provider) === "acpx" && eff("adapterConfig", "acpxAgent", config.acpxAgent) === "claude" ? "claude_local" : adapterType : adapterType}
             value={aiConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
-            onChange={binding => mark("runtime", "runtimeConfig", { ...runtimeConfig, aiConnection: binding })} />}
+            onChange={binding => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, aiConnection: binding })} />}
+
+          {!isCreate && selectedCompanyId && (
+            <UsageLimitFallbackField
+              companyId={selectedCompanyId}
+              agentId={props.agent.id}
+              agentName={props.agent.name}
+              primaryAdapterType={adapterType}
+              environmentId={currentDefaultEnvironmentId || undefined}
+              value={usageLimitFallbackConfigSchema.safeParse(pendingRuntimeConfig.usageLimitFallback).data}
+              onChange={(next) => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, usageLimitFallback: next })}
+            />
+          )}
 
           {showInlineAdapterTestEnvironmentFeedback && !props.compactTestFeedback && (testActionError || testEnvironment.error) && (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">

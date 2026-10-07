@@ -174,3 +174,19 @@ describe("buildAgentUpdatePatch", () => {
     });
   });
 });
+
+describe("buildAgentUpdatePatch runtime and heartbeat edits in one save", () => {
+  it("keeps a heartbeat edit made in the same save as a runtime config change, such as the usage-limit fallback", () => {
+    const agent = makeAgent();
+    const fallback = { enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset" };
+    const patch = buildAgentUpdatePatch(agent, makeOverlay({
+      runtime: { runtimeConfig: { ...agent.runtimeConfig, usageLimitFallback: fallback } },
+      heartbeat: { intervalSec: 60 },
+    }));
+    expect(patch.runtimeConfig).toEqual({
+      heartbeat: { enabled: true, intervalSec: 60 },
+      usageLimitFallback: fallback,
+    });
+  });
+});
+

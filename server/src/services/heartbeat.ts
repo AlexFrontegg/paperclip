@@ -36,8 +36,9 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, readUsageLimitFallbackConfig } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
+import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -3380,6 +3381,9 @@ const heartbeatRunSummaryListColumns = {
 } as const;
 
 const heartbeatRunListContextColumns = {
+  dispatchedAdapterType: sql<
+    string | null
+  >`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
   contextIssueId: sql<
     string | null
   >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("contextIssueId"),
@@ -3633,6 +3637,9 @@ const heartbeatRunIssueSummaryColumns = {
   issueId: sql<
     string | null
   >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+  dispatchedAdapterType: sql<
+    string | null
+  >`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {
@@ -15406,6 +15413,48 @@ export function heartbeatService(
     };
   }
 
+  /** A fallback run that cannot start suspends the fallback; its retry waits for the primary's reset like a plain quota wait. */
+  async function suspendBrokenUsageLimitFallback(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+  ): Promise<boolean> {
+    if (readRunAdapterDispatch(failedRun)?.lane !== "fallback" || !isUsageLimitFallbackSetupFailure(failedRun)) return false;
+    const now = new Date();
+    const state = await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
+    if (!state) return false;
+    // The broken fallback, not the work, used this attempt, so the wait for the primary always gets one more.
+    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, {
+      now,
+      delayMs: Math.max(0, Date.parse(state.activeUntil) - now.getTime()),
+      maxAttempts: Math.max(
+        BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+        executionRetryAttemptCount(failedRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
+      ),
+    });
+    const waitingForPrimary = retry.outcome === "scheduled";
+    await appendRunEvent(failedRun, {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: waitingForPrimary
+        ? `Usage-limit fallback cannot run (${failedRun.errorCode}); waiting for the primary until ${state.activeUntil}`
+        : `Usage-limit fallback cannot run (${failedRun.errorCode}); it stays off until ${state.activeUntil}`,
+      payload: { usageLimitFallback: state, retryScheduled: waitingForPrimary },
+    });
+    await logActivity(db, {
+      companyId: failedRun.companyId,
+      actorType: "system",
+      actorId: "heartbeat",
+      agentId: failedRun.agentId,
+      runId: failedRun.id,
+      action: "agent.usage_limit_fallback_suspended",
+      entityType: "agent",
+      entityId: failedRun.agentId,
+      details: { ...state },
+    });
+    return waitingForPrimary;
+  }
+
   async function scheduleBoundedRetryForRun(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -15551,15 +15600,59 @@ export function heartbeatService(
       }
     }
 
+    // A primary-lane quota failure switches the agent to its usage-limit fallback and retries now instead of at the reset time.
+    const usageLimitFallback =
+      transientRecovery?.errorFamily === "provider_quota"
+        ? await activateUsageLimitFallback(db, { agent, run, retryNotBefore: transientRetryNotBefore, now })
+        : null;
+    if (usageLimitFallback?.activated) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: `Usage limit reached; running on the ${usageLimitFallback.state.fallbackAdapterType} fallback until ${usageLimitFallback.state.activeUntil}`,
+        payload: { usageLimitFallback: usageLimitFallback.state },
+      });
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: agent.id,
+        runId: run.id,
+        action: "agent.usage_limit_fallback_activated",
+        entityType: "agent",
+        entityId: agent.id,
+        details: { ...usageLimitFallback.state },
+      });
+    } else if (usageLimitFallback && !["not_configured", "already_on_fallback"].includes(usageLimitFallback.reason)) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: `Usage-limit fallback not used: ${usageLimitFallback.reason}`,
+        payload: { usageLimitFallbackSkipped: usageLimitFallback.reason },
+      });
+    }
+
+    // A quota failure on the fallback itself waits only until the primary is back; a cleared fallback means it is back now.
+    const primaryBackAt =
+      usageLimitFallback && !usageLimitFallback.activated && usageLimitFallback.reason === "already_on_fallback"
+        ? (await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil ?? now.toISOString()
+        : undefined;
+    const retryNotBefore =
+      primaryBackAt && (!transientRetryNotBefore || Date.parse(primaryBackAt) < transientRetryNotBefore.getTime())
+        ? new Date(primaryBackAt)
+        : transientRetryNotBefore;
     const schedule =
-      transientRetryNotBefore &&
-      transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
+      !usageLimitFallback?.activated &&
+      retryNotBefore &&
+      retryNotBefore.getTime() > baseSchedule.dueAt.getTime()
         ? {
             ...baseSchedule,
-            dueAt: transientRetryNotBefore,
+            dueAt: retryNotBefore,
             delayMs: Math.max(
               0,
-              transientRetryNotBefore.getTime() - now.getTime(),
+              retryNotBefore.getTime() - now.getTime(),
             ),
           }
         : baseSchedule;
@@ -17373,6 +17466,7 @@ export function heartbeatService(
       );
       return null;
     }
+    const adapterDispatch = await resolveAdapterDispatchForClaim(db, agent, run, new Date());
     const invokability = companyAgents
       ? evaluateAgentInvokability(toAgentOrgRow(agent), companyAgents)
       : await getAgentInvokability(agent);
@@ -17750,7 +17844,7 @@ export function heartbeatService(
                   .update(heartbeatRuns)
                   .set({
                     status: "running",
-                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
@@ -17849,7 +17943,7 @@ export function heartbeatService(
                 .update(heartbeatRuns)
                 .set({
                   status: "running",
-                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                   responsibleUserId,
                   startedAt: lockedRun.startedAt ?? claimedAt,
@@ -17916,7 +18010,7 @@ export function heartbeatService(
       : await withChatControlRecoveryGate(run, "claim", async (tx) => {
           const claimValues = {
             status: "running",
-            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
             ...legacyControllerClaim(run.runtimeMode),
             responsibleUserId,
             startedAt: run.startedAt ?? claimedAt,
@@ -20486,8 +20580,8 @@ export function heartbeatService(
     let readFailureReportSecrets: () => string[] = () => [];
 
     try {
-      const agent = await getAgent(run.agentId);
-      if (!agent) {
+      const storedAgent = await getAgent(run.agentId);
+      if (!storedAgent) {
         await setRunStatus(runId, "failed", {
           error: "Agent not found",
           errorCode: "agent_not_found",
@@ -20501,6 +20595,8 @@ export function heartbeatService(
         if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
         return;
       }
+      // A usage-limit fallback run executes the fallback adapter, settings and AI connection; the agent row is unchanged.
+      const agent = effectiveAgentForRun(storedAgent, run);
 
       // The claimed adapter identity is immutable recovery evidence. Do not
       // execute a newly selected adapter under a previous adapter's claim.
@@ -20961,6 +21057,19 @@ export function heartbeatService(
       const taskSessionDecodedParams = normalizeSessionParams(
         sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
       );
+      const resumeFromRunId = readNonEmptyString(context.resumeFromRunId);
+      if (resumeFromRunId && context.resumeSessionParams) {
+        const [resumeSource] = await db
+          .select({ runnerProfileJson: heartbeatRuns.runnerProfileJson })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, resumeFromRunId));
+        const resumeAdapterType = resumeSource ? claimedAdapterType(resumeSource) : null;
+        // Only the adapter that created a session can resume it; a usage-limit fallback can make them differ.
+        if (resumeAdapterType && resumeAdapterType !== agent.adapterType) {
+          delete context.resumeSessionParams;
+          delete context.resumeSessionDisplayId;
+        }
+      }
       const explicitResumeSessionParams = normalizeResumeParamsForAdapter(
         agent.adapterType,
         sessionCodec.deserialize(parseObject(context.resumeSessionParams)),
@@ -21692,7 +21801,8 @@ export function heartbeatService(
             await finalizeAiConnectionBusyDeferral(run, error, !authorizedNonAssigneeWake);
             return;
           }
-          if (responsibleUserId && issueId) {
+          // A broken fallback account is suspended and repaired from the agent's settings, not from a sign-in card on the task.
+          if (responsibleUserId && issueId && readRunAdapterDispatch(run)?.lane !== "fallback") {
             await connectionIntentService(db).request({ sub: agent.id, company_id: agent.companyId, run_id: run.id, responsible_user_id: responsibleUserId }, aiBinding.provider, { purpose: "ai" }).catch(() => {
               logger.warn({ runId: run.id, agentId: agent.id }, "Could not attach AI connection request; runtime configuration action remains available");
             });
@@ -21710,6 +21820,10 @@ export function heartbeatService(
         for (const key of AI_AUTH_ENV_KEYS) secretKeys.add(key);
         context.aiConnection = { ...managedAiRuntime.attribution, identity: managedAiRuntime.identity };
         await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+      } else if (context.aiConnection && storedAgent.runtimeConfig?.usageLimitFallback !== undefined) {
+        // The retry copied the other lane's account attribution; this run uses no managed account.
+        delete context.aiConnection;
+        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) - 'aiConnection'` }).where(eq(heartbeatRuns.id, run.id));
       }
       if (secretManifest.length > 0) {
         context.paperclipSecrets = {
@@ -23043,7 +23157,7 @@ export function heartbeatService(
         context.projectId = executionWorkspace.projectId;
       }
       const runtimeSessionFallback =
-        taskKey || resetTaskSession
+        taskKey || resetTaskSession || runtime.adapterType !== agent.adapterType
           ? null
           : isCanonicalSessionIdForAdapter(agent.adapterType, runtime.sessionId)
             ? runtime.sessionId
@@ -25827,6 +25941,11 @@ export function heartbeatService(
             }
           } else if (
             outcome === "failed" &&
+            await suspendBrokenUsageLimitFallback(livenessRun, storedAgent)
+          ) {
+            // The retry now waits for the primary's reset.
+          } else if (
+            outcome === "failed" &&
             readTransientRecoveryContractFromRun(livenessRun)
           ) {
             await scheduleBoundedRetryForRun(livenessRun, agent);
@@ -25966,6 +26085,11 @@ export function heartbeatService(
                 lastRunId: finalizedRun.id,
                 lastError: runErrorMessage,
               });
+            }
+            // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the handoff.
+            const dispatch = readRunAdapterDispatch(finalizedRun);
+            if (dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
+              await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: dispatch.primaryAdapterType });
             }
           }
         }
@@ -26260,6 +26384,7 @@ export function heartbeatService(
             livenessRun,
             agent,
           );
+          await suspendBrokenUsageLimitFallback(livenessRun, storedAgent);
           await releaseIssueExecutionAndPromote(livenessRun, {
             // Native recovery owns the original heartbeat run through
             // exhaustion. Once its durable coordinator has classified a
@@ -26521,18 +26646,24 @@ export function heartbeatService(
                 () => undefined,
               );
             }
+            const fallbackSuspended = await suspendBrokenUsageLimitFallback(livenessRun, failedAgent).catch((suspendError) => {
+              logger.warn({ err: suspendError, runId: livenessRun.id }, "failed to suspend the usage-limit fallback after setup failure");
+              return false;
+            });
             // No provider work began. Retry temporary host scan failures with
             // the existing durable failure budget, before releasing execution.
             // Generic recovery must not grant a second budget on exhaustion.
-            await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
-              ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
-              : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
-            ).catch((retryError) => {
-              logger.warn(
-                { err: retryError, runId: livenessRun.id },
-                "failed to schedule interaction continuation retry after setup failure",
-              );
-            });
+            if (!fallbackSuspended) {
+              await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+                ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
+                : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
+              ).catch((retryError) => {
+                logger.warn(
+                  { err: retryError, runId: livenessRun.id },
+                  "failed to schedule interaction continuation retry after setup failure",
+                );
+              });
+            }
           }
           await releaseIssueExecutionAndPromote(livenessRun, {
             suppressImmediateRecovery:
@@ -29624,7 +29755,7 @@ export function heartbeatService(
                 processGroupId: running.processGroupId,
                 // Codex handles Ctrl-C by cancelling its tool sessions. SIGTERM
                 // can leave commands in their separate process groups alive.
-                signal: !control && agent?.adapterType === "codex_local" ? "SIGINT" : undefined,
+                signal: !control && (claimedAdapterType(run) ?? agent?.adapterType) === "codex_local" ? "SIGINT" : undefined,
                 graceMs: cancellationTerminationGraceMs(
                   running.graceSec,
                   options.terminationGraceMs,
@@ -30122,7 +30253,7 @@ export function heartbeatService(
       if (!agent) throw notFound("Agent not found");
       await ensureRuntimeState(agent);
       const taskKey = readNonEmptyString(opts?.taskKey);
-      const clearedTaskSessions = await clearTaskSessions(
+      const clearedPrimarySessions = await clearTaskSessions(
         agent.companyId,
         agent.id,
         taskKey
@@ -30133,6 +30264,12 @@ export function heartbeatService(
             }
           : undefined,
       );
+      // A usage-limit fallback on another adapter keeps its own session for the task, so the reset clears it too.
+      const fallbackAdapterType = readUsageLimitFallbackConfig(agent.runtimeConfig)?.adapterType;
+      const clearedFallbackSessions = taskKey && fallbackAdapterType && fallbackAdapterType !== agent.adapterType
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: fallbackAdapterType, includeIssueAliases: true })
+        : 0;
+      const clearedTaskSessions = clearedPrimarySessions + clearedFallbackSessions;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,

@@ -3,6 +3,7 @@ import { emailConnectionService } from "./email-connections.js";
 import { agentService } from "./agents.js";
 import { logActivity } from "./activity-log.js";
 import { aiConnectionService } from "./ai-connections.js";
+import { effectiveAgentForRun, runUsageLimitLane } from "./usage-limit-fallback.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { aiBindingForAuthRecovery, isAiAuthenticationFailure } from "./ai-auth-failure.js";
 import { and, eq, desc, isNull, sql } from "drizzle-orm";
@@ -1091,8 +1092,10 @@ export function connectionIntentService(db: Db) {
         sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${context.issue.id}`,
       )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
       if (latest?.id !== run.id) return null;
-      const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
-      if (!agent) return null;
+      const [storedAgent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
+      if (!storedAgent) return null;
+      // A usage-limit fallback run signed in with the fallback's adapter and account, not the primary's.
+      const agent = effectiveAgentForRun(storedAgent, run);
       const saved = aiConnectionBindingSchema.safeParse(agent.runtimeConfig.aiConnection).data;
       const binding = saved ?? aiBindingForAuthRecovery(agent.adapterType, agent.adapterConfig);
       if (!binding) return null;
@@ -1103,6 +1106,8 @@ export function connectionIntentService(db: Db) {
           runStartedAt: run.startedAt ?? run.createdAt,
           attribution: attribution as unknown as AiConnectionAttribution & { identity: string } });
       }
+      // The sign-in card completes against the primary's account, so a broken fallback is suspended and repaired in settings instead.
+      if (runUsageLimitLane(run) === "fallback") return null;
       return requestWithContext(context, binding.provider, { purpose: "ai" });
     },
     loadIntent,

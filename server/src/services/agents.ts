@@ -127,6 +127,8 @@ interface UpdateAgentOptions {
 
 interface CreateAgentOptions {
   aiConnectionInstall?: { connectionId: string; createdByUserId: string | null };
+  /** The usage-limit fallback's account, installed alongside the primary one. */
+  fallbackAiConnectionInstall?: { connectionId: string; createdByUserId: string | null };
   allowBuiltInAgentMetadata?: boolean;
   claudeLogin?: ClaudeLoginContext;
 }
@@ -930,11 +932,12 @@ export function agentService(db: Db) {
           })
           .returning()
           .then((rows) => rows[0]);
-        if (options?.aiConnectionInstall) {
+        for (const install of [options?.aiConnectionInstall, options?.fallbackAiConnectionInstall]) {
+          if (!install) continue;
           await tx.insert(toolConnectionInstalls).values({
-            companyId, connectionId: options.aiConnectionInstall.connectionId,
+            companyId, connectionId: install.connectionId,
             targetType: "agent", targetId: created.id,
-            createdByUserId: options.aiConnectionInstall.createdByUserId,
+            createdByUserId: install.createdByUserId,
           }).onConflictDoNothing();
         }
         await syncAgentSecretBindings(created, txDb);

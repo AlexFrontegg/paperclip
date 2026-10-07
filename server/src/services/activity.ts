@@ -396,7 +396,7 @@ export function activityService(db: Db) {
           runtimeMode: heartbeatRuns.runtimeMode,
           status: heartbeatRuns.status,
           agentId: heartbeatRuns.agentId,
-          adapterType: agents.adapterType,
+          adapterType: sql<string>`coalesce(${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType', ${agents.adapterType})`.as("adapterType"),
           startedAt: heartbeatRuns.startedAt,
           finishedAt: heartbeatRuns.finishedAt,
           createdAt: heartbeatRuns.createdAt,

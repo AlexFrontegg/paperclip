@@ -218,6 +218,41 @@ units, absent percentages, and proto3 zero messages. The disposable database
 and encrypted vault were removed. These checks started no provider turn and
 exchanged no refresh tokens.
 
+## Usage-limit fallback
+
+An agent on `claude_local` or `codex_local` can name a fallback in
+`runtimeConfig.usageLimitFallback`: another of those adapters, an AI account
+for it, and a model. An agent on a managed AI account must give the fallback its
+own account, so a limit never brings back host or legacy credentials. The
+agent's Adapter section sets it up under **Switch when the usage limit is
+reached**. Changing the fallback of an agent with external instructions needs an
+instance admin, like changing its adapter.
+
+When a run on the primary fails with `provider_quota`, Paperclip turns on the
+fallback until the provider's reset time (one hour if the provider gives none)
+and retries immediately on the fallback. The agent row, its role, chat bindings
+and tasks do not change. Each run records the adapter it used in
+`adapterDispatch`. The first run claimed after the reset time uses the primary
+again. If the fallback account cannot be selected, the fallback is not used and
+the retry waits for the reset as before.
+
+The fallback config holds only engine-specific settings (model, effort, the
+sandbox and permission flags, turn cap, network allowlist). A fallback on
+another adapter inherits the primary's instructions, skills, working directory,
+environment, workspace, confinement and timeouts, minus the primary's provider
+credentials; a second account on the same adapter inherits everything. A
+switched run starts a fresh provider session from the task's history; provider
+sessions never move between adapters. If the fallback cannot run (sign-in or
+configuration failure), it is suspended until the primary resets and the work
+waits as it would without a fallback. A suspended fallback raises no sign-in
+card on the task; the agent header says it is paused, and the fallback account
+is repaired from the agent's settings. If the fallback hits its own limit, the
+retry waits only until the primary is back.
+
+The agent header shows when the fallback is active or paused. **Return to <primary>**
+(`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:
+[usage-limit fallback plan](../plans/2026-10-06-usage-limit-fallback.md).
+
 ## Runtime isolation
 
 Provider authentication failures, including `acpx_auth_required`, adapter login

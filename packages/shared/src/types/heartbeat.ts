@@ -154,6 +154,8 @@ export interface GitWorktreeBranchIncoherenceEvidence {
 }
 
 export interface HeartbeatRun {
+  /** The adapter the run actually used; differs from the agent during a usage-limit fallback. */
+  dispatchedAdapterType?: string | null;
   execution?: import("./execution-projection.js").ExecutionProjection | null;
   id: string;
   companyId: string;
