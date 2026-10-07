@@ -91,9 +91,11 @@ usageLimitFallback?: {
     `cwd`, workspace, env, confinement, timeouts) plus the fallback keys. The
     primary's provider credentials, homes and routing (`AI_AUTH_ENV_KEYS`) are
     removed from the inherited env.
-- Saving applies the adapter's create defaults to the fallback keys, so a Codex
-  fallback gets `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent;
-  the UI shows that setting explicitly.
+- Saving a fallback on another adapter applies that adapter's create defaults to
+  the fallback keys, so a Codex fallback for a Claude agent gets
+  `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent; the UI shows
+  that setting explicitly. A fallback on the primary's adapter gets no defaults
+  and never overrides the primary's sandbox and permission flags.
 
 Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`):
 
@@ -105,6 +107,12 @@ Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`)
   fallback account for the new agent, like the primary account.
 - A PATCH that omits `usageLimitFallback` preserves it, like `aiConnection`
   (`routes/agents.ts:5562`).
+- When the primary uses a managed AI account, the fallback must name its own
+  account. Otherwise a limit would bring back host or legacy credentials for a
+  managed agent. Lane selection and activation apply the same rule to stored
+  configs.
+- Changing the fallback of an agent with external instructions needs an
+  instance admin, like changing its adapter.
 
 ## 5. Runtime behaviour
 
@@ -154,8 +162,10 @@ When it activates:
   activated; the retry waits for the reset as before, and a run event records
   why.
 
-A `provider_quota` failure on the fallback lane follows today's behaviour, which is
-to wait for its own reset. It never re-activates or extends the fallback.
+A `provider_quota` failure on the fallback lane never re-activates or extends the
+fallback. Its retry waits until the earlier of the fallback's reset and the
+current `activeUntil`, since the primary can take the work back then. If the
+fallback was cleared meanwhile, the retry follows the normal backoff.
 
 ### 5.3 Lane selection at claim
 
@@ -179,11 +189,24 @@ adapterDispatch: { adapterType, lane: "primary" | "fallback",
 
 ### 5.3a When the fallback itself cannot run
 
-A fallback-lane run that fails with `configuration_incomplete` or an AI sign-in
-failure suspends the fallback for the rest of the window (`suspendedReason`).
+A fallback-lane run whose own AI account fails (an AI sign-in failure, or
+`configuration_incomplete` with reason `ai_connection_unavailable`) suspends the
+fallback for the rest of the window (`suspendedReason`). Other setup gaps, such
+as a missing secret, are shared with the primary and go to recovery as usual.
 Its retry is scheduled for `activeUntil`, the primary's reset, so the agent
 waits as it would without a fallback instead of failing every run or
 escalating to the board. A suspended state is not reactivated until it expires.
+
+- This covers failures while preparing the fallback account (the setup path)
+  and sign-in failures reported by the adapter.
+- The broken fallback used the attempt, not the work, so the wait for the
+  primary always gets one more retry, even when the bounded budget is spent.
+- No sign-in card is raised on the task for a fallback account, because the card
+  completes against the primary's account. The fallback account is marked
+  unhealthy, the agent header shows the fallback as paused, and the account is
+  repaired from the agent's settings.
+- Suspending sets only `suspendedReason` in one conditional update, so it never
+  overwrites a later `activeUntil` and does nothing after **Return to primary**.
 
 ### 5.4 Execution
 
@@ -267,7 +290,8 @@ switch loses little.
 - Saving goes through `buildAgentUpdatePatch` (`ui/src/lib/agent-config-patch.ts`)
   as part of `runtimeConfig`.
 - Agent header (`ui/src/pages/AgentDetail.tsx`) shows "Usage limit reached:
-  running on Codex until <time>" while active, with a "Return to <primary>"
+  running on Codex until <time>" while active, or that the fallback cannot run
+  and the agent is waiting for the primary while suspended, with a "Return to <primary>"
   action (`POST /agents/:id/usage-limit-fallback/clear`, board only, logged as
   `agent.usage_limit_fallback_cleared`).
 - Run cards and lists show the adapter actually used.
@@ -310,8 +334,8 @@ switch loses little.
 - Activation happens only in the bounded transient retry path: a quota failure
   after its retry budget is used up waits for the reset, and switching uses one
   of the two bounded attempts.
-- A fallback-lane quota failure waits for the fallback's own reset even if the
-  primary resets earlier.
+- A suspended fallback stays off until `activeUntil` even after its account is
+  repaired; **Return to <primary>** or the next window starts it again.
 - Telemetry, Sentry reports and the run detail header still label runs with the
   agent's adapter; cancel, the run lists, the log viewer and the issue live view
   use the run's dispatched adapter.

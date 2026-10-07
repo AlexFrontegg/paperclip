@@ -11,16 +11,42 @@ import {
   activateUsageLimitFallback,
   clearUsageLimitFallbackState,
   effectiveAgentForRun,
+  isUsageLimitFallbackSetupFailure,
   readAgentUsageLimitFallbackState,
   resolveAdapterDispatchForClaim,
+  suspendUsageLimitFallback,
 } from "../services/usage-limit-fallback.ts";
 
 vi.mock("../telemetry.js", () => ({ getTelemetryClient: () => ({ track: vi.fn() }) }));
+
+const fallbackAccount = vi.hoisted(() => ({ broken: false }));
+vi.mock("../services/ai-connection-runtime.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/ai-connection-runtime.js")>();
+  return {
+    ...actual,
+    prepareManagedAiRuntime: async (...args: Parameters<typeof actual.prepareManagedAiRuntime>) => {
+      if (fallbackAccount.broken) throw new Error("Reconnect this AI account");
+      return actual.prepareManagedAiRuntime(...args);
+    },
+  };
+});
+vi.mock("../services/ai-connections.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/ai-connections.js")>();
+  return {
+    ...actual,
+    aiConnectionService: (...args: Parameters<typeof actual.aiConnectionService>) => {
+      const service = actual.aiConnectionService(...args);
+      return fallbackAccount.broken ? { ...service, select: async () => ({}) as Awaited<ReturnType<typeof service.select>> } : service;
+    },
+  };
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 const RESET_AT = "2030-04-22T21:00:00.000Z";
+const CODEX_RESET_AT = "2030-04-23T21:00:00.000Z";
+const openAiBinding = { provider: "openai", method: "api_key", mode: "responsible_user" };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
 
 type Execution = { adapterType: string; model: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
@@ -31,6 +57,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const executions: Execution[] = [];
   let claudeHitsLimit = true;
+  let claudeTransientFailuresLeft = 0;
   let codexErrorCode: string | null = null;
 
   function record(adapterType: string, ctx: AdapterExecutionContext) {
@@ -53,6 +80,19 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       ...claude,
       execute: async (ctx) => {
         record("claude_local", ctx);
+        if (claudeTransientFailuresLeft > 0) {
+          claudeTransientFailuresLeft -= 1;
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: "Overloaded",
+            errorCode: "claude_transient_upstream",
+            errorFamily: "transient_upstream",
+            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+            resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, errorFamily: "transient_upstream" },
+          };
+        }
         if (!claudeHitsLimit) return { exitCode: 0, signal: null, timedOut: false };
         return {
           exitCode: 1,
@@ -77,6 +117,24 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       execute: async (ctx) => {
         record("codex_local", ctx);
         if (!codexErrorCode) return { exitCode: 0, signal: null, timedOut: false };
+        if (codexErrorCode === "provider_quota") {
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: "You've hit your usage limit.",
+            errorCode: "provider_quota",
+            errorFamily: "provider_quota",
+            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+            retryNotBefore: CODEX_RESET_AT,
+            resultJson: {
+              executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+              errorFamily: "provider_quota",
+              retryNotBefore: CODEX_RESET_AT,
+              providerQuotaRetryNotBefore: CODEX_RESET_AT,
+            },
+          };
+        }
         return {
           exitCode: 1,
           signal: null,
@@ -94,7 +152,9 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     executions.length = 0;
     claudeHitsLimit = true;
+    claudeTransientFailuresLeft = 0;
     codexErrorCode = null;
+    fallbackAccount.broken = false;
   });
 
   afterAll(async () => {
@@ -226,8 +286,11 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     const run = await heartbeat.invoke(agent.id, "on_demand", { taskKey }, "manual");
     const finished = await waitForRun(run!.id);
     expect(dispatchOf(finished)?.lane).toBe("fallback");
-    const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
-    expect(sessions.filter((session) => session.adapterType === "claude_local" && session.taskKey === taskKey)).toEqual([]);
+    // Sessions are settled just after the run is marked finished.
+    await expect.poll(async () => {
+      const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+      return sessions.filter((session) => session.adapterType === "claude_local" && session.taskKey === taskKey);
+    }, { timeout: 10_000, interval: 50 }).toEqual([]);
   });
 
   async function activeFallback(agent: typeof agents.$inferSelect, until = RESET_AT) {
@@ -252,6 +315,57 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBe("codex_auth_required");
     expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
+  });
+
+  it("suspends a fallback whose account cannot be prepared and makes the retry wait for the primary's reset", async () => {
+    const agent = await seedAgent({ usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
+    fallbackAccount.broken = true;
+    await activeFallback(agent);
+    const run = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+    const failed = await waitForRun(run!.id);
+    expect(failed.errorCode).toBe("configuration_incomplete");
+    const retry = await retryOf(run!.id);
+    expect(retry.scheduledRetryAt!.toISOString()).toBe(RESET_AT);
+    expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBe("configuration_incomplete");
+    expect(executions).toEqual([]);
+  });
+
+  it("still waits for the primary when the broken fallback used the last retry", async () => {
+    const agent = await seedAgent();
+    claudeTransientFailuresLeft = 1;
+    codexErrorCode = "codex_auth_required";
+    const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+    await waitForRun(first!.id);
+    const quotaRun = await runRetry(await retryOf(first!.id));
+    expect(quotaRun.errorCode).toBe("provider_quota");
+    const fallbackRun = await runRetry(await retryOf(quotaRun.id));
+    expect(dispatchOf(fallbackRun)?.lane).toBe("fallback");
+    expect(fallbackRun.errorCode).toBe("codex_auth_required");
+    const waitForPrimary = await retryOf(fallbackRun.id);
+    expect(waitForPrimary.scheduledRetryAt!.toISOString()).toBe(RESET_AT);
+  });
+
+  it("waits only until the primary is back when the fallback hits its own usage limit", async () => {
+    const agent = await seedAgent();
+    const primaryBackAt = "2030-04-22T18:00:00.000Z";
+    await activeFallback(agent, primaryBackAt);
+    codexErrorCode = "provider_quota";
+    const run = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+    const failed = await waitForRun(run!.id);
+    expect(dispatchOf(failed)?.lane).toBe("fallback");
+    const retry = await retryOf(run!.id);
+    expect(retry.scheduledRetryAt!.toISOString()).toBe(primaryBackAt);
+  });
+
+  it("drops a fallback account attribution copied into a primary run", async () => {
+    const agent = await seedAgent();
+    claudeHitsLimit = false;
+    const run = await heartbeat.invoke(agent.id, "on_demand", {
+      aiConnection: { provider: "openai", method: "api_key", connectionId: randomUUID(), grantId: randomUUID(), identity: "fallback" },
+    }, "manual");
+    const finished = await waitForRun(run!.id);
+    expect(dispatchOf(finished)).toEqual({ adapterType: "claude_local" });
+    expect((finished.contextSnapshot as Record<string, unknown>).aiConnection).toBeUndefined();
   });
 
   it("drops the primary's account attribution from a fallback run that has no managed account", async () => {
@@ -310,6 +424,16 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       expect(result).toEqual({ activated: false, reason: "already_on_fallback" });
     });
 
+    it("suspends without touching a newer end time, and does nothing once the fallback was cleared", async () => {
+      const agent = await seedAgent();
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: quotaRun(), retryNotBefore: new Date("2030-04-22T15:00:00.000Z"), now });
+      await activateUsageLimitFallback(db, { agent, run: quotaRun(), retryNotBefore: new Date(RESET_AT), now });
+      expect(await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", now)).toMatchObject({ activeUntil: RESET_AT, suspendedReason: "codex_auth_required" });
+      await clearUsageLimitFallbackState(db, agent.id);
+      expect(await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", now)).toBeNull();
+    });
+
     it("does not activate when the fallback account cannot be used", async () => {
       const agent = await seedAgent({
         usageLimitFallback: { ...codexFallback, aiConnection: { provider: "openai", method: "api_key", mode: "responsible_user" } },
@@ -340,6 +464,19 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     } as typeof agent;
     expect(await resolveAdapterDispatchForClaim(db, withAccount, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
+  });
+
+  it("treats only failures of the fallback's own account as a broken fallback", () => {
+    expect(isUsageLimitFallbackSetupFailure({ errorCode: "codex_auth_required", resultJson: null })).toBe(true);
+    expect(isUsageLimitFallbackSetupFailure({
+      errorCode: "configuration_incomplete",
+      resultJson: { configurationIncomplete: { reason: "ai_connection_unavailable" } },
+    })).toBe(true);
+    expect(isUsageLimitFallbackSetupFailure({
+      errorCode: "configuration_incomplete",
+      resultJson: { configurationIncomplete: { reason: "unresolved_base_ref" } },
+    })).toBe(false);
+    expect(isUsageLimitFallbackSetupFailure({ errorCode: "adapter_failed", resultJson: null })).toBe(false);
   });
 
   describe("effectiveAgentForRun", () => {

@@ -23,6 +23,7 @@ let home: string;
 const claudeBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" } as const;
 const codexBinding = { provider: "openai", method: "api_key", mode: "responsible_user" } as const;
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-6-astra" } };
+const codexFallbackWithAccount = { ...codexFallback, aiConnection: codexBinding };
 
 describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
   beforeAll(async () => {
@@ -88,7 +89,8 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
 
   it("saves a Codex fallback and applies the Codex defaults to its settings", async () => {
     const f = await fixture();
-    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallback } });
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     const fallback = (await storedRuntimeConfig(f.agentId)).usageLimitFallback as Record<string, any>;
     expect(fallback).toMatchObject({ enabled: true, adapterType: "codex_local", switchBack: "on_reset" });
@@ -98,7 +100,8 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
 
   it("keeps the saved fallback when a later update omits it", async () => {
     const f = await fixture();
-    await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallback } }).expect(200);
+    await f.connectCodex();
+    await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } }).expect(200);
     const response = await patch(f.app, f.agentId, { runtimeConfig: {} });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect((await storedRuntimeConfig(f.agentId)).usageLimitFallback).toMatchObject({ adapterType: "codex_local" });
@@ -214,6 +217,36 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     const created = response.body.agent ?? response.body;
     const installs = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.targetId, created.id));
     expect(installs.map((install) => install.connectionId)).toContain(codex.connectionId);
+  });
+
+  it("requires a fallback account when the primary uses a managed account", async () => {
+    const f = await fixture();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallback } });
+    expect(response.status).toBe(422);
+    expect(JSON.stringify(response.body)).toMatch(/Choose an AI account for the fallback/);
+  });
+
+  it("keeps a Codex primary's sandbox setting for a Codex fallback on another account", async () => {
+    const f = await fixture();
+    await db.update(agents)
+      .set({ adapterType: "codex_local", adapterConfig: { dangerouslyBypassApprovalsAndSandbox: false }, runtimeConfig: {} })
+      .where(eq(agents.id, f.agentId));
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const fallback = (await storedRuntimeConfig(f.agentId)).usageLimitFallback as Record<string, any>;
+    expect(fallback.adapterConfig).not.toHaveProperty("dangerouslyBypassApprovalsAndSandbox");
+  });
+
+  it("requires an instance admin to change the fallback of an agent with external instructions", async () => {
+    const f = await fixture();
+    await db.update(agents)
+      .set({ adapterConfig: { instructionsBundleMode: "external", instructionsRootPath: "/opt/operator/instructions", instructionsEntryFile: "AGENTS.md" } })
+      .where(eq(agents.id, f.agentId));
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
+    expect(response.status).toBe(403);
+    expect((await storedRuntimeConfig(f.agentId)).usageLimitFallback).toBeUndefined();
   });
 
   it("allows a disabled fallback with any primary", async () => {

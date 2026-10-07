@@ -99,6 +99,11 @@ describe("UsageLimitFallbackField safety controls", () => {
     flushSync(() => toggle!.click());
     expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, adapterConfig: { dangerouslyBypassApprovalsAndSandbox: false } });
   });
+
+  it("hides the Codex bypass setting when the fallback keeps the Codex primary's settings", async () => {
+    await mountField({ primaryAdapterType: "codex_local", value: enabledCodex });
+    expect(container.querySelector("[data-testid='usage-limit-fallback-codex-bypass']")).toBeNull();
+  });
 });
 
 describe("UsageLimitFallbackStatus", () => {
@@ -119,6 +124,13 @@ describe("UsageLimitFallbackStatus", () => {
     expect(button).toBeDefined();
     flushSync(() => button!.click());
     expect(onReturnToPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the fallback is paused and the agent is waiting for the primary", async () => {
+    const suspended = { usageLimitFallback: { ...stateJson("2999-01-01T00:00:00.000Z").usageLimitFallback, suspendedReason: "codex_auth_required" } };
+    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={suspended} pending={false} onReturnToPrimary={vi.fn()} />));
+    expect(container.textContent).toContain("the Codex fallback cannot run (codex_auth_required), waiting for Claude Code");
+    expect(container.textContent).not.toContain("running on Codex");
   });
 
   it("renders nothing once the fallback has expired", async () => {

@@ -74,9 +74,17 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
   };
 }
 
-/** Failures that show the fallback itself cannot run, as opposed to a problem with the work. */
-export function isUsageLimitFallbackSetupFailure(errorCode: string | null | undefined): boolean {
-  return errorCode === "configuration_incomplete" || isAiAuthenticationFailure(errorCode);
+function fallbackConfigProblem(agent: AgentRow, fallback: UsageLimitFallbackConfig): string | null {
+  const primaryAiConnection = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
+  return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
+}
+
+/** Failures of the fallback's own AI account, as opposed to a problem with the work or a setup gap the primary shares. */
+export function isUsageLimitFallbackSetupFailure(run: Pick<RunRow, "errorCode" | "resultJson">): boolean {
+  if (run.errorCode !== "configuration_incomplete") return isAiAuthenticationFailure(run.errorCode);
+  const resultJson = isRecord(run.resultJson) ? run.resultJson : {};
+  const configurationIncomplete = isRecord(resultJson.configurationIncomplete) ? resultJson.configurationIncomplete : {};
+  return configurationIncomplete.reason === "ai_connection_unavailable";
 }
 
 export async function readAgentUsageLimitFallbackState(db: Db, agentId: string): Promise<UsageLimitFallbackState | null> {
@@ -97,14 +105,15 @@ export async function clearUsageLimitFallbackState(db: Db, agentId: string, acti
 
 /** Stops using a fallback that cannot run for the rest of the window, so the agent waits for the primary's reset. */
 export async function suspendUsageLimitFallback(db: Db, agentId: string, reason: string, now: Date): Promise<UsageLimitFallbackState | null> {
-  const state = await readAgentUsageLimitFallbackState(db, agentId);
-  if (!state || !isUsageLimitFallbackStateActive(state, now)) return null;
-  const suspended: UsageLimitFallbackState = { ...state, suspendedReason: reason };
-  await db
+  const [row] = await db
     .update(agentRuntimeState)
-    .set({ stateJson: sql`jsonb_set(${agentRuntimeState.stateJson}, ${`{${USAGE_LIMIT_FALLBACK_STATE_KEY}}`}::text[], ${JSON.stringify(suspended)}::jsonb)`, updatedAt: now })
-    .where(sql`${agentRuntimeState.agentId} = ${agentId} and ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY} ->> 'activatedAt' = ${state.activatedAt}`);
-  return suspended;
+    .set({
+      stateJson: sql`jsonb_set(${agentRuntimeState.stateJson}, ${`{${USAGE_LIMIT_FALLBACK_STATE_KEY},suspendedReason}`}::text[], ${JSON.stringify(reason)}::jsonb)`,
+      updatedAt: now,
+    })
+    .where(sql`${agentRuntimeState.agentId} = ${agentId} and (${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY} ->> 'activeUntil')::timestamptz > ${now.toISOString()}::timestamptz`)
+    .returning({ stateJson: agentRuntimeState.stateJson });
+  return readUsageLimitFallbackState(row?.stateJson);
 }
 
 async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback: UsageLimitFallbackConfig, responsibleUserId: string | null): Promise<boolean> {
@@ -138,6 +147,7 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   if (!state) return primary;
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
   const current = fallback
+    && !fallbackConfigProblem(agent, fallback)
     && isUsageLimitFallbackStateActive(state, now)
     && state.primaryAdapterType === agent.adapterType
     && state.fallbackAdapterType === fallback.adapterType;
@@ -165,8 +175,7 @@ export async function activateUsageLimitFallback(db: Db, input: {
   if (runUsageLimitLane(run) === "fallback") return { activated: false, reason: "already_on_fallback" };
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
   if (!fallback) return { activated: false, reason: "not_configured" };
-  const primaryAiConnection = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
-  const problem = usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
+  const problem = fallbackConfigProblem(agent, fallback);
   if (problem) return { activated: false, reason: problem };
   const existing = await readAgentUsageLimitFallbackState(db, agent.id);
   if (existing?.suspendedReason && isUsageLimitFallbackStateActive(existing, now)) {

@@ -3,7 +3,7 @@ import { emailConnectionService } from "./email-connections.js";
 import { agentService } from "./agents.js";
 import { logActivity } from "./activity-log.js";
 import { aiConnectionService } from "./ai-connections.js";
-import { effectiveAgentForRun } from "./usage-limit-fallback.js";
+import { effectiveAgentForRun, runUsageLimitLane } from "./usage-limit-fallback.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { aiBindingForAuthRecovery, isAiAuthenticationFailure } from "./ai-auth-failure.js";
 import { and, eq, desc, isNull, sql } from "drizzle-orm";
@@ -1106,6 +1106,8 @@ export function connectionIntentService(db: Db) {
           runStartedAt: run.startedAt ?? run.createdAt,
           attribution: attribution as unknown as AiConnectionAttribution & { identity: string } });
       }
+      // The sign-in card completes against the primary's account, so a broken fallback is suspended and repaired in settings instead.
+      if (runUsageLimitLane(run) === "fallback") return null;
       return requestWithContext(context, binding.provider, { purpose: "ai" });
     },
     loadIntent,

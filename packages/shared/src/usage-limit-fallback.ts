@@ -104,7 +104,11 @@ export function buildUsageLimitFallbackAdapterConfig(
   primaryAdapterType: string,
 ): Record<string, unknown> {
   const primary = isRecord(primaryAdapterConfig) ? primaryAdapterConfig : {};
-  if (fallback.adapterType === primaryAdapterType) return { ...primary, ...fallback.adapterConfig };
+  if (fallback.adapterType === primaryAdapterType) {
+    // The primary's sandbox and permission settings always apply to a second account on its adapter.
+    const { dangerouslySkipPermissions, dangerouslyBypassApprovalsAndSandbox, ...engineSettings } = fallback.adapterConfig;
+    return { ...primary, ...engineSettings };
+  }
   const inherited: Record<string, unknown> = {};
   for (const key of USAGE_LIMIT_FALLBACK_INHERITED_CONFIG_KEYS) {
     if (primary[key] !== undefined) inherited[key] = primary[key];
@@ -140,6 +144,9 @@ export function usageLimitFallbackConfigProblem(input: {
   }
   if (input.fallback.adapterType === input.primaryAdapterType && sameAiConnectionBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
     return "The fallback must use a different adapter or a different AI account than the primary";
+  }
+  if (input.primaryAiConnection && !input.fallback.aiConnection) {
+    return "Choose an AI account for the fallback: an agent on a managed AI account cannot fall back to host or legacy credentials";
   }
   return null;
 }

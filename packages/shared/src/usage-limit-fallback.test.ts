@@ -131,6 +131,15 @@ describe("buildUsageLimitFallbackAdapterConfig", () => {
     );
     expect(config).toMatchObject({ dangerouslySkipPermissions: false, maxTurnsPerRun: 200, command: "claude", effort: "high", model: "claude-second-account" });
   });
+
+  it("never lets a fallback on the same adapter loosen the primary's sandbox or permissions", () => {
+    const config = buildUsageLimitFallbackAdapterConfig(
+      { dangerouslyBypassApprovalsAndSandbox: false },
+      { adapterType: "codex_local", adapterConfig: { model: "gpt-second-account", dangerouslyBypassApprovalsAndSandbox: true, dangerouslySkipPermissions: true } },
+      "codex_local",
+    );
+    expect(config).toEqual({ dangerouslyBypassApprovalsAndSandbox: false, model: "gpt-second-account" });
+  });
 });
 
 describe("usage-limit fallback state", () => {
@@ -196,5 +205,13 @@ describe("usageLimitFallbackConfigProblem", () => {
 
   it("rejects a primary adapter outside the allow-list", () => {
     expect(usageLimitFallbackConfigProblem({ primaryAdapterType: "paperclip_runner", fallback: codexFallback })).toMatch(/supported only/);
+  });
+
+  it("requires a fallback account when the primary uses a managed account", () => {
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "claude_local",
+      primaryAiConnection: sharedClaudeBinding,
+      fallback: codexFallback,
+    })).toMatch(/Choose an AI account for the fallback/);
   });
 });

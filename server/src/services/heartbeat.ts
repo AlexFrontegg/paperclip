@@ -38,7 +38,7 @@ import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
-import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
+import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -15418,16 +15418,28 @@ export function heartbeatService(
     failedRun: typeof heartbeatRuns.$inferSelect,
     storedAgent: typeof agents.$inferSelect,
   ): Promise<boolean> {
-    if (readRunAdapterDispatch(failedRun)?.lane !== "fallback" || !isUsageLimitFallbackSetupFailure(failedRun.errorCode)) return false;
+    if (readRunAdapterDispatch(failedRun)?.lane !== "fallback" || !isUsageLimitFallbackSetupFailure(failedRun)) return false;
     const now = new Date();
     const state = await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
     if (!state) return false;
+    // The broken fallback, not the work, used this attempt, so the wait for the primary always gets one more.
+    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, {
+      now,
+      delayMs: Math.max(0, Date.parse(state.activeUntil) - now.getTime()),
+      maxAttempts: Math.max(
+        BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+        executionRetryAttemptCount(failedRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
+      ),
+    });
+    const waitingForPrimary = retry.outcome === "scheduled";
     await appendRunEvent(failedRun, {
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: `Usage-limit fallback cannot run (${failedRun.errorCode}); waiting for the primary until ${state.activeUntil}`,
-      payload: { usageLimitFallback: state },
+      message: waitingForPrimary
+        ? `Usage-limit fallback cannot run (${failedRun.errorCode}); waiting for the primary until ${state.activeUntil}`
+        : `Usage-limit fallback cannot run (${failedRun.errorCode}); it stays off until ${state.activeUntil}`,
+      payload: { usageLimitFallback: state, retryScheduled: waitingForPrimary },
     });
     await logActivity(db, {
       companyId: failedRun.companyId,
@@ -15440,11 +15452,7 @@ export function heartbeatService(
       entityId: failedRun.agentId,
       details: { ...state },
     });
-    await scheduleBoundedRetryForRun(failedRun, storedAgent, {
-      now,
-      delayMs: Math.max(0, Date.parse(state.activeUntil) - now.getTime()),
-    });
-    return true;
+    return waitingForPrimary;
   }
 
   async function scheduleBoundedRetryForRun(
@@ -15626,16 +15634,25 @@ export function heartbeatService(
       });
     }
 
+    // A quota failure on the fallback itself waits only until the primary is back; a cleared fallback means it is back now.
+    const primaryBackAt =
+      usageLimitFallback && !usageLimitFallback.activated && usageLimitFallback.reason === "already_on_fallback"
+        ? (await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil ?? now.toISOString()
+        : undefined;
+    const retryNotBefore =
+      primaryBackAt && (!transientRetryNotBefore || Date.parse(primaryBackAt) < transientRetryNotBefore.getTime())
+        ? new Date(primaryBackAt)
+        : transientRetryNotBefore;
     const schedule =
       !usageLimitFallback?.activated &&
-      transientRetryNotBefore &&
-      transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
+      retryNotBefore &&
+      retryNotBefore.getTime() > baseSchedule.dueAt.getTime()
         ? {
             ...baseSchedule,
-            dueAt: transientRetryNotBefore,
+            dueAt: retryNotBefore,
             delayMs: Math.max(
               0,
-              transientRetryNotBefore.getTime() - now.getTime(),
+              retryNotBefore.getTime() - now.getTime(),
             ),
           }
         : baseSchedule;
@@ -21784,7 +21801,8 @@ export function heartbeatService(
             await finalizeAiConnectionBusyDeferral(run, error, !authorizedNonAssigneeWake);
             return;
           }
-          if (responsibleUserId && issueId) {
+          // A broken fallback account is suspended and repaired from the agent's settings, not from a sign-in card on the task.
+          if (responsibleUserId && issueId && readRunAdapterDispatch(run)?.lane !== "fallback") {
             await connectionIntentService(db).request({ sub: agent.id, company_id: agent.companyId, run_id: run.id, responsible_user_id: responsibleUserId }, aiBinding.provider, { purpose: "ai" }).catch(() => {
               logger.warn({ runId: run.id, agentId: agent.id }, "Could not attach AI connection request; runtime configuration action remains available");
             });
@@ -21802,8 +21820,8 @@ export function heartbeatService(
         for (const key of AI_AUTH_ENV_KEYS) secretKeys.add(key);
         context.aiConnection = { ...managedAiRuntime.attribution, identity: managedAiRuntime.identity };
         await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
-      } else if (readRunAdapterDispatch(run)?.lane === "fallback" && context.aiConnection) {
-        // The retry copied the primary's account attribution; this fallback run uses no managed account.
+      } else if (context.aiConnection && storedAgent.runtimeConfig?.usageLimitFallback !== undefined) {
+        // The retry copied the other lane's account attribution; this run uses no managed account.
         delete context.aiConnection;
         await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) - 'aiConnection'` }).where(eq(heartbeatRuns.id, run.id));
       }
@@ -26628,18 +26646,24 @@ export function heartbeatService(
                 () => undefined,
               );
             }
+            const fallbackSuspended = await suspendBrokenUsageLimitFallback(livenessRun, failedAgent).catch((suspendError) => {
+              logger.warn({ err: suspendError, runId: livenessRun.id }, "failed to suspend the usage-limit fallback after setup failure");
+              return false;
+            });
             // No provider work began. Retry temporary host scan failures with
             // the existing durable failure budget, before releasing execution.
             // Generic recovery must not grant a second budget on exhaustion.
-            await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
-              ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
-              : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
-            ).catch((retryError) => {
-              logger.warn(
-                { err: retryError, runId: livenessRun.id },
-                "failed to schedule interaction continuation retry after setup failure",
-              );
-            });
+            if (!fallbackSuspended) {
+              await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+                ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
+                : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
+              ).catch((retryError) => {
+                logger.warn(
+                  { err: retryError, runId: livenessRun.id },
+                  "failed to schedule interaction continuation retry after setup failure",
+                );
+              });
+            }
           }
           await releaseIssueExecutionAndPromote(livenessRun, {
             suppressImmediateRecovery:

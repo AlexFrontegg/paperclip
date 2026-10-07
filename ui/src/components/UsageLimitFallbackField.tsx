@@ -117,7 +117,7 @@ export function UsageLimitFallbackField({
             value={base.aiConnection}
             onChange={(binding) => onChange({ ...base, aiConnection: binding })}
           />
-          {fallbackAdapterType === "codex_local" && (
+          {fallbackAdapterType === "codex_local" && primaryAdapterType !== "codex_local" && (
             <ToggleField
               label="Bypass Codex approvals and sandbox"
               hint="Matches new Codex agents. Turn off to keep Codex's own approval prompts and sandbox for fallback runs."
@@ -157,14 +157,18 @@ export function UsageLimitFallbackStatus({
   const state = readUsageLimitFallbackState(stateJson);
   if (!state || !isUsageLimitFallbackStateActive(state, new Date())) return null;
   const until = new Date(state.activeUntil).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const fallbackLabel = getAdapterDisplay(state.fallbackAdapterType).label;
+  const primaryLabel = getAdapterDisplay(state.primaryAdapterType).label;
   return (
     <span className="flex items-center gap-2" data-testid="usage-limit-fallback-status">
       <span>·</span>
       <span className="text-amber-600 dark:text-amber-400">
-        Usage limit reached: running on {getAdapterDisplay(state.fallbackAdapterType).label} until {until}
+        {state.suspendedReason
+          ? `Usage limit reached: the ${fallbackLabel} fallback cannot run (${state.suspendedReason}), waiting for ${primaryLabel} until ${until}`
+          : `Usage limit reached: running on ${fallbackLabel} until ${until}`}
       </span>
       <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={onReturnToPrimary}>
-        Return to {getAdapterDisplay(state.primaryAdapterType).label}
+        Return to {primaryLabel}
       </Button>
     </span>
   );

@@ -3436,9 +3436,12 @@ export function agentRoutes(
     });
     if (problem) throw unprocessable(problem, { code: "usage_limit_fallback_invalid" });
     await assertSelectableAdapterType(fallback.adapterType);
-    const adapterConfig = usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
-      applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
-    );
+    // A fallback on the primary's adapter keeps the primary's settings, so new-agent defaults must not override them.
+    const adapterConfig = fallback.adapterType === input.primaryAdapterType
+      ? fallback.adapterConfig
+      : usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
+        applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
+      );
     const normalized: UsageLimitFallbackConfig = { ...fallback, adapterConfig };
     if (!normalized.aiConnection) return { fallback: normalized };
     const effectiveConfig = buildUsageLimitFallbackAdapterConfig(input.primaryAdapterConfig, normalized, input.primaryAdapterType);
@@ -5665,6 +5668,8 @@ export function agentRoutes(
       || !sameJsonValue(nextFallback, existing.runtimeConfig.usageLimitFallback);
     if (nextFallback !== undefined && fallbackInputsChanged) {
       await assertCanUpdateAgent(req, existing);
+      // The fallback changes what adapter and settings this agent runs with, so it needs the same admin check.
+      if (!sameJsonValue(nextFallback, existing.runtimeConfig.usageLimitFallback)) assertExternalInstructionsAdmin(req, existing);
       const patchFallback = await normalizeUsageLimitFallbackForSave(req, {
         companyId: existing.companyId,
         agentId: existing.id,
