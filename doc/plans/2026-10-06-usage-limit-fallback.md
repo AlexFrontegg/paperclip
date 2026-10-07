@@ -169,22 +169,28 @@ more primary-lane failures activate the fallback, in either direction between
 Claude Code and Codex. The state records the reason (`provider_outage` or
 `primary_signed_out`), and the header and run events say why the agent switched.
 
-- **Outage:** a `transient_upstream` failure on a run that is already a failure
-  retry. The first failure retries the primary as before, so one blip never
-  switches. The window is 30 minutes, then the primary is tried again.
+- **Outage:** a second `transient_upstream` failure in a row on the primary (the
+  failing run is a transient retry of a `transient_upstream` failure). The first
+  failure retries the primary as before, so one blip never switches. The window
+  is 30 minutes, then the primary is tried again. A blip on the fallback lane
+  gets the normal short retry.
 - **Signed out:** an AI sign-in failure, or a managed account that cannot be
   prepared (`configuration_incomplete` with `ai_connection_unavailable`). The
   sign-in card is still raised for the primary, and the retry runs on the
   fallback at once.
   - If the primary's managed account is marked for sign-in, the state sets
-    `waitForReconnect`. Each claim then checks the account: still signed out
-    keeps the fallback and pushes `activeUntil` 30 minutes ahead; reconnected
-    clears the state, so the next run uses the primary.
+    `waitForReconnect` and records the signed-out user. Each claim then checks
+    that user's account: still signed out keeps the fallback and pushes
+    `activeUntil` 30 minutes ahead; reconnected clears the state, so the next
+    run uses the primary. A suspended fallback is not kept past its window.
   - Any other account (a host login, or a managed account that still looks
     usable) uses a 30-minute window, so a fix is picked up without a loop of
     failed runs.
 - Failures of the work itself (model refusal, tool errors, the turn cap) never
   activate the fallback.
+- When two activations overlap, the one that lasts longer keeps its reason and
+  switch-back rule. Turning the setting off ends an outage or sign-in switch at
+  the next claim.
 
 A `provider_quota` failure on the fallback lane never re-activates or extends the
 fallback. Its retry waits until the earlier of the fallback's reset and the

@@ -69,6 +69,8 @@ export const usageLimitFallbackStateSchema = z.object({
   reason: z.enum(USAGE_LIMIT_FALLBACK_REASONS),
   /** Set when the primary's managed account is signed out; the fallback then lasts until that account is reconnected. */
   waitForReconnect: z.boolean().optional(),
+  /** The user whose account signed out, so a reconnect is checked for that account. */
+  signedOutUserId: z.string().min(1).optional(),
   /** Set when the fallback itself cannot run; the agent then waits for the primary's reset. */
   suspendedReason: z.string().min(1).optional(),
 });

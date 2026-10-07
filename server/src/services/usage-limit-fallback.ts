@@ -185,11 +185,12 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
   const sameSetup = fallback !== null
     && !fallbackConfigProblem(agent, fallback)
+    && (state.reason === "provider_quota" || fallback.switchWhenUnavailable)
     && state.primaryAdapterType === agent.adapterType
     && state.fallbackAdapterType === fallback.adapterType;
-  // A managed primary account that is still signed out keeps the fallback past its window; a reconnected one ends it early.
-  const primarySignedOut = sameSetup && state.waitForReconnect
-    ? await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null)
+  // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
+  const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason
+    ? await primaryAccountSignedOut(db, agent, state.signedOutUserId ?? run.responsibleUserId ?? null)
     : null;
   if (!fallback || !sameSetup || !(primarySignedOut ?? isUsageLimitFallbackStateActive(state, now))) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
@@ -249,16 +250,19 @@ export async function activateUsageLimitFallback(db: Db, input: {
     const current = readUsageLimitFallbackState(row?.stateJson);
     const currentActive = isUsageLimitFallbackStateActive(current, now) ? current : null;
     if (currentActive?.suspendedReason) return null;
-    const keepCurrentEnd = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
-    const next: UsageLimitFallbackState = {
-      activeUntil: keepCurrentEnd ? currentActive.activeUntil : proposedUntil.toISOString(),
-      activatedAt: currentActive?.activatedAt ?? now.toISOString(),
-      sourceRunId: currentActive?.sourceRunId ?? run.id,
-      primaryAdapterType: agent.adapterType,
-      fallbackAdapterType: fallback.adapterType,
-      reason: keepCurrentEnd ? currentActive.reason : reason,
-      ...(waitForReconnect || (keepCurrentEnd && currentActive.waitForReconnect) ? { waitForReconnect: true } : {}),
-    };
+    // The activation that lasts longer decides the reason and how the switch-back happens.
+    const keepCurrent = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
+    const next: UsageLimitFallbackState = keepCurrent
+      ? { ...currentActive, primaryAdapterType: agent.adapterType, fallbackAdapterType: fallback.adapterType }
+      : {
+        activeUntil: proposedUntil.toISOString(),
+        activatedAt: currentActive?.activatedAt ?? now.toISOString(),
+        sourceRunId: currentActive?.sourceRunId ?? run.id,
+        primaryAdapterType: agent.adapterType,
+        fallbackAdapterType: fallback.adapterType,
+        reason,
+        ...(waitForReconnect ? { waitForReconnect: true, ...(run.responsibleUserId ? { signedOutUserId: run.responsibleUserId } : {}) } : {}),
+      };
     if (row) {
       await tx.update(agentRuntimeState)
         .set({ stateJson: { ...(isRecord(row.stateJson) ? row.stateJson : {}), [USAGE_LIMIT_FALLBACK_STATE_KEY]: next }, updatedAt: now })

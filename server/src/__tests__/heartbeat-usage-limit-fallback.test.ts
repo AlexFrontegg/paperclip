@@ -598,6 +598,58 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local"]);
     });
 
+    it("retries a blip on the fallback soon instead of waiting for the primary's reset", async () => {
+      const agent = await seedAgent();
+      codexFailures = [outage];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      expect((await waitForRun(first!.id)).errorCode).toBe("provider_quota");
+      const fallbackRun = await runRetry(await retryOf(first!.id));
+      expect(dispatchOf(fallbackRun)?.lane).toBe("fallback");
+      expect(fallbackRun.errorCode).toBe("transient_upstream");
+      const retry = await retryOf(fallbackRun.id);
+      expect(retry.scheduledRetryAt!.getTime() - Date.now()).toBeLessThan(10 * 60_000);
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.reason).toBe("provider_quota");
+    });
+
+    const signedOutManagedAgent = () => seedAgent({
+      aiConnection: anthropicBinding,
+      usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
+    });
+    const signedOutRun = () => ({ id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null }) as typeof heartbeatRuns.$inferSelect;
+
+    it("lets a suspended fallback lapse after its window even while the primary is still signed out", async () => {
+      const agent = await signedOutManagedAgent();
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "primary_signed_out", retryNotBefore: null, now });
+      await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", now);
+      expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date("2030-04-22T10:10:00.000Z")))
+        .toEqual({ adapterType: "claude_local" });
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil).toBe("2030-04-22T10:30:00.000Z");
+      await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date("2030-04-22T11:00:00.000Z"));
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("keeps a longer usage-limit window when the primary also signs out", async () => {
+      const agent = await signedOutManagedAgent();
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), retryNotBefore: new Date(RESET_AT), now });
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "primary_signed_out", retryNotBefore: null, now });
+      const state = await readAgentUsageLimitFallbackState(db, agent.id);
+      expect(state).toMatchObject({ reason: "provider_quota", activeUntil: RESET_AT });
+      expect(state?.waitForReconnect).toBeUndefined();
+    });
+
+    it("ends an outage switch once the setting is turned off", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "provider_outage", retryNotBefore: null, now });
+      const turnedOff = { ...agent, runtimeConfig: { ...(agent.runtimeConfig as Record<string, unknown>), usageLimitFallback: codexFallback } } as typeof agent;
+      expect(await resolveAdapterDispatchForClaim(db, turnedOff, { responsibleUserId: null }, now)).toEqual({ adapterType: "claude_local" });
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
     it("does not switch for a problem with the work itself", async () => {
       const agent = await seedAgent(whenUnavailable);
       claudeFailures = [{ errorCode: "claude_refusal", errorFamily: "model_refusal" }];

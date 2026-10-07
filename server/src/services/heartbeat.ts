@@ -15669,11 +15669,13 @@ export function heartbeatService(
       }
     }
 
-    // A primary-lane usage limit, or an outage that outlasted one retry, switches the agent to its fallback and retries now.
+    // A primary-lane usage limit, or a second outage failure in a row, switches the agent to its fallback and retries now.
     const fallbackReason =
       transientRecovery?.errorFamily === "provider_quota"
         ? "provider_quota"
-        : transientRecovery?.errorFamily === "transient_upstream" && consumedAttempts >= 1
+        : transientRecovery?.errorFamily === "transient_upstream"
+          && contextSnapshot.retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
+          && contextSnapshot.errorFamily === "transient_upstream"
           ? "provider_outage"
           : null;
     const usageLimitFallback = fallbackReason
@@ -15689,7 +15691,7 @@ export function heartbeatService(
 
     // A quota failure on the fallback itself waits only until the primary is back; a cleared fallback means it is back now.
     const primaryBackAt =
-      usageLimitFallback && !usageLimitFallback.activated && usageLimitFallback.reason === "already_on_fallback"
+      fallbackReason === "provider_quota" && usageLimitFallback && !usageLimitFallback.activated && usageLimitFallback.reason === "already_on_fallback"
         ? (await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil ?? now.toISOString()
         : undefined;
     const retryNotBefore =

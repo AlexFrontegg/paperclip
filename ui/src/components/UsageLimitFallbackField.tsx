@@ -171,7 +171,8 @@ export function UsageLimitFallbackStatus({
   onReturnToPrimary: () => void;
 }) {
   const state = readUsageLimitFallbackState(stateJson);
-  if (!state || !isUsageLimitFallbackStateActive(state, new Date())) return null;
+  const waitingForReconnect = state?.waitForReconnect && !state.suspendedReason;
+  if (!state || !(waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date()))) return null;
   const until = new Date(state.activeUntil).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   const fallbackLabel = getAdapterDisplay(state.fallbackAdapterType).label;
   const primaryLabel = getAdapterDisplay(state.primaryAdapterType).label;

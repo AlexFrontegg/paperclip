@@ -148,6 +148,12 @@ describe("UsageLimitFallbackStatus", () => {
     expect(container.textContent).toContain("Claude Code needs to sign in again: running on Codex until Claude Code is reconnected");
   });
 
+  it("stays visible while waiting for the primary's account to be reconnected", async () => {
+    const waiting = { usageLimitFallback: { ...stateJson("2000-01-01T00:00:00.000Z").usageLimitFallback, reason: "primary_signed_out", waitForReconnect: true } };
+    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={waiting} pending={false} onReturnToPrimary={vi.fn()} />));
+    expect(container.textContent).toContain("running on Codex until Claude Code is reconnected");
+  });
+
   it("renders nothing once the fallback has expired", async () => {
     flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={stateJson("2000-01-01T00:00:00.000Z")} pending={false} onReturnToPrimary={vi.fn()} />));
     expect(container.querySelector("[data-testid='usage-limit-fallback-status']")).toBeNull();
