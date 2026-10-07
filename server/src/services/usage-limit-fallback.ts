@@ -8,8 +8,10 @@ import {
   readUsageLimitFallbackState,
   usageLimitFallbackConfigProblem,
   USAGE_LIMIT_FALLBACK_STATE_KEY,
+  type AiConnectionBinding,
   type UsageLimitFallbackConfig,
   type UsageLimitFallbackLane,
+  type UsageLimitFallbackReason,
   type UsageLimitFallbackState,
 } from "@paperclipai/shared";
 import { AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
@@ -18,6 +20,8 @@ import { aiConnectionService } from "./ai-connections.js";
 
 /** Same wait recovery uses when a provider gives no reset time. */
 export const USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS = 60 * 60 * 1000;
+/** How long an outage or a signed-out primary keeps the fallback before the primary is tried again. */
+export const USAGE_LIMIT_FALLBACK_UNAVAILABLE_WINDOW_MS = 30 * 60 * 1000;
 
 type AgentRow = typeof agents.$inferSelect;
 type RunRow = typeof heartbeatRuns.$inferSelect;
@@ -79,8 +83,8 @@ function fallbackConfigProblem(agent: AgentRow, fallback: UsageLimitFallbackConf
   return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
 }
 
-/** Failures of the fallback's own AI account, as opposed to a problem with the work or a setup gap the primary shares. */
-export function isUsageLimitFallbackSetupFailure(run: Pick<RunRow, "errorCode" | "resultJson">): boolean {
+/** Failures of the AI account the run used, as opposed to a problem with the work or a setup gap both lanes share. */
+export function isRunAiAccountFailure(run: Pick<RunRow, "errorCode" | "resultJson">): boolean {
   if (run.errorCode !== "configuration_incomplete") return isAiAuthenticationFailure(run.errorCode);
   const resultJson = isRecord(run.resultJson) ? run.resultJson : {};
   const configurationIncomplete = isRecord(resultJson.configurationIncomplete) ? resultJson.configurationIncomplete : {};
@@ -116,24 +120,57 @@ export async function suspendUsageLimitFallback(db: Db, agentId: string, reason:
   return readUsageLimitFallbackState(row?.stateJson);
 }
 
-async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback: UsageLimitFallbackConfig, responsibleUserId: string | null): Promise<boolean> {
-  if (!fallback.aiConnection) return true;
-  const effectiveConfig = fallbackAdapterConfig(agent, fallback);
+async function aiAccountSelectable(db: Db, agent: AgentRow, account: {
+  adapterType: string;
+  config: Record<string, unknown>;
+  binding: AiConnectionBinding;
+  responsibleUserId: string | null;
+}): Promise<boolean> {
   try {
     await aiConnectionService(db).select({
       companyId: agent.companyId,
       agentId: agent.id,
-      userId: responsibleUserId,
-      adapterType: fallback.adapterType,
-      model: effectiveConfig.model,
-      runnerProvider: effectiveConfig.provider,
-      acpxAgent: effectiveConfig.acpxAgent,
-      binding: fallback.aiConnection,
+      userId: account.responsibleUserId,
+      adapterType: account.adapterType,
+      model: account.config.model,
+      runnerProvider: account.config.provider,
+      acpxAgent: account.config.acpxAgent,
+      binding: account.binding,
     });
     return true;
   } catch {
     return false;
   }
+}
+
+async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback: UsageLimitFallbackConfig, responsibleUserId: string | null): Promise<boolean> {
+  if (!fallback.aiConnection) return true;
+  return aiAccountSelectable(db, agent, {
+    adapterType: fallback.adapterType,
+    config: fallbackAdapterConfig(agent, fallback),
+    binding: fallback.aiConnection,
+    responsibleUserId,
+  });
+}
+
+/** Whether the primary's managed AI account still cannot be used; null when there is no managed account to check. */
+async function primaryAccountSignedOut(db: Db, agent: AgentRow, responsibleUserId: string | null): Promise<boolean | null> {
+  const binding = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
+  if (!binding) return null;
+  const config = isRecord(agent.adapterConfig) ? agent.adapterConfig : {};
+  return !await aiAccountSelectable(db, agent, { adapterType: agent.adapterType, config, binding, responsibleUserId });
+}
+
+async function extendUsageLimitFallback(db: Db, agentId: string, activatedAt: string, until: Date): Promise<void> {
+  await db
+    .update(agentRuntimeState)
+    .set({
+      stateJson: sql`jsonb_set(${agentRuntimeState.stateJson}, ${`{${USAGE_LIMIT_FALLBACK_STATE_KEY},activeUntil}`}::text[], ${JSON.stringify(until.toISOString())}::jsonb)`,
+      updatedAt: new Date(),
+    })
+    .where(sql`${agentRuntimeState.agentId} = ${agentId}
+      and ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY} ->> 'activatedAt' = ${activatedAt}
+      and (${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY} ->> 'activeUntil')::timestamptz < ${until.toISOString()}::timestamptz`);
 }
 
 /**
@@ -146,35 +183,52 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   const state = await readAgentUsageLimitFallbackState(db, agent.id);
   if (!state) return primary;
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  const current = fallback
+  const sameSetup = fallback !== null
     && !fallbackConfigProblem(agent, fallback)
-    && isUsageLimitFallbackStateActive(state, now)
+    && (state.reason === "provider_quota" || fallback.switchWhenUnavailable)
     && state.primaryAdapterType === agent.adapterType
     && state.fallbackAdapterType === fallback.adapterType;
-  if (!current) {
+  // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
+  const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason
+    ? await primaryAccountSignedOut(db, agent, state.signedOutUserId ?? run.responsibleUserId ?? null)
+    : null;
+  if (!fallback || !sameSetup || !(primarySignedOut ?? isUsageLimitFallbackStateActive(state, now))) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
     return primary;
   }
+  let fallbackUntil = state.activeUntil;
+  if (primarySignedOut) {
+    const checkAgainAt = new Date(now.getTime() + USAGE_LIMIT_FALLBACK_UNAVAILABLE_WINDOW_MS);
+    if (Date.parse(fallbackUntil) < checkAgainAt.getTime()) {
+      await extendUsageLimitFallback(db, agent.id, state.activatedAt, checkAgainAt);
+      fallbackUntil = checkAgainAt.toISOString();
+    }
+  }
   if (state.suspendedReason) return primary;
   if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) return primary;
-  return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil: state.activeUntil };
+  return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil };
 }
 
 export type UsageLimitFallbackActivation =
   | { activated: true; state: UsageLimitFallbackState }
   | { activated: false; reason: string };
 
-/** Turns the fallback on after a primary-lane quota failure, keeping the later end time if one is already active. */
+/**
+ * Turns the fallback on after a primary-lane failure: a usage limit, or, when the fallback is set to
+ * also switch on it, an outage or a signed-out account. A later end time already active is kept.
+ */
 export async function activateUsageLimitFallback(db: Db, input: {
   agent: AgentRow;
   run: RunRow;
+  reason?: UsageLimitFallbackReason;
   retryNotBefore: Date | null;
   now: Date;
 }): Promise<UsageLimitFallbackActivation> {
   const { agent, run, now } = input;
+  const reason = input.reason ?? "provider_quota";
   if (runUsageLimitLane(run) === "fallback") return { activated: false, reason: "already_on_fallback" };
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  if (!fallback) return { activated: false, reason: "not_configured" };
+  if (!fallback || (reason !== "provider_quota" && !fallback.switchWhenUnavailable)) return { activated: false, reason: "not_configured" };
   const problem = fallbackConfigProblem(agent, fallback);
   if (problem) return { activated: false, reason: problem };
   const existing = await readAgentUsageLimitFallbackState(db, agent.id);
@@ -184,23 +238,31 @@ export async function activateUsageLimitFallback(db: Db, input: {
   if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) {
     return { activated: false, reason: "fallback_ai_connection_unavailable" };
   }
+  // Only an account marked signed out can be watched for a reconnect; otherwise the primary is retried on a timer.
+  const waitForReconnect = reason === "primary_signed_out"
+    && await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null) === true;
+  const windowMs = reason === "provider_quota" ? USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS : USAGE_LIMIT_FALLBACK_UNAVAILABLE_WINDOW_MS;
   const proposedUntil = input.retryNotBefore && input.retryNotBefore.getTime() > now.getTime()
     ? input.retryNotBefore
-    : new Date(now.getTime() + USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS);
+    : new Date(now.getTime() + windowMs);
   const state = await db.transaction(async (tx) => {
     const [row] = await tx.select().from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agent.id)).for("update");
     const current = readUsageLimitFallbackState(row?.stateJson);
     const currentActive = isUsageLimitFallbackStateActive(current, now) ? current : null;
     if (currentActive?.suspendedReason) return null;
-    const keepCurrentEnd = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
-    const next: UsageLimitFallbackState = {
-      activeUntil: keepCurrentEnd ? currentActive.activeUntil : proposedUntil.toISOString(),
-      activatedAt: currentActive?.activatedAt ?? now.toISOString(),
-      sourceRunId: currentActive?.sourceRunId ?? run.id,
-      primaryAdapterType: agent.adapterType,
-      fallbackAdapterType: fallback.adapterType,
-      reason: "provider_quota",
-    };
+    // The activation that lasts longer decides the reason and how the switch-back happens.
+    const keepCurrent = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
+    const next: UsageLimitFallbackState = keepCurrent
+      ? { ...currentActive, primaryAdapterType: agent.adapterType, fallbackAdapterType: fallback.adapterType }
+      : {
+        activeUntil: proposedUntil.toISOString(),
+        activatedAt: currentActive?.activatedAt ?? now.toISOString(),
+        sourceRunId: currentActive?.sourceRunId ?? run.id,
+        primaryAdapterType: agent.adapterType,
+        fallbackAdapterType: fallback.adapterType,
+        reason,
+        ...(waitForReconnect ? { waitForReconnect: true, ...(run.responsibleUserId ? { signedOutUserId: run.responsibleUserId } : {}) } : {}),
+      };
     if (row) {
       await tx.update(agentRuntimeState)
         .set({ stateJson: { ...(isRecord(row.stateJson) ? row.stateJson : {}), [USAGE_LIMIT_FALLBACK_STATE_KEY]: next }, updatedAt: now })

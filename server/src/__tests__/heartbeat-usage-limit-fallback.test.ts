@@ -11,7 +11,7 @@ import {
   activateUsageLimitFallback,
   clearUsageLimitFallbackState,
   effectiveAgentForRun,
-  isUsageLimitFallbackSetupFailure,
+  isRunAiAccountFailure,
   readAgentUsageLimitFallbackState,
   resolveAdapterDispatchForClaim,
   suspendUsageLimitFallback,
@@ -19,14 +19,19 @@ import {
 
 vi.mock("../telemetry.js", () => ({ getTelemetryClient: () => ({ track: vi.fn() }) }));
 
-const fallbackAccount = vi.hoisted(() => ({ broken: false }));
+// Fake saved AI accounts by provider: `selectable` pass the account check, `broken` fail while being prepared.
+// With `selectable` null the real account services run.
+const aiAccounts = vi.hoisted(() => ({ broken: [] as string[], selectable: null as string[] | null }));
 vi.mock("../services/ai-connection-runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/ai-connection-runtime.js")>();
   return {
     ...actual,
     prepareManagedAiRuntime: async (...args: Parameters<typeof actual.prepareManagedAiRuntime>) => {
-      if (fallbackAccount.broken) throw new Error("Reconnect this AI account");
-      return actual.prepareManagedAiRuntime(...args);
+      const { binding, config } = args[1];
+      if (aiAccounts.broken.includes(binding.provider)) throw new Error("Reconnect this AI account");
+      if (!aiAccounts.selectable) return actual.prepareManagedAiRuntime(...args);
+      const attribution = { provider: binding.provider, method: binding.method, connectionId: randomUUID(), grantId: randomUUID() };
+      return { config, attribution, identity: `${binding.provider}-identity`, cleanup: async () => {} } as unknown as Awaited<ReturnType<typeof actual.prepareManagedAiRuntime>>;
     },
   };
 });
@@ -36,7 +41,15 @@ vi.mock("../services/ai-connections.js", async (importOriginal) => {
     ...actual,
     aiConnectionService: (...args: Parameters<typeof actual.aiConnectionService>) => {
       const service = actual.aiConnectionService(...args);
-      return fallbackAccount.broken ? { ...service, select: async () => ({}) as Awaited<ReturnType<typeof service.select>> } : service;
+      if (!aiAccounts.selectable) return service;
+      const selectable = aiAccounts.selectable;
+      return {
+        ...service,
+        select: async (input: Parameters<typeof service.select>[0]) => {
+          if (!selectable.includes(input.binding.provider)) throw new Error("Reconnect or validate the selected AI account");
+          return {} as Awaited<ReturnType<typeof service.select>>;
+        },
+      };
     },
   };
 });
@@ -47,7 +60,26 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 const RESET_AT = "2030-04-22T21:00:00.000Z";
 const CODEX_RESET_AT = "2030-04-23T21:00:00.000Z";
 const openAiBinding = { provider: "openai", method: "api_key", mode: "responsible_user" };
+const anthropicBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
+const claudeFallback = { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fallback-test" }, switchBack: "on_reset" };
+const outage = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
+
+type Failure = { errorCode: string; errorFamily?: string };
+
+function failedExecution(failure: Failure) {
+  const family = failure.errorFamily ? { errorFamily: failure.errorFamily } : {};
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorMessage: failure.errorCode,
+    errorCode: failure.errorCode,
+    ...family,
+    executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false },
+    resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, ...family },
+  };
+}
 
 type Execution = { adapterType: string; model: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
 
@@ -57,7 +89,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const executions: Execution[] = [];
   let claudeHitsLimit = true;
-  let claudeTransientFailuresLeft = 0;
+  let claudeFailures: Failure[] = [];
+  let codexFailures: Failure[] = [];
   let codexErrorCode: string | null = null;
 
   function record(adapterType: string, ctx: AdapterExecutionContext) {
@@ -80,19 +113,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       ...claude,
       execute: async (ctx) => {
         record("claude_local", ctx);
-        if (claudeTransientFailuresLeft > 0) {
-          claudeTransientFailuresLeft -= 1;
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage: "Overloaded",
-            errorCode: "claude_transient_upstream",
-            errorFamily: "transient_upstream",
-            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-            resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, errorFamily: "transient_upstream" },
-          };
-        }
+        const failure = claudeFailures.shift();
+        if (failure) return failedExecution(failure);
         if (!claudeHitsLimit) return { exitCode: 0, signal: null, timedOut: false };
         return {
           exitCode: 1,
@@ -116,6 +138,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       ...codex,
       execute: async (ctx) => {
         record("codex_local", ctx);
+        const failure = codexFailures.shift();
+        if (failure) return failedExecution(failure);
         if (!codexErrorCode) return { exitCode: 0, signal: null, timedOut: false };
         if (codexErrorCode === "provider_quota") {
           return {
@@ -152,9 +176,11 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     executions.length = 0;
     claudeHitsLimit = true;
-    claudeTransientFailuresLeft = 0;
+    claudeFailures = [];
+    codexFailures = [];
     codexErrorCode = null;
-    fallbackAccount.broken = false;
+    aiAccounts.broken = [];
+    aiAccounts.selectable = null;
   });
 
   afterAll(async () => {
@@ -163,7 +189,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await tempDb?.cleanup();
   });
 
-  async function seedAgent(runtimeConfig: Record<string, unknown> = { usageLimitFallback: codexFallback }) {
+  async function seedAgent(runtimeConfig: Record<string, unknown> = { usageLimitFallback: codexFallback }, adapterType = "claude_local") {
     const companyId = randomUUID();
     const agentId = randomUUID();
     await db.insert(companies).values({
@@ -179,8 +205,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       name: "SKynet",
       role: "engineer",
       status: "idle",
-      adapterType: "claude_local",
-      adapterConfig: { model: "claude-primary-test", instructionsFilePath: "/agents/skynet/AGENTS.md", effort: "high" },
+      adapterType,
+      adapterConfig: { model: `${adapterType}-primary-test`, instructionsFilePath: "/agents/skynet/AGENTS.md", effort: "high" },
       runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 }, ...runtimeConfig },
       permissions: {},
     });
@@ -319,7 +345,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
 
   it("suspends a fallback whose account cannot be prepared and makes the retry wait for the primary's reset", async () => {
     const agent = await seedAgent({ usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
-    fallbackAccount.broken = true;
+    aiAccounts.selectable = ["openai"];
+    aiAccounts.broken = ["openai"];
     await activeFallback(agent);
     const run = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
     const failed = await waitForRun(run!.id);
@@ -332,7 +359,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
 
   it("still waits for the primary when the broken fallback used the last retry", async () => {
     const agent = await seedAgent();
-    claudeTransientFailuresLeft = 1;
+    claudeFailures = [outage];
     codexErrorCode = "codex_auth_required";
     const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
     await waitForRun(first!.id);
@@ -483,17 +510,193 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(remaining.map((row) => row.adapterType)).toEqual(["gemini_local"]);
   });
 
+  describe("Codex as the primary", () => {
+    it("switches to Claude when Codex hits its usage limit", async () => {
+      const agent = await seedAgent({ usageLimitFallback: claudeFallback }, "codex_local");
+      codexErrorCode = "provider_quota";
+      claudeHitsLimit = false;
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      expect((await waitForRun(first!.id)).errorCode).toBe("provider_quota");
+      const finished = await runRetry(await retryOf(first!.id));
+      expect(finished.status).toBe("succeeded");
+      expect(dispatchOf(finished)).toMatchObject({ adapterType: "claude_local", lane: "fallback", primaryAdapterType: "codex_local" });
+      expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local", "claude_local"]);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ reason: "provider_quota", activeUntil: CODEX_RESET_AT });
+    });
+
+    it("switches to Claude when Codex stays down after one retry", async () => {
+      const agent = await seedAgent({ usageLimitFallback: { ...claudeFallback, switchWhenUnavailable: true } }, "codex_local");
+      codexFailures = [outage, outage];
+      claudeHitsLimit = false;
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      await waitForRun(first!.id);
+      await runRetry(await retryOf(first!.id));
+      const finished = await runRetry(await retryOf((await retryOf(first!.id)).id));
+      expect(finished.status).toBe("succeeded");
+      expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local", "codex_local", "claude_local"]);
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.reason).toBe("provider_outage");
+    });
+  });
+
+  describe("when the primary is down or signed out", () => {
+    const whenUnavailable = { usageLimitFallback: { ...codexFallback, switchWhenUnavailable: true } };
+
+    it("retries Claude once, then runs on Codex for 30 minutes", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      claudeFailures = [outage, outage];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      await waitForRun(first!.id);
+      const secondTry = await runRetry(await retryOf(first!.id));
+      expect(dispatchOf(secondTry)).toEqual({ adapterType: "claude_local" });
+      const activatedAt = Date.now();
+      const finished = await runRetry(await retryOf(secondTry.id));
+      expect(finished.status).toBe("succeeded");
+      expect(dispatchOf(finished)?.lane).toBe("fallback");
+      const state = await readAgentUsageLimitFallbackState(db, agent.id);
+      expect(state?.reason).toBe("provider_outage");
+      expect(Date.parse(state!.activeUntil) - activatedAt).toBeGreaterThan(25 * 60_000);
+      expect(Date.parse(state!.activeUntil) - activatedAt).toBeLessThan(35 * 60_000);
+    });
+
+    it("keeps retrying the primary when the fallback is set for usage limits only", async () => {
+      const agent = await seedAgent();
+      claudeFailures = [outage, outage];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      await waitForRun(first!.id);
+      const secondTry = await runRetry(await retryOf(first!.id));
+      expect(secondTry.errorCode).toBe("transient_upstream");
+      await retryOf(secondTry.id);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("moves to Codex right away when Claude's login fails", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      claudeFailures = [{ errorCode: "claude_auth_required" }];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      expect((await waitForRun(first!.id)).errorCode).toBe("claude_auth_required");
+      const finished = await runRetry(await retryOf(first!.id));
+      expect(finished.status).toBe("succeeded");
+      expect(dispatchOf(finished)?.lane).toBe("fallback");
+      const state = await readAgentUsageLimitFallbackState(db, agent.id);
+      expect(state?.reason).toBe("primary_signed_out");
+      expect(state?.waitForReconnect).toBeUndefined();
+    });
+
+    it("moves to Codex when Claude's managed account cannot be prepared, until it is reconnected", async () => {
+      const agent = await seedAgent({
+        aiConnection: anthropicBinding,
+        usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
+      });
+      aiAccounts.selectable = ["openai"];
+      aiAccounts.broken = ["anthropic"];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      expect((await waitForRun(first!.id)).errorCode).toBe("configuration_incomplete");
+      const finished = await runRetry(await retryOf(first!.id));
+      expect(finished.status).toBe("succeeded");
+      expect(dispatchOf(finished)?.lane).toBe("fallback");
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ reason: "primary_signed_out", waitForReconnect: true });
+      expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local"]);
+    });
+
+    it("retries a blip on the fallback soon instead of waiting for the primary's reset", async () => {
+      const agent = await seedAgent();
+      codexFailures = [outage];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      expect((await waitForRun(first!.id)).errorCode).toBe("provider_quota");
+      const fallbackRun = await runRetry(await retryOf(first!.id));
+      expect(dispatchOf(fallbackRun)?.lane).toBe("fallback");
+      expect(fallbackRun.errorCode).toBe("transient_upstream");
+      const retry = await retryOf(fallbackRun.id);
+      expect(retry.scheduledRetryAt!.getTime() - Date.now()).toBeLessThan(10 * 60_000);
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.reason).toBe("provider_quota");
+    });
+
+    const signedOutManagedAgent = () => seedAgent({
+      aiConnection: anthropicBinding,
+      usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
+    });
+    const signedOutRun = () => ({ id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null }) as typeof heartbeatRuns.$inferSelect;
+
+    it("lets a suspended fallback lapse after its window even while the primary is still signed out", async () => {
+      const agent = await signedOutManagedAgent();
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "primary_signed_out", retryNotBefore: null, now });
+      await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", now);
+      expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date("2030-04-22T10:10:00.000Z")))
+        .toEqual({ adapterType: "claude_local" });
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil).toBe("2030-04-22T10:30:00.000Z");
+      await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date("2030-04-22T11:00:00.000Z"));
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("keeps a longer usage-limit window when the primary also signs out", async () => {
+      const agent = await signedOutManagedAgent();
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), retryNotBefore: new Date(RESET_AT), now });
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "primary_signed_out", retryNotBefore: null, now });
+      const state = await readAgentUsageLimitFallbackState(db, agent.id);
+      expect(state).toMatchObject({ reason: "provider_quota", activeUntil: RESET_AT });
+      expect(state?.waitForReconnect).toBeUndefined();
+    });
+
+    it("ends an outage switch once the setting is turned off", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "provider_outage", retryNotBefore: null, now });
+      const turnedOff = { ...agent, runtimeConfig: { ...(agent.runtimeConfig as Record<string, unknown>), usageLimitFallback: codexFallback } } as typeof agent;
+      expect(await resolveAdapterDispatchForClaim(db, turnedOff, { responsibleUserId: null }, now)).toEqual({ adapterType: "claude_local" });
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("does not switch for a problem with the work itself", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      claudeFailures = [{ errorCode: "claude_refusal", errorFamily: "model_refusal" }];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+      await waitForRun(first!.id);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+      expect(executions.map((execution) => execution.adapterType)).toEqual(["claude_local"]);
+    });
+
+    it("stays on the fallback until a signed-out managed primary account is reconnected", async () => {
+      const agent = await seedAgent({
+        aiConnection: anthropicBinding,
+        usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
+      });
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      const activation = await activateUsageLimitFallback(db, {
+        agent,
+        run: { id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null } as typeof heartbeatRuns.$inferSelect,
+        reason: "primary_signed_out",
+        retryNotBefore: null,
+        now,
+      });
+      expect(activation).toMatchObject({ activated: true, state: { activeUntil: "2030-04-22T10:30:00.000Z", waitForReconnect: true } });
+
+      const later = new Date("2030-04-22T12:00:00.000Z");
+      expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, later))
+        .toMatchObject({ lane: "fallback", fallbackUntil: "2030-04-22T12:30:00.000Z" });
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil).toBe("2030-04-22T12:30:00.000Z");
+
+      aiAccounts.selectable = ["openai", "anthropic"];
+      expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, later)).toEqual({ adapterType: "claude_local" });
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+  });
+
   it("treats only failures of the fallback's own account as a broken fallback", () => {
-    expect(isUsageLimitFallbackSetupFailure({ errorCode: "codex_auth_required", resultJson: null })).toBe(true);
-    expect(isUsageLimitFallbackSetupFailure({
+    expect(isRunAiAccountFailure({ errorCode: "codex_auth_required", resultJson: null })).toBe(true);
+    expect(isRunAiAccountFailure({
       errorCode: "configuration_incomplete",
       resultJson: { configurationIncomplete: { reason: "ai_connection_unavailable" } },
     })).toBe(true);
-    expect(isUsageLimitFallbackSetupFailure({
+    expect(isRunAiAccountFailure({
       errorCode: "configuration_incomplete",
       resultJson: { configurationIncomplete: { reason: "unresolved_base_ref" } },
     })).toBe(false);
-    expect(isUsageLimitFallbackSetupFailure({ errorCode: "adapter_failed", resultJson: null })).toBe(false);
+    expect(isRunAiAccountFailure({ errorCode: "adapter_failed", resultJson: null })).toBe(false);
   });
 
   describe("effectiveAgentForRun", () => {
