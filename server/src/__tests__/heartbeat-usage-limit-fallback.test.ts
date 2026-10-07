@@ -466,6 +466,23 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
   });
 
+  it("resets a task's sessions on both the primary and the fallback adapter, and no others", async () => {
+    const agent = await seedAgent();
+    const session = (adapterType: string) => ({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType,
+      taskKey: "issue-task",
+      sessionParamsJson: { sessionId: `${adapterType}-session` },
+      sessionDisplayId: `${adapterType}-session`,
+    });
+    await db.insert(agentTaskSessions).values([session("claude_local"), session("codex_local"), session("gemini_local")]);
+    const reset = await heartbeat.resetRuntimeSession(agent.id, { taskKey: "issue-task" });
+    expect(reset?.clearedTaskSessions).toBe(2);
+    const remaining = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+    expect(remaining.map((row) => row.adapterType)).toEqual(["gemini_local"]);
+  });
+
   it("treats only failures of the fallback's own account as a broken fallback", () => {
     expect(isUsageLimitFallbackSetupFailure({ errorCode: "codex_auth_required", resultJson: null })).toBe(true);
     expect(isUsageLimitFallbackSetupFailure({

@@ -238,8 +238,8 @@ with the effective agent's adapter, not the raw agent row:
   so the primary resumes fresh with the handoff after the switch-back.
 - A new activation (not an extension) clears the fallback adapter's task
   sessions, so a later window never resumes a conversation that misses the
-  primary's turns since. A user session reset clears the task's sessions for
-  every adapter.
+  primary's turns since. A user session reset for a task clears its sessions
+  on the primary's and the fallback's adapter, and leaves other adapters alone.
 - A fallback run with no managed account drops the primary's account
   attribution that the retry copied, and sign-in recovery resolves the account
   through the run's lane, so a fallback sign-in failure never marks the

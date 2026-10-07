@@ -36,7 +36,7 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, readUsageLimitFallbackConfig } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
@@ -30253,16 +30253,23 @@ export function heartbeatService(
       if (!agent) throw notFound("Agent not found");
       await ensureRuntimeState(agent);
       const taskKey = readNonEmptyString(opts?.taskKey);
-      const clearedTaskSessions = await clearTaskSessions(
+      const clearedPrimarySessions = await clearTaskSessions(
         agent.companyId,
         agent.id,
         taskKey
           ? {
               taskKey,
+              adapterType: agent.adapterType,
               includeIssueAliases: true,
             }
           : undefined,
       );
+      // A usage-limit fallback on another adapter keeps its own session for the task, so the reset clears it too.
+      const fallbackAdapterType = readUsageLimitFallbackConfig(agent.runtimeConfig)?.adapterType;
+      const clearedFallbackSessions = taskKey && fallbackAdapterType && fallbackAdapterType !== agent.adapterType
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: fallbackAdapterType, includeIssueAliases: true })
+        : 0;
+      const clearedTaskSessions = clearedPrimarySessions + clearedFallbackSessions;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,
