@@ -69,11 +69,11 @@ describe("UsageLimitFallbackField", () => {
     const toggle = container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-toggle']");
     expect(toggle).not.toBeNull();
     flushSync(() => toggle!.click());
-    expect(onChange).toHaveBeenCalledWith({ enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset" });
+    expect(onChange).toHaveBeenCalledWith({ enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset", switchWhenUnavailable: true });
   });
 
   it("shows the fallback account and model pickers for the chosen fallback adapter", async () => {
-    const value: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-x" }, switchBack: "on_reset" };
+    const value: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-x" }, switchBack: "on_reset", switchWhenUnavailable: false };
     await mountField({ value });
     expect(container.textContent).toContain("Fallback account for codex_local");
     expect(container.textContent).toContain("Fallback model picker");
@@ -83,7 +83,7 @@ describe("UsageLimitFallbackField", () => {
 });
 
 describe("UsageLimitFallbackField safety controls", () => {
-  const enabledCodex: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset" };
+  const enabledCodex: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset", switchWhenUnavailable: false };
 
   it("still lets the user turn the fallback off after switching the primary to an unsupported adapter", async () => {
     await mountField({ primaryAdapterType: "gemini_local", value: enabledCodex });
@@ -98,6 +98,13 @@ describe("UsageLimitFallbackField safety controls", () => {
     expect(toggle).not.toBeNull();
     flushSync(() => toggle!.click());
     expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, adapterConfig: { dangerouslyBypassApprovalsAndSandbox: false } });
+  });
+
+  it("lets the user also switch when the primary is down or signed out", async () => {
+    await mountField({ value: enabledCodex });
+    expect(container.textContent).toContain("Also switch when Claude Code is down or signed out");
+    flushSync(() => container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-when-unavailable']")!.click());
+    expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, switchWhenUnavailable: true });
   });
 
   it("hides the Codex bypass setting when the fallback keeps the Codex primary's settings", async () => {
@@ -131,6 +138,14 @@ describe("UsageLimitFallbackStatus", () => {
     flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={suspended} pending={false} onReturnToPrimary={vi.fn()} />));
     expect(container.textContent).toContain("the Codex fallback cannot run (codex_auth_required), waiting for Claude Code");
     expect(container.textContent).not.toContain("running on Codex");
+  });
+
+  it("says why the agent switched when the primary is down or signed out", async () => {
+    const base = stateJson("2999-01-01T00:00:00.000Z").usageLimitFallback;
+    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={{ usageLimitFallback: { ...base, reason: "provider_outage" } }} pending={false} onReturnToPrimary={vi.fn()} />));
+    expect(container.textContent).toContain("Claude Code is not responding: running on Codex until");
+    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={{ usageLimitFallback: { ...base, reason: "primary_signed_out", waitForReconnect: true } }} pending={false} onReturnToPrimary={vi.fn()} />));
+    expect(container.textContent).toContain("Claude Code needs to sign in again: running on Codex until Claude Code is reconnected");
   });
 
   it("renders nothing once the fallback has expired", async () => {

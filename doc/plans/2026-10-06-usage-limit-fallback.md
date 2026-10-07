@@ -162,6 +162,30 @@ When it activates:
   activated; the retry waits for the reset as before, and a run event records
   why.
 
+### 5.2a When the primary is down or signed out
+
+With `switchWhenUnavailable` (on by default for a new fallback in the UI), two
+more primary-lane failures activate the fallback, in either direction between
+Claude Code and Codex. The state records the reason (`provider_outage` or
+`primary_signed_out`), and the header and run events say why the agent switched.
+
+- **Outage:** a `transient_upstream` failure on a run that is already a failure
+  retry. The first failure retries the primary as before, so one blip never
+  switches. The window is 30 minutes, then the primary is tried again.
+- **Signed out:** an AI sign-in failure, or a managed account that cannot be
+  prepared (`configuration_incomplete` with `ai_connection_unavailable`). The
+  sign-in card is still raised for the primary, and the retry runs on the
+  fallback at once.
+  - If the primary's managed account is marked for sign-in, the state sets
+    `waitForReconnect`. Each claim then checks the account: still signed out
+    keeps the fallback and pushes `activeUntil` 30 minutes ahead; reconnected
+    clears the state, so the next run uses the primary.
+  - Any other account (a host login, or a managed account that still looks
+    usable) uses a 30-minute window, so a fix is picked up without a loop of
+    failed runs.
+- Failures of the work itself (model refusal, tool errors, the turn cap) never
+  activate the fallback.
+
 A `provider_quota` failure on the fallback lane never re-activates or extends the
 fallback. Its retry waits until the earlier of the fallback's reset and the
 current `activeUntil`, since the primary can take the work back then. If the
@@ -336,6 +360,8 @@ switch loses little.
   of the two bounded attempts.
 - A suspended fallback stays off until `activeUntil` even after its account is
   repaired; **Return to <primary>** or the next window starts it again.
+- A signed-out host login is retried every 30 minutes while runs keep coming, and
+  each failed retry raises another sign-in card.
 - Telemetry, Sentry reports and the run detail header still label runs with the
   agent's adapter; cancel, the run lists, the log viewer and the issue live view
   use the run's dispatched adapter.

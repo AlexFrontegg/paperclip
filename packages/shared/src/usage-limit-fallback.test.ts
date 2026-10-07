@@ -15,6 +15,7 @@ const codexFallback: UsageLimitFallbackConfig = {
   adapterType: "codex_local",
   adapterConfig: { model: "gpt-6-astra", modelReasoningEffort: "high" },
   switchBack: "on_reset",
+  switchWhenUnavailable: false,
 };
 
 const sharedClaudeBinding = {
@@ -30,6 +31,7 @@ describe("usageLimitFallbackConfigSchema", () => {
     const parsed = usageLimitFallbackConfigSchema.parse({ enabled: true, adapterType: "codex_local" });
     expect(parsed.adapterConfig).toEqual({});
     expect(parsed.switchBack).toBe("on_reset");
+    expect(parsed.switchWhenUnavailable).toBe(false);
   });
 
   it("rejects an adapter outside the allow-list, such as paperclip_runner", () => {
@@ -158,6 +160,12 @@ describe("usage-limit fallback state", () => {
       .toBe("configuration_incomplete");
     expect(readUsageLimitFallbackState({})).toBeNull();
     expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, reason: "other" } })).toBeNull();
+  });
+
+  it("reads an outage or signed-out activation", () => {
+    expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, reason: "provider_outage" } })?.reason).toBe("provider_outage");
+    expect(readUsageLimitFallbackState({ usageLimitFallback: { ...state, reason: "primary_signed_out", waitForReconnect: true } }))
+      .toMatchObject({ reason: "primary_signed_out", waitForReconnect: true });
   });
 
   it("is active only until activeUntil", () => {

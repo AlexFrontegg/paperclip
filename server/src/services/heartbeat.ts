@@ -36,9 +36,9 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema, readUsageLimitFallbackConfig } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, readUsageLimitFallbackConfig, type UsageLimitFallbackReason } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
-import { activateUsageLimitFallback, effectiveAgentForRun, isUsageLimitFallbackSetupFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "./usage-limit-fallback.js";
+import { activateUsageLimitFallback, effectiveAgentForRun, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -821,6 +821,11 @@ export const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS = [
 ] as const;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO = 0;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON = "transient_failure";
+const USAGE_LIMIT_FALLBACK_ACTIVATION_LABELS: Record<UsageLimitFallbackReason, string> = {
+  provider_quota: "Usage limit reached",
+  provider_outage: "The primary is not responding",
+  primary_signed_out: "The primary's account needs to sign in again",
+};
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON = "transient_failure_retry";
 function isTransientWorkspaceGitScanCode(code: string | null | undefined): boolean {
   return code === WORKSPACE_GIT_SCAN_ERROR_CODES.timeout || code === WORKSPACE_GIT_SCAN_ERROR_CODES.saturated;
@@ -15413,12 +15418,76 @@ export function heartbeatService(
     };
   }
 
+  async function recordUsageLimitFallbackActivation(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: typeof agents.$inferSelect,
+    activation: UsageLimitFallbackActivation,
+  ) {
+    if (activation.activated) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: `${USAGE_LIMIT_FALLBACK_ACTIVATION_LABELS[activation.state.reason]}; running on the ${activation.state.fallbackAdapterType} fallback until ${activation.state.activeUntil}`,
+        payload: { usageLimitFallback: activation.state },
+      });
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: agent.id,
+        runId: run.id,
+        action: "agent.usage_limit_fallback_activated",
+        entityType: "agent",
+        entityId: agent.id,
+        details: { ...activation.state },
+      });
+    } else if (!["not_configured", "already_on_fallback"].includes(activation.reason)) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: `Usage-limit fallback not used: ${activation.reason}`,
+        payload: { usageLimitFallbackSkipped: activation.reason },
+      });
+    }
+  }
+
+  /** A run whose own AI account failed: a broken fallback is suspended, and a signed-out primary moves to the fallback. */
+  async function handleUsageLimitFallbackAccountFailure(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+  ): Promise<boolean> {
+    if (!isRunAiAccountFailure(failedRun)) return false;
+    return runUsageLimitLane(failedRun) === "fallback"
+      ? suspendBrokenUsageLimitFallback(failedRun, storedAgent)
+      : switchToFallbackForSignedOutPrimary(failedRun, storedAgent);
+  }
+
+  /** The sign-in card still asks a person to reconnect the primary; the work continues on the fallback meanwhile. */
+  async function switchToFallbackForSignedOutPrimary(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+  ): Promise<boolean> {
+    const now = new Date();
+    const activation = await activateUsageLimitFallback(db, {
+      agent: storedAgent,
+      run: failedRun,
+      reason: "primary_signed_out",
+      retryNotBefore: null,
+      now,
+    });
+    await recordUsageLimitFallbackActivation(failedRun, storedAgent, activation);
+    if (!activation.activated) return false;
+    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, { now, delayMs: 0 });
+    return retry.outcome === "scheduled";
+  }
+
   /** A fallback run that cannot start suspends the fallback; its retry waits for the primary's reset like a plain quota wait. */
   async function suspendBrokenUsageLimitFallback(
     failedRun: typeof heartbeatRuns.$inferSelect,
     storedAgent: typeof agents.$inferSelect,
   ): Promise<boolean> {
-    if (readRunAdapterDispatch(failedRun)?.lane !== "fallback" || !isUsageLimitFallbackSetupFailure(failedRun)) return false;
     const now = new Date();
     const state = await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
     if (!state) return false;
@@ -15600,39 +15669,23 @@ export function heartbeatService(
       }
     }
 
-    // A primary-lane quota failure switches the agent to its usage-limit fallback and retries now instead of at the reset time.
-    const usageLimitFallback =
+    // A primary-lane usage limit, or an outage that outlasted one retry, switches the agent to its fallback and retries now.
+    const fallbackReason =
       transientRecovery?.errorFamily === "provider_quota"
-        ? await activateUsageLimitFallback(db, { agent, run, retryNotBefore: transientRetryNotBefore, now })
-        : null;
-    if (usageLimitFallback?.activated) {
-      await appendRunEvent(run, {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "warn",
-        message: `Usage limit reached; running on the ${usageLimitFallback.state.fallbackAdapterType} fallback until ${usageLimitFallback.state.activeUntil}`,
-        payload: { usageLimitFallback: usageLimitFallback.state },
-      });
-      await logActivity(db, {
-        companyId: agent.companyId,
-        actorType: "system",
-        actorId: "heartbeat",
-        agentId: agent.id,
-        runId: run.id,
-        action: "agent.usage_limit_fallback_activated",
-        entityType: "agent",
-        entityId: agent.id,
-        details: { ...usageLimitFallback.state },
-      });
-    } else if (usageLimitFallback && !["not_configured", "already_on_fallback"].includes(usageLimitFallback.reason)) {
-      await appendRunEvent(run, {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "warn",
-        message: `Usage-limit fallback not used: ${usageLimitFallback.reason}`,
-        payload: { usageLimitFallbackSkipped: usageLimitFallback.reason },
-      });
-    }
+        ? "provider_quota"
+        : transientRecovery?.errorFamily === "transient_upstream" && consumedAttempts >= 1
+          ? "provider_outage"
+          : null;
+    const usageLimitFallback = fallbackReason
+      ? await activateUsageLimitFallback(db, {
+        agent,
+        run,
+        reason: fallbackReason,
+        retryNotBefore: fallbackReason === "provider_quota" ? transientRetryNotBefore : null,
+        now,
+      })
+      : null;
+    if (usageLimitFallback) await recordUsageLimitFallbackActivation(run, agent, usageLimitFallback);
 
     // A quota failure on the fallback itself waits only until the primary is back; a cleared fallback means it is back now.
     const primaryBackAt =
@@ -25941,9 +25994,9 @@ export function heartbeatService(
             }
           } else if (
             outcome === "failed" &&
-            await suspendBrokenUsageLimitFallback(livenessRun, storedAgent)
+            await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent)
           ) {
-            // The retry now waits for the primary's reset.
+            // The retry waits for the primary's reset, or runs on the fallback while the primary signs in again.
           } else if (
             outcome === "failed" &&
             readTransientRecoveryContractFromRun(livenessRun)
@@ -26384,7 +26437,7 @@ export function heartbeatService(
             livenessRun,
             agent,
           );
-          await suspendBrokenUsageLimitFallback(livenessRun, storedAgent);
+          await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent);
           await releaseIssueExecutionAndPromote(livenessRun, {
             // Native recovery owns the original heartbeat run through
             // exhaustion. Once its durable coordinator has classified a
@@ -26646,14 +26699,14 @@ export function heartbeatService(
                 () => undefined,
               );
             }
-            const fallbackSuspended = await suspendBrokenUsageLimitFallback(livenessRun, failedAgent).catch((suspendError) => {
-              logger.warn({ err: suspendError, runId: livenessRun.id }, "failed to suspend the usage-limit fallback after setup failure");
+            const fallbackHandled = await handleUsageLimitFallbackAccountFailure(livenessRun, failedAgent).catch((fallbackError) => {
+              logger.warn({ err: fallbackError, runId: livenessRun.id }, "failed to apply the usage-limit fallback after setup failure");
               return false;
             });
             // No provider work began. Retry temporary host scan failures with
             // the existing durable failure budget, before releasing execution.
             // Generic recovery must not grant a second budget on exhaustion.
-            if (!fallbackSuspended) {
+            if (!fallbackHandled) {
               await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
                 ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
                 : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)

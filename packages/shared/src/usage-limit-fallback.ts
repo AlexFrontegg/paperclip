@@ -51,9 +51,14 @@ export const usageLimitFallbackConfigSchema = z.object({
   adapterConfig: fallbackAdapterConfigSchema.default({}),
   aiConnection: aiConnectionBindingSchema.optional(),
   switchBack: z.literal("on_reset").default("on_reset"),
+  /** Also switch when the primary's provider is down or its account is signed out, not only on a usage limit. */
+  switchWhenUnavailable: z.boolean().default(false),
 }).strict();
 
 export type UsageLimitFallbackConfig = z.infer<typeof usageLimitFallbackConfigSchema>;
+
+export const USAGE_LIMIT_FALLBACK_REASONS = ["provider_quota", "provider_outage", "primary_signed_out"] as const;
+export type UsageLimitFallbackReason = (typeof USAGE_LIMIT_FALLBACK_REASONS)[number];
 
 export const usageLimitFallbackStateSchema = z.object({
   activeUntil: z.string().datetime(),
@@ -61,7 +66,9 @@ export const usageLimitFallbackStateSchema = z.object({
   sourceRunId: z.string().min(1),
   primaryAdapterType: z.string().min(1),
   fallbackAdapterType: z.string().min(1),
-  reason: z.literal("provider_quota"),
+  reason: z.enum(USAGE_LIMIT_FALLBACK_REASONS),
+  /** Set when the primary's managed account is signed out; the fallback then lasts until that account is reconnected. */
+  waitForReconnect: z.boolean().optional(),
   /** Set when the fallback itself cannot run; the agent then waits for the primary's reset. */
   suspendedReason: z.string().min(1).optional(),
 });

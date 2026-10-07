@@ -249,7 +249,21 @@ card on the task; the agent header says it is paused, and the fallback account
 is repaired from the agent's settings. If the fallback hits its own limit, the
 retry waits only until the primary is back.
 
-The agent header shows when the fallback is active or paused. **Return to <primary>**
+**Also switch when the primary is down or signed out** (`switchWhenUnavailable`,
+on by default for a new fallback) extends this to two more cases, in both
+directions between Claude Code and Codex:
+
+- The primary's provider is down: after a second transient failure in a row, the
+  fallback runs for 30 minutes, then the primary is tried again.
+- The primary's account is signed out: the fallback runs while the sign-in card
+  asks a person to reconnect. A managed account that is marked for sign-in keeps
+  the fallback until it is reconnected; any other account is tried again after
+  30 minutes.
+
+Problems with the work itself, such as a model refusal, a failing tool or a
+spent turn cap, never switch.
+
+The agent header shows when the fallback is active or paused, and why. **Return to <primary>**
 (`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:
 [usage-limit fallback plan](../plans/2026-10-06-usage-limit-fallback.md).
 

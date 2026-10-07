@@ -98,6 +98,14 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     expect(typeof fallback.adapterConfig.dangerouslyBypassApprovalsAndSandbox).toBe("boolean");
   });
 
+  it("saves the choice to also switch when the primary is down or signed out", async () => {
+    const f = await fixture();
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: { ...codexFallbackWithAccount, switchWhenUnavailable: true } } });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect((await storedRuntimeConfig(f.agentId)).usageLimitFallback).toMatchObject({ switchWhenUnavailable: true });
+  });
+
   it("keeps the saved fallback when a later update omits it", async () => {
     const f = await fixture();
     await f.connectCodex();
