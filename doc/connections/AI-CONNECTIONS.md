@@ -256,9 +256,9 @@ directions between Claude Code and Codex:
 - The primary's provider is down: after a second transient failure in a row, the
   fallback runs for 30 minutes, then the primary is tried again.
 - The primary's account is signed out: the fallback runs while the sign-in card
-  asks a person to reconnect. A managed account that is marked for sign-in keeps
-  the fallback until it is reconnected; any other account is tried again after
-  30 minutes.
+  asks a person to reconnect. A shared or delegated account that is marked for
+  sign-in keeps the fallback until it is reconnected; any other account,
+  including a personal one, is tried again after 30 minutes.
 
 Problems with the work itself, such as a model refusal, a failing tool or a
 spent turn cap, never switch.

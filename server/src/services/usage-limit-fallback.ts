@@ -153,10 +153,13 @@ async function fallbackAiConnectionSelectable(db: Db, agent: AgentRow, fallback:
   });
 }
 
-/** Whether the primary's managed AI account still cannot be used; null when there is no managed account to check. */
+/**
+ * Whether the primary's shared or delegated AI account still cannot be used; null when there is no such account.
+ * A personal account depends on each run's user, so one user's sign-out never holds the whole agent.
+ */
 async function primaryAccountSignedOut(db: Db, agent: AgentRow, responsibleUserId: string | null): Promise<boolean | null> {
   const binding = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
-  if (!binding) return null;
+  if (!binding || binding.mode === "responsible_user") return null;
   const config = isRecord(agent.adapterConfig) ? agent.adapterConfig : {};
   return !await aiAccountSelectable(db, agent, { adapterType: agent.adapterType, config, binding, responsibleUserId });
 }
@@ -190,7 +193,7 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
     && state.fallbackAdapterType === fallback.adapterType;
   // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
   const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason
-    ? await primaryAccountSignedOut(db, agent, state.signedOutUserId ?? run.responsibleUserId ?? null)
+    ? await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null)
     : null;
   if (!fallback || !sameSetup || !(primarySignedOut ?? isUsageLimitFallbackStateActive(state, now))) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
@@ -261,7 +264,7 @@ export async function activateUsageLimitFallback(db: Db, input: {
         primaryAdapterType: agent.adapterType,
         fallbackAdapterType: fallback.adapterType,
         reason,
-        ...(waitForReconnect ? { waitForReconnect: true, ...(run.responsibleUserId ? { signedOutUserId: run.responsibleUserId } : {}) } : {}),
+        ...(waitForReconnect ? { waitForReconnect: true } : {}),
       };
     if (row) {
       await tx.update(agentRuntimeState)

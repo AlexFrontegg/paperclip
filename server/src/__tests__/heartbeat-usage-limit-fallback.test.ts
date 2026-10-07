@@ -61,6 +61,7 @@ const RESET_AT = "2030-04-22T21:00:00.000Z";
 const CODEX_RESET_AT = "2030-04-23T21:00:00.000Z";
 const openAiBinding = { provider: "openai", method: "api_key", mode: "responsible_user" };
 const anthropicBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" };
+const sharedAnthropicBinding = { provider: "anthropic", method: "subscription", mode: "shared", connectionId: randomUUID(), grantId: randomUUID() };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
 const claudeFallback = { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fallback-test" }, switchBack: "on_reset" };
 const outage = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
@@ -174,6 +175,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
 
   afterEach(async () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    // A retry left scheduled by one test must not be promoted into the next test's runs.
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.status, "scheduled_retry"));
     executions.length = 0;
     claudeHitsLimit = true;
     claudeFailures = [];
@@ -584,7 +587,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
 
     it("moves to Codex when Claude's managed account cannot be prepared, until it is reconnected", async () => {
       const agent = await seedAgent({
-        aiConnection: anthropicBinding,
+        aiConnection: sharedAnthropicBinding,
         usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
       });
       aiAccounts.selectable = ["openai"];
@@ -612,7 +615,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     });
 
     const signedOutManagedAgent = () => seedAgent({
-      aiConnection: anthropicBinding,
+      aiConnection: sharedAnthropicBinding,
       usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
     });
     const signedOutRun = () => ({ id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null }) as typeof heartbeatRuns.$inferSelect;
@@ -650,6 +653,48 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
     });
 
+    it("uses the 30-minute timer for a signed-out personal account, so one user's sign-out does not hold the agent", async () => {
+      const agent = await seedAgent({
+        aiConnection: anthropicBinding,
+        usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
+      });
+      aiAccounts.selectable = ["openai"];
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      const activation = await activateUsageLimitFallback(db, { agent, run: signedOutRun(), reason: "primary_signed_out", retryNotBefore: null, now });
+      expect(activation).toMatchObject({ activated: true, state: { activeUntil: "2030-04-22T10:30:00.000Z" } });
+      expect(activation.activated && activation.state.waitForReconnect).toBeFalsy();
+      await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date("2030-04-22T11:00:00.000Z"));
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("does not count a copied older outage as the first failure's predecessor", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      claudeFailures = [outage];
+      const first = await heartbeat.invoke(agent.id, "on_demand", {
+        retryReason: "transient_failure",
+        errorFamily: "transient_upstream",
+        usageLimitPreviousFailure: { runId: randomUUID(), errorFamily: "transient_upstream", lane: "primary" },
+      }, "manual");
+      await waitForRun(first!.id);
+      await retryOf(first!.id);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("does not count a blip on the fallback toward a primary outage", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      await activeFallback(agent);
+      codexFailures = [outage];
+      const fallbackBlip = await waitForRun((await heartbeat.invoke(agent.id, "on_demand", {}, "manual"))!.id);
+      expect(dispatchOf(fallbackBlip)?.lane).toBe("fallback");
+      await clearUsageLimitFallbackState(db, agent.id);
+      claudeFailures = [outage];
+      const primaryBlip = await runRetry(await retryOf(fallbackBlip.id));
+      expect(dispatchOf(primaryBlip)).toEqual({ adapterType: "claude_local" });
+      expect(primaryBlip.errorCode).toBe("transient_upstream");
+      await retryOf(primaryBlip.id);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
     it("does not switch for a problem with the work itself", async () => {
       const agent = await seedAgent(whenUnavailable);
       claudeFailures = [{ errorCode: "claude_refusal", errorFamily: "model_refusal" }];
@@ -661,7 +706,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
 
     it("stays on the fallback until a signed-out managed primary account is reconnected", async () => {
       const agent = await seedAgent({
-        aiConnection: anthropicBinding,
+        aiConnection: sharedAnthropicBinding,
         usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding, switchWhenUnavailable: true },
       });
       aiAccounts.selectable = ["openai"];
