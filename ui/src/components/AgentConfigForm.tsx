@@ -1672,6 +1672,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               agentId={props.agent.id}
               agentName={props.agent.name}
               primaryAdapterType={adapterType}
+              primaryAdapterConfig={{ ...config, ...overlay.adapterConfig }}
               environmentId={currentDefaultEnvironmentId || undefined}
               value={usageLimitFallbackConfigSchema.safeParse(pendingRuntimeConfig.usageLimitFallback).data}
               onChange={(next) => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, usageLimitFallback: next })}

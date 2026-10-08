@@ -6,7 +6,7 @@ import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnectionBindingSchema, type AiConnectionBinding } from "@paperclipai/shared";
-import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, type UsageLimitFallbackConfig } from "@paperclipai/shared";
+import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, usageLimitFallbackPermissionDefaults, type UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { clearUsageLimitFallbackState } from "../services/usage-limit-fallback.js";
@@ -3440,7 +3440,10 @@ export function agentRoutes(
     const adapterConfig = fallback.adapterType === input.primaryAdapterType
       ? fallback.adapterConfig
       : usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
-        applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
+        applyCreateDefaultsByAdapterType(fallback.adapterType, {
+          ...usageLimitFallbackPermissionDefaults(input.primaryAdapterConfig, fallback.adapterType),
+          ...fallback.adapterConfig,
+        }),
       );
     const normalized: UsageLimitFallbackConfig = { ...fallback, adapterConfig };
     if (!normalized.aiConnection) return { fallback: normalized };

@@ -241,6 +241,9 @@ sandbox and permission flags, turn cap, network allowlist). A fallback on
 another adapter inherits the primary's instructions, skills, working directory,
 environment, workspace, confinement and timeouts, minus the primary's provider
 credentials; a second account on the same adapter inherits everything. A
+primary that keeps its permission checks keeps them on a fallback on the other
+adapter unless the fallback sets its own value, and an issue's model or engine
+overrides apply only on the primary. A
 switched run starts a fresh provider session from the task's history; provider
 sessions never move between adapters. If the fallback cannot run (sign-in or
 configuration failure), it is suspended until the primary resets and the work
@@ -254,14 +257,17 @@ on by default for a new fallback) extends this to two more cases, in both
 directions between Claude Code and Codex:
 
 - The primary's provider is down: after a second transient failure in a row, the
-  fallback runs for 30 minutes, then the primary is tried again.
+  fallback runs for 30 minutes, then the primary is tried again. Outages are
+  detected only with the CLI engine; the default ACP engine switches on usage
+  limits and sign-in failures.
 - The primary's account is signed out: the fallback runs while the sign-in card
   asks a person to reconnect. A shared or delegated account that is marked for
   sign-in keeps the fallback until it is reconnected; any other account,
   including a personal one, is tried again after 30 minutes.
 
 Problems with the work itself, such as a model refusal, a failing tool or a
-spent turn cap, never switch.
+spent turn cap, never switch. A Codex agent's managed MCP gateway tools are not
+available on a Claude fallback.
 
 The agent header shows when the fallback is active or paused, and why. **Return to <primary>**
 (`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:

@@ -96,6 +96,11 @@ usageLimitFallback?: {
   `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent; the UI shows
   that setting explicitly. A fallback on the primary's adapter gets no defaults
   and never overrides the primary's sandbox and permission flags.
+- A primary that keeps its permission checks (`dangerouslySkipPermissions: false`
+  on Claude, `dangerouslyBypassApprovalsAndSandbox: false` on Codex) keeps them
+  on a fallback on the other adapter unless the fallback sets its own value.
+  This applies when saving and when building the run's config, and the UI shows
+  the Claude and Codex permission toggles for a cross-adapter fallback.
 
 Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`):
 
@@ -238,6 +243,10 @@ escalating to the board. A suspended state is not reactivated until it expires.
   completes against the primary's account. The fallback account is marked
   unhealthy, the agent header shows the fallback as paused, and the account is
   repaired from the agent's settings.
+- A personal (`responsible_user`) fallback account belongs to the run's user, so
+  its failure does not suspend the fallback for the agent: only that run waits
+  for the primary, the marked account sends that user's later runs to the
+  primary at claim, and other users keep the fallback.
 - Suspending sets only `suspendedReason` in one conditional update, so it never
   overwrites a later `activeUntil` and does nothing after **Return to primary**.
 
@@ -247,6 +256,11 @@ Right after `getAgent` in `executeRun` (`heartbeat.ts:20489`), build an
 `effectiveAgentForRun(agent, run)` that overlays `adapterType`, `adapterConfig`
 and `runtimeConfig.aiConnection` for fallback-lane runs. `executeRun` reads
 `agent.*` about 50 times, so shadowing the variable is the single safe point.
+
+An issue's assignee overrides of engine settings (model, effort, chrome, the
+permission flags and the other fallback keys) were chosen for the primary's
+adapter, so a fallback-lane run drops them and keeps its own. Workspace
+overrides apply on both lanes.
 
 The adapter guard at `heartbeat.ts:20507-20510` compares the claimed adapter
 with the effective agent's adapter, not the raw agent row:
@@ -267,8 +281,12 @@ with the effective agent's adapter, not the raw agent row:
     matches the run's effective adapter.
   - Explicit resume params from a prior run (`heartbeat.ts:27112-27123`): drop
     them when the prior run's lane adapter differs from this run's.
-- After a fallback turn, the primary's task session for that task is cleared,
-  so the primary resumes fresh with the handoff after the switch-back.
+- After a fallback turn that kept a conversation, the primary's task session
+  for that task is cleared, so the primary resumes fresh with the handoff after
+  the switch-back. A fallback run that never started one, for example because
+  it hit its own limit or could not sign in, leaves the primary's session alone.
+- A full session reset (no task) keeps the fallback state; **Return to primary**
+  ends it.
 - A new activation (not an extension) clears the fallback adapter's task
   sessions, so a later window never resumes a conversation that misses the
   primary's turns since. A user session reset for a task clears its sessions
@@ -367,6 +385,15 @@ switch loses little.
 - Activation happens only in the bounded transient retry path: a quota failure
   after its retry budget is used up waits for the reset, and switching uses one
   of the two bounded attempts.
+- Outage switching needs the CLI engine. The ACP engine, the default for both
+  adapters, reports usage limits and sign-in failures but no transient upstream
+  failures, so an ACP primary never switches on an outage. The UI says so.
+- Only `codex_local` supports managed MCP gateways, so a Codex primary that falls
+  back to Claude runs without its gateway tools for the window.
+- The adapters' failure classifiers search the whole failed transcript, so a
+  failed task whose tool output mentions a rate limit, a 503 or a usage limit can
+  be read as an outage or a limit and switch the agent. This predates the
+  fallback; the fallback makes it more visible.
 - A suspended fallback stays off until `activeUntil` even after its account is
   repaired; **Return to <primary>** or the next window starts it again.
 - A signed-out host login is retried every 30 minutes while runs keep coming, and

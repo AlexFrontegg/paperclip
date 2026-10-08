@@ -106,6 +106,16 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     expect((await storedRuntimeConfig(f.agentId)).usageLimitFallback).toMatchObject({ switchWhenUnavailable: true });
   });
 
+  it("keeps a Claude primary's permission checks on its Codex fallback", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ adapterConfig: { dangerouslySkipPermissions: false } }).where(eq(agents.id, f.agentId));
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const fallback = (await storedRuntimeConfig(f.agentId)).usageLimitFallback as Record<string, any>;
+    expect(fallback.adapterConfig.dangerouslyBypassApprovalsAndSandbox).toBe(false);
+  });
+
   it("keeps the saved fallback when a later update omits it", async () => {
     const f = await fixture();
     await f.connectCodex();

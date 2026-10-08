@@ -6,6 +6,7 @@ import {
   readUsageLimitFallbackState,
   usageLimitFallbackConfigProblem,
   usageLimitFallbackConfigSchema,
+  usageLimitFallbackPermissionDefaults,
   type UsageLimitFallbackConfig,
 } from "./usage-limit-fallback.js";
 import { agentRuntimeConfigSchema } from "./validators/agent.js";
@@ -119,6 +120,16 @@ describe("buildUsageLimitFallbackAdapterConfig", () => {
       adapterConfig: { networkAllowlist: ["api.openai.com", "chatgpt.com"] },
     }, "claude_local");
     expect(config.networkAllowlist).toEqual(["api.openai.com", "chatgpt.com"]);
+  });
+
+  it("keeps a primary's permission checks on a fallback on the other adapter unless the fallback sets its own", () => {
+    const sandboxedCodex = { dangerouslyBypassApprovalsAndSandbox: false };
+    expect(buildUsageLimitFallbackAdapterConfig(sandboxedCodex, { adapterType: "claude_local", adapterConfig: {} }, "codex_local"))
+      .toMatchObject({ dangerouslySkipPermissions: false });
+    expect(buildUsageLimitFallbackAdapterConfig(sandboxedCodex, { adapterType: "claude_local", adapterConfig: { dangerouslySkipPermissions: true } }, "codex_local"))
+      .toMatchObject({ dangerouslySkipPermissions: true });
+    expect(usageLimitFallbackPermissionDefaults({ dangerouslySkipPermissions: false }, "codex_local")).toEqual({ dangerouslyBypassApprovalsAndSandbox: false });
+    expect(usageLimitFallbackPermissionDefaults({}, "codex_local")).toEqual({});
   });
 
   it("returns only the fallback settings when the primary config is not an object", () => {
