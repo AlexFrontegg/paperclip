@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentRuntimeState, agentTaskSessions, agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { agentRuntimeState, agentTaskSessions, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
@@ -62,6 +62,7 @@ const CODEX_RESET_AT = "2030-04-23T21:00:00.000Z";
 const openAiBinding = { provider: "openai", method: "api_key", mode: "responsible_user" };
 const anthropicBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" };
 const sharedAnthropicBinding = { provider: "anthropic", method: "subscription", mode: "shared", connectionId: randomUUID(), grantId: randomUUID() };
+const sharedOpenAiBinding = { provider: "openai", method: "api_key", mode: "shared", connectionId: randomUUID(), grantId: randomUUID() };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
 const claudeFallback = { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fallback-test" }, switchBack: "on_reset" };
 const outage = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
@@ -82,7 +83,7 @@ function failedExecution(failure: Failure) {
   };
 }
 
-type Execution = { adapterType: string; model: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
+type Execution = { adapterType: string; model: unknown; bypass: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
 
 describeEmbeddedPostgres("usage-limit fallback", () => {
   let db!: ReturnType<typeof createDb>;
@@ -98,6 +99,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     executions.push({
       adapterType,
       model: ctx.config.model,
+      bypass: ctx.config.dangerouslyBypassApprovalsAndSandbox,
       instructionsFilePath: ctx.config.instructionsFilePath,
       aiConnection: (ctx.agent as { runtimeConfig?: Record<string, unknown> }).runtimeConfig?.aiConnection,
       runId: ctx.runId,
@@ -141,7 +143,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
         record("codex_local", ctx);
         const failure = codexFailures.shift();
         if (failure) return failedExecution(failure);
-        if (!codexErrorCode) return { exitCode: 0, signal: null, timedOut: false };
+        if (!codexErrorCode) return { exitCode: 0, signal: null, timedOut: false, sessionId: "codex-fallback-session" };
         if (codexErrorCode === "provider_quota") {
           return {
             exitCode: 1,
@@ -347,7 +349,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
   });
 
   it("suspends a fallback whose account cannot be prepared and makes the retry wait for the primary's reset", async () => {
-    const agent = await seedAgent({ usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
+    const agent = await seedAgent({ usageLimitFallback: { ...codexFallback, aiConnection: sharedOpenAiBinding } });
     aiAccounts.selectable = ["openai"];
     aiAccounts.broken = ["openai"];
     await activeFallback(agent);
@@ -729,6 +731,77 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, later)).toEqual({ adapterType: "claude_local" });
       expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
     });
+  });
+
+  it("runs the fallback with its own model, keeping the issue's permission checks, when the issue overrides the primary", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: agent.companyId,
+      title: "Override task",
+      status: "todo",
+      priority: "medium",
+      responsibleUserId: "responsible-user",
+      assigneeAgentId: agent.id,
+      issueNumber: 1,
+      identifier: `${company!.issuePrefix}-1`,
+      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-issue-override", dangerouslySkipPermissions: false } },
+    });
+    const run = await heartbeat.wakeup(agent.id, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId, mutation: "update" },
+      contextSnapshot: { issueId, source: "issue.update" },
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+    });
+    await waitForRun(run!.id);
+    expect(executions[0]).toMatchObject({ adapterType: "codex_local", model: "gpt-fallback-test", bypass: false });
+  });
+
+  it("keeps the primary's session when a fallback run reports that no provider work started", async () => {
+    const agent = await seedAgent();
+    const taskKey = "issue-task";
+    await db.insert(agentTaskSessions).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: "claude_local",
+      taskKey,
+      sessionParamsJson: { sessionId: "claude-session" },
+      sessionDisplayId: "claude-session",
+    });
+    await activeFallback(agent);
+    codexErrorCode = "codex_auth_required";
+    const run = await heartbeat.invoke(agent.id, "on_demand", { taskKey }, "manual");
+    expect(dispatchOf(await waitForRun(run!.id))?.lane).toBe("fallback");
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    // Sessions settle just after the run is marked finished.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+    expect(sessions.filter((session) => session.adapterType === "claude_local" && session.taskKey === taskKey)).toHaveLength(1);
+  });
+
+  it("lets only the affected user wait when a personal fallback account fails", async () => {
+    const agent = await seedAgent({ usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
+    aiAccounts.selectable = ["openai"];
+    await activeFallback(agent);
+    codexErrorCode = "codex_auth_required";
+    const run = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
+    expect(dispatchOf(await waitForRun(run!.id))?.lane).toBe("fallback");
+    expect((await retryOf(run!.id)).scheduledRetryAt!.toISOString()).toBe(RESET_AT);
+    expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBeUndefined();
+    expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: "another-user" }, new Date())).toMatchObject({ lane: "fallback" });
+  });
+
+  it("keeps the fallback when the agent's sessions are reset", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    await heartbeat.resetRuntimeSession(agent.id);
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ activeUntil: RESET_AT });
   });
 
   it("treats only failures of the fallback's own account as a broken fallback", () => {

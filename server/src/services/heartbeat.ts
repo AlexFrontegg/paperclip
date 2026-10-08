@@ -36,7 +36,7 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema, readUsageLimitFallbackConfig, type UsageLimitFallbackReason } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS, USAGE_LIMIT_FALLBACK_STATE_KEY, usageLimitFallbackPermissionDefaults, type UsageLimitFallbackReason } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { activateUsageLimitFallback, effectiveAgentForRun, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
@@ -5694,6 +5694,26 @@ function parseIssueAssigneeAdapterOverrides(
     adapterConfig,
     useProjectWorkspace,
   };
+}
+
+/**
+ * The fallback keeps its own engine settings, since an issue's overrides of them were chosen for the primary's adapter.
+ * An issue that keeps permission checks still keeps them on the fallback.
+ */
+function withoutFallbackEngineOverrides(
+  overrides: ParsedIssueAssigneeAdapterOverrides | null,
+  fallbackAdapterType: string,
+): ParsedIssueAssigneeAdapterOverrides | null {
+  if (!overrides?.adapterConfig) return overrides;
+  const remaining = {
+    ...Object.fromEntries(
+      Object.entries(overrides.adapterConfig).filter(([key]) => !USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS.includes(key)),
+    ),
+    ...usageLimitFallbackPermissionDefaults(overrides.adapterConfig, fallbackAdapterType),
+  };
+  const adapterConfig = Object.keys(remaining).length > 0 ? remaining : null;
+  if (!adapterConfig && overrides.useProjectWorkspace === null) return null;
+  return { ...overrides, adapterConfig };
 }
 
 /**
@@ -15489,7 +15509,12 @@ export function heartbeatService(
     storedAgent: typeof agents.$inferSelect,
   ): Promise<boolean> {
     const now = new Date();
-    const state = await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
+    // A personal fallback account belongs to this run's user, so only this run waits and other users keep the fallback.
+    const personalFallbackAccount = readUsageLimitFallbackConfig(storedAgent.runtimeConfig)?.aiConnection?.mode === "responsible_user";
+    const currentState = personalFallbackAccount ? await readAgentUsageLimitFallbackState(db, failedRun.agentId) : null;
+    const state = personalFallbackAccount
+      ? (isUsageLimitFallbackStateActive(currentState, now) ? currentState : null)
+      : await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
     if (!state) return false;
     // The broken fallback, not the work, used this attempt, so the wait for the primary always gets one more.
     const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, {
@@ -15501,15 +15526,17 @@ export function heartbeatService(
       ),
     });
     const waitingForPrimary = retry.outcome === "scheduled";
+    const cause = personalFallbackAccount
+      ? `This user's usage-limit fallback account cannot run (${failedRun.errorCode})`
+      : `Usage-limit fallback cannot run (${failedRun.errorCode})`;
     await appendRunEvent(failedRun, {
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: waitingForPrimary
-        ? `Usage-limit fallback cannot run (${failedRun.errorCode}); waiting for the primary until ${state.activeUntil}`
-        : `Usage-limit fallback cannot run (${failedRun.errorCode}); it stays off until ${state.activeUntil}`,
-      payload: { usageLimitFallback: state, retryScheduled: waitingForPrimary },
+      message: `${cause}; ${waitingForPrimary ? `waiting for the primary until ${state.activeUntil}` : "no retry could be scheduled"}`,
+      payload: { usageLimitFallback: state, retryScheduled: waitingForPrimary, personalFallbackAccount },
     });
+    if (personalFallbackAccount) return waitingForPrimary;
     await logActivity(db, {
       companyId: failedRun.companyId,
       actorType: "system",
@@ -20896,12 +20923,15 @@ export function heartbeatService(
                   : row;
               })
           : null;
-      const issueAssigneeOverrides =
+      const parsedIssueAssigneeOverrides =
         issueContext && issueContext.assigneeAgentId === agent.id
           ? parseIssueAssigneeAdapterOverrides(
               issueContext.assigneeAdapterOverrides,
             )
           : null;
+      const issueAssigneeOverrides = runUsageLimitLane(run) === "fallback"
+        ? withoutFallbackEngineOverrides(parsedIssueAssigneeOverrides, agent.adapterType)
+        : parsedIssueAssigneeOverrides;
       const experimentalInstanceSettings =
         await instanceSettings.getExperimental();
       const isolatedWorkspacesEnabled =
@@ -26149,9 +26179,11 @@ export function heartbeatService(
                 lastError: runErrorMessage,
               });
             }
-            // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the handoff.
+            // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the
+            // handoff. Only a fallback run with positive evidence that no provider work started leaves it alone.
             const dispatch = readRunAdapterDispatch(finalizedRun);
-            if (dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
+            const fallbackStartedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
+            if (!fallbackStartedNoWork && dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
               await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: dispatch.primaryAdapterType });
             }
           }
@@ -26447,7 +26479,9 @@ export function heartbeatService(
             livenessRun,
             agent,
           );
-          await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent);
+          await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent).catch((fallbackError) => {
+            logger.warn({ err: fallbackError, runId: livenessRun.id }, "failed to apply the usage-limit fallback after adapter failure");
+          });
           await releaseIssueExecutionAndPromote(livenessRun, {
             // Native recovery owns the original heartbeat run through
             // exhaustion. Once its durable coordinator has classified a
@@ -30338,13 +30372,12 @@ export function heartbeatService(
         lastError: null,
         updatedAt: new Date(),
       };
-      if (!taskKey) {
-        runtimePatch.stateJson = {};
-      }
+      // The usage-limit fallback is not a session, so a full reset keeps it; "Return to primary" ends it.
+      const keptFallbackState = sql`jsonb_strip_nulls(jsonb_build_object(${USAGE_LIMIT_FALLBACK_STATE_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY}))`;
 
       const updated = await db
         .update(agentRuntimeState)
-        .set(runtimePatch)
+        .set(taskKey ? runtimePatch : { ...runtimePatch, stateJson: keptFallbackState })
         .where(eq(agentRuntimeState.agentId, agentId))
         .returning()
         .then((rows) => rows[0] ?? null);

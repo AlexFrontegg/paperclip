@@ -5,6 +5,7 @@ import {
   isUsageLimitFallbackStateActive,
   readUsageLimitFallbackState,
   USAGE_LIMIT_FALLBACK_ADAPTER_TYPES,
+  usageLimitFallbackPermissionDefaults,
   type UsageLimitFallbackAdapterType,
   type UsageLimitFallbackConfig,
   type UsageLimitFallbackReason,
@@ -30,6 +31,7 @@ export function UsageLimitFallbackField({
   agentId,
   agentName,
   primaryAdapterType,
+  primaryAdapterConfig = {},
   environmentId,
   value,
   onChange,
@@ -38,6 +40,7 @@ export function UsageLimitFallbackField({
   agentId: string;
   agentName: string;
   primaryAdapterType: string;
+  primaryAdapterConfig?: Record<string, unknown>;
   environmentId?: string;
   value: UsageLimitFallbackConfig | undefined;
   onChange: (next: UsageLimitFallbackConfig) => void;
@@ -78,6 +81,12 @@ export function UsageLimitFallbackField({
     switchWhenUnavailable: true,
   };
   const primaryLabel = getAdapterDisplay(primaryAdapterType).label;
+  const permissionDefaults = usageLimitFallbackPermissionDefaults(primaryAdapterConfig, fallbackAdapterType);
+  const switchBackHint = `${primaryLabel} is tried again after 30 minutes, or as soon as its account is reconnected.`;
+  // Only the CLI engine reports provider outages; the default ACP engine reports usage limits and sign-in failures.
+  const unavailableHint = primaryAdapterConfig.engine === "cli"
+    ? `After a second failed try in a row, or a sign-in failure. ${switchBackHint}`
+    : `After a sign-in failure. Outages are detected only with the CLI engine, and this agent uses ACP. ${switchBackHint}`;
 
   return (
     <div className="space-y-3 rounded-md border border-border px-3 py-2.5" data-testid="usage-limit-fallback">
@@ -92,7 +101,7 @@ export function UsageLimitFallbackField({
         <>
           <ToggleField
             label={`Also switch when ${primaryLabel} is down or signed out`}
-            hint={`After a second failed try in a row, or a sign-in failure. ${primaryLabel} is tried again after 30 minutes, or as soon as its account is reconnected.`}
+            hint={unavailableHint}
             checked={base.switchWhenUnavailable}
             onChange={(next) => onChange({ ...base, switchWhenUnavailable: next })}
             toggleTestId="usage-limit-fallback-when-unavailable"
@@ -131,9 +140,18 @@ export function UsageLimitFallbackField({
             <ToggleField
               label="Bypass Codex approvals and sandbox"
               hint="Matches new Codex agents. Turn off to keep Codex's own approval prompts and sandbox for fallback runs."
-              checked={base.adapterConfig.dangerouslyBypassApprovalsAndSandbox !== false}
+              checked={(base.adapterConfig.dangerouslyBypassApprovalsAndSandbox ?? permissionDefaults.dangerouslyBypassApprovalsAndSandbox) !== false}
               onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslyBypassApprovalsAndSandbox: next } })}
               toggleTestId="usage-limit-fallback-codex-bypass"
+            />
+          )}
+          {fallbackAdapterType === "claude_local" && primaryAdapterType !== "claude_local" && (
+            <ToggleField
+              label="Skip Claude permission prompts"
+              hint="Matches new Claude Code agents. Turn off to keep Claude's permission checks for fallback runs."
+              checked={(base.adapterConfig.dangerouslySkipPermissions ?? permissionDefaults.dangerouslySkipPermissions) !== false}
+              onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslySkipPermissions: next } })}
+              toggleTestId="usage-limit-fallback-claude-skip-permissions"
             />
           )}
           <Field label="Fallback model">

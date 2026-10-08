@@ -10,6 +10,7 @@ import { agentRuntimeState, agents, companies, companyMemberships, createDb, hea
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentRoutes } from "../routes/agents.js";
 import { errorHandler } from "../middleware/index.js";
+import { buildUsageLimitFallbackAdapterConfig } from "@paperclipai/shared";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
 
@@ -87,15 +88,14 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     return request(app).patch(`/api/agents/${agentId}`).send(body);
   }
 
-  it("saves a Codex fallback and applies the Codex defaults to its settings", async () => {
+  it("saves a Codex fallback without pinning its sandbox flag, so the primary's choice and Codex's default apply at run time", async () => {
     const f = await fixture();
     await f.connectCodex();
     const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     const fallback = (await storedRuntimeConfig(f.agentId)).usageLimitFallback as Record<string, any>;
     expect(fallback).toMatchObject({ enabled: true, adapterType: "codex_local", switchBack: "on_reset" });
-    expect(fallback.adapterConfig).toMatchObject({ model: "gpt-6-astra" });
-    expect(typeof fallback.adapterConfig.dangerouslyBypassApprovalsAndSandbox).toBe("boolean");
+    expect(fallback.adapterConfig).toEqual({ model: "gpt-6-astra" });
   });
 
   it("saves the choice to also switch when the primary is down or signed out", async () => {
@@ -104,6 +104,17 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: { ...codexFallbackWithAccount, switchWhenUnavailable: true } } });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect((await storedRuntimeConfig(f.agentId)).usageLimitFallback).toMatchObject({ switchWhenUnavailable: true });
+  });
+
+  it("keeps a Claude primary's permission checks on its Codex fallback", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ adapterConfig: { dangerouslySkipPermissions: false } }).where(eq(agents.id, f.agentId));
+    await f.connectCodex();
+    const response = await patch(f.app, f.agentId, { runtimeConfig: { usageLimitFallback: codexFallbackWithAccount } });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const fallback = (await storedRuntimeConfig(f.agentId)).usageLimitFallback as Record<string, any>;
+    expect(buildUsageLimitFallbackAdapterConfig({ dangerouslySkipPermissions: false }, fallback as never, "claude_local"))
+      .toMatchObject({ dangerouslyBypassApprovalsAndSandbox: false });
   });
 
   it("keeps the saved fallback when a later update omits it", async () => {

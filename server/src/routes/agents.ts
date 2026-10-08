@@ -3436,13 +3436,8 @@ export function agentRoutes(
     });
     if (problem) throw unprocessable(problem, { code: "usage_limit_fallback_invalid" });
     await assertSelectableAdapterType(fallback.adapterType);
-    // A fallback on the primary's adapter keeps the primary's settings, so new-agent defaults must not override them.
-    const adapterConfig = fallback.adapterType === input.primaryAdapterType
-      ? fallback.adapterConfig
-      : usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
-        applyCreateDefaultsByAdapterType(fallback.adapterType, fallback.adapterConfig),
-      );
-    const normalized: UsageLimitFallbackConfig = { ...fallback, adapterConfig };
+    // No new-agent defaults are saved: at run time the fallback's own value wins, then the primary's permission checks, then the adapter's default.
+    const normalized: UsageLimitFallbackConfig = fallback;
     if (!normalized.aiConnection) return { fallback: normalized };
     const effectiveConfig = buildUsageLimitFallbackAdapterConfig(input.primaryAdapterConfig, normalized, input.primaryAdapterType);
     if (!isAiConnectionCompatible(normalized.aiConnection, normalized.adapterType, effectiveConfig.model, effectiveConfig.provider, effectiveConfig.acpxAgent)) {

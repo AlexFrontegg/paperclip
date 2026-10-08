@@ -91,11 +91,15 @@ usageLimitFallback?: {
     `cwd`, workspace, env, confinement, timeouts) plus the fallback keys. The
     primary's provider credentials, homes and routing (`AI_AUTH_ENV_KEYS`) are
     removed from the inherited env.
-- Saving a fallback on another adapter applies that adapter's create defaults to
-  the fallback keys, so a Codex fallback for a Claude agent gets
-  `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent; the UI shows
-  that setting explicitly. A fallback on the primary's adapter gets no defaults
-  and never overrides the primary's sandbox and permission flags.
+- Saving does not pin new-agent defaults. When the run's config is built, a
+  fallback on another adapter takes its own permission value first, then the
+  primary's permission checks, then the adapter's own default. A Codex fallback
+  for a Claude agent therefore bypasses like a new Codex agent, unless the
+  primary keeps its checks (`dangerouslySkipPermissions: false` on Claude,
+  `dangerouslyBypassApprovalsAndSandbox` or the legacy `dangerouslyBypassSandbox`
+  set to false on Codex). The UI shows the resulting Claude or Codex permission
+  toggle for a cross-adapter fallback. A fallback on the primary's adapter never
+  overrides the primary's sandbox and permission flags.
 
 Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`):
 
@@ -238,6 +242,10 @@ escalating to the board. A suspended state is not reactivated until it expires.
   completes against the primary's account. The fallback account is marked
   unhealthy, the agent header shows the fallback as paused, and the account is
   repaired from the agent's settings.
+- A personal (`responsible_user`) fallback account belongs to the run's user, so
+  its failure does not suspend the fallback for the agent: only that run waits
+  for the primary, the marked account sends that user's later runs to the
+  primary at claim, and other users keep the fallback.
 - Suspending sets only `suspendedReason` in one conditional update, so it never
   overwrites a later `activeUntil` and does nothing after **Return to primary**.
 
@@ -247,6 +255,12 @@ Right after `getAgent` in `executeRun` (`heartbeat.ts:20489`), build an
 `effectiveAgentForRun(agent, run)` that overlays `adapterType`, `adapterConfig`
 and `runtimeConfig.aiConnection` for fallback-lane runs. `executeRun` reads
 `agent.*` about 50 times, so shadowing the variable is the single safe point.
+
+An issue's assignee overrides of engine settings (model, effort, chrome, the
+permission flags and the other fallback keys) were chosen for the primary's
+adapter, so a fallback-lane run drops them and keeps its own. An issue that
+keeps permission checks still keeps them on the fallback. Workspace and network
+allowlist overrides apply on both lanes.
 
 The adapter guard at `heartbeat.ts:20507-20510` compares the claimed adapter
 with the effective agent's adapter, not the raw agent row:
@@ -268,7 +282,15 @@ with the effective agent's adapter, not the raw agent row:
   - Explicit resume params from a prior run (`heartbeat.ts:27112-27123`): drop
     them when the prior run's lane adapter differs from this run's.
 - After a fallback turn, the primary's task session for that task is cleared,
-  so the primary resumes fresh with the handoff after the switch-back.
+  so the primary resumes fresh with the handoff after the switch-back. Only a
+  fallback run with positive evidence that no provider work started
+  (`executionRecovery.kind: "bootstrap"`, today an ACP run stopped before
+  provider startup) leaves the primary's session alone. The adapters report no
+  such evidence for sign-in, quota or turn-cap failures, so those still clear it:
+  a missed turn in a resumed session would be worse than a fresh start with the
+  handoff. Setup failures before the adapter runs never touch sessions.
+- A full session reset (no task) keeps the fallback state; **Return to primary**
+  ends it.
 - A new activation (not an extension) clears the fallback adapter's task
   sessions, so a later window never resumes a conversation that misses the
   primary's turns since. A user session reset for a task clears its sessions
@@ -367,6 +389,20 @@ switch loses little.
 - Activation happens only in the bounded transient retry path: a quota failure
   after its retry budget is used up waits for the reset, and switching uses one
   of the two bounded attempts.
+- Outage switching needs the CLI engine. The ACP engine, the default for both
+  adapters, reports usage limits and sign-in failures but no transient upstream
+  failures, so an ACP primary never switches on an outage. The UI says so.
+- Codex fallbacks saved before the permission carry-over keep the sandbox value
+  that was saved with them; turn the toggle off to match a primary that keeps
+  its checks.
+- A personal fallback account that cannot be prepared and is not marked for
+  sign-in keeps receiving that user's runs, each of which waits for the primary.
+- Only `codex_local` supports managed MCP gateways, so a Codex primary that falls
+  back to Claude runs without its gateway tools for the window.
+- The adapters' failure classifiers search the whole failed transcript, so a
+  failed task whose tool output mentions a rate limit, a 503 or a usage limit can
+  be read as an outage or a limit and switch the agent. This predates the
+  fallback; the fallback makes it more visible.
 - A suspended fallback stays off until `activeUntil` even after its account is
   repaired; **Return to <primary>** or the next window starts it again.
 - A signed-out host login is retried every 30 minutes while runs keep coming, and

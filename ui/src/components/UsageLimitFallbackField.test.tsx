@@ -107,6 +107,18 @@ describe("UsageLimitFallbackField safety controls", () => {
     expect(onChange).toHaveBeenCalledWith({ ...enabledCodex, switchWhenUnavailable: true });
   });
 
+  it("keeps a sandboxed Codex primary's permission checks on a Claude fallback", async () => {
+    await mountField({
+      primaryAdapterType: "codex_local",
+      primaryAdapterConfig: { dangerouslyBypassApprovalsAndSandbox: false },
+      value: { enabled: true, adapterType: "claude_local", adapterConfig: {}, switchBack: "on_reset", switchWhenUnavailable: false },
+    });
+    const toggle = container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-claude-skip-permissions']");
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+    flushSync(() => toggle!.click());
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ adapterConfig: { dangerouslySkipPermissions: true } }));
+  });
+
   it("hides the Codex bypass setting when the fallback keeps the Codex primary's settings", async () => {
     await mountField({ primaryAdapterType: "codex_local", value: enabledCodex });
     expect(container.querySelector("[data-testid='usage-limit-fallback-codex-bypass']")).toBeNull();
