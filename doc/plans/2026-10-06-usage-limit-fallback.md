@@ -169,23 +169,26 @@ more primary-lane failures activate the fallback, in either direction between
 Claude Code and Codex. The state records the reason (`provider_outage` or
 `primary_signed_out`), and the header and run events say why the agent switched.
 
-- **Outage:** a second `transient_upstream` failure in a row on the primary (the
-  failing run is a transient retry of a `transient_upstream` failure). The first
-  failure retries the primary as before, so one blip never switches. The window
+- **Outage:** a second `transient_upstream` failure in a row on the primary.
+  Each retry records the run it retries, that run's error family and its lane
+  (`usageLimitPreviousFailure`), and only a direct retry of a primary-lane
+  outage counts, so a copied older failure or a blip on the fallback never does.
+  The first failure retries the primary as before, so one blip never switches. The window
   is 30 minutes, then the primary is tried again. A blip on the fallback lane
   gets the normal short retry.
 - **Signed out:** an AI sign-in failure, or a managed account that cannot be
   prepared (`configuration_incomplete` with `ai_connection_unavailable`). The
   sign-in card is still raised for the primary, and the retry runs on the
   fallback at once.
-  - If the primary's managed account is marked for sign-in, the state sets
-    `waitForReconnect` and records the signed-out user. Each claim then checks
-    that user's account: still signed out keeps the fallback and pushes
-    `activeUntil` 30 minutes ahead; reconnected clears the state, so the next
-    run uses the primary. A suspended fallback is not kept past its window.
-  - Any other account (a host login, or a managed account that still looks
-    usable) uses a 30-minute window, so a fix is picked up without a loop of
-    failed runs.
+  - If the primary's shared or delegated account is marked for sign-in, the
+    state sets `waitForReconnect`. Each claim then checks that account: still
+    signed out keeps the fallback and pushes `activeUntil` 30 minutes ahead;
+    reconnected clears the state, so the next run uses the primary. A suspended
+    fallback is not kept past its window.
+  - Any other account uses a 30-minute window, so a fix is picked up without a
+    loop of failed runs. That includes a host login, a managed account that
+    still looks usable, and a personal (`responsible_user`) account, whose
+    sign-in belongs to one user and must not hold the agent for everyone.
 - Failures of the work itself (model refusal, tool errors, the turn cap) never
   activate the fallback.
 - When two activations overlap, the one that lasts longer keeps its reason and
@@ -368,6 +371,12 @@ switch loses little.
   repaired; **Return to <primary>** or the next window starts it again.
 - A signed-out host login is retried every 30 minutes while runs keep coming, and
   each failed retry raises another sign-in card.
+- While the agent is idle, the header keeps showing "until <primary> is
+  reconnected" after a reconnect or after the setting is turned off; the next
+  claim clears it.
+- If an outage window outlasts a usage-limit window and the setting is then
+  turned off, the next run tries the primary while it may still be out of quota,
+  which costs one failed run before the fallback re-activates.
 - Telemetry, Sentry reports and the run detail header still label runs with the
   agent's adapter; cancel, the run lists, the log viewer and the issue live view
   use the run's dispatched adapter.

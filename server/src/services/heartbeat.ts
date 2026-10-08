@@ -15670,12 +15670,15 @@ export function heartbeatService(
     }
 
     // A primary-lane usage limit, or a second outage failure in a row, switches the agent to its fallback and retries now.
+    // Only the failure this run directly retries counts, so a copied older failure never turns a first blip into a switch.
+    const previousFailure = parseObject(contextSnapshot.usageLimitPreviousFailure);
+    const retriesPrimaryOutage = previousFailure.runId === run.retryOfRunId
+      && previousFailure.errorFamily === "transient_upstream"
+      && previousFailure.lane === "primary";
     const fallbackReason =
       transientRecovery?.errorFamily === "provider_quota"
         ? "provider_quota"
-        : transientRecovery?.errorFamily === "transient_upstream"
-          && contextSnapshot.retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
-          && contextSnapshot.errorFamily === "transient_upstream"
+        : transientRecovery?.errorFamily === "transient_upstream" && retriesPrimaryOutage
           ? "provider_outage"
           : null;
     const usageLimitFallback = fallbackReason
@@ -15808,6 +15811,11 @@ export function heartbeatService(
         ...(transientRecovery
           ? { errorFamily: transientRecovery.errorFamily }
           : {}),
+        usageLimitPreviousFailure: {
+          runId: run.id,
+          errorFamily: transientRecovery?.errorFamily ?? null,
+          lane: runUsageLimitLane(run),
+        },
         scheduledRetryAttempt: schedule.attempt,
         scheduledRetryAt: schedule.dueAt.toISOString(),
         ...(transientRetryNotBefore
