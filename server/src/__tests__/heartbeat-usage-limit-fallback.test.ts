@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
@@ -866,6 +866,9 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     const finished = await runRetry(await retryOf(quotaRun.id));
     expect(dispatchOf(finished)?.lane).toBe("fallback");
     expect(finished.status).toBe("succeeded");
+    const switches = await db.select().from(activityLog)
+      .where(and(eq(activityLog.agentId, agent.id), eq(activityLog.action, "agent.usage_limit_fallback_activated")));
+    expect(switches).toHaveLength(1);
   });
 
   it("hands the work back to the primary when the fallback hits its own limit after its retries ran out", async () => {
@@ -929,11 +932,32 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     }).returning();
     await db.insert(agentRuntimeState).values({ agentId: agent.id, companyId: agent.companyId, adapterType: "claude_local", stateJson: {} });
     await returnUsageLimitFallbackToPrimary(db, agent.id, new Date());
+    await heartbeat.resetRuntimeSession(agent.id);
     const input = { agentId: agent.id, runId: olderFailure!.id, providerRetryAt: new Date(RESET_AT), now: new Date() };
     expect(await usageLimitFallbackRecoveryRetryAt(db, input)).toBeNull();
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
     await db.update(heartbeatRuns).set({ finishedAt: new Date(Date.now() + 1_000) }).where(eq(heartbeatRuns.id, olderFailure!.id));
     expect(await usageLimitFallbackRecoveryRetryAt(db, input)).toMatchObject({ activated: { reason: "provider_quota" } });
+  });
+
+  it("leaves the quota wait of a run whose retries belong to the chat outbox", async () => {
+    const agent = await seedAgent();
+    const [chatRun] = await db.insert(heartbeatRuns).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      status: "failed",
+      errorCode: "provider_quota",
+      finishedAt: new Date(),
+      contextSnapshot: { chatCompletionDeliveryIds: [randomUUID()] },
+      runnerProfileJson: { adapterDispatch: { adapterType: "claude_local" } },
+    }).returning();
+    expect(await usageLimitFallbackRecoveryRetryAt(db, {
+      agentId: agent.id,
+      runId: chatRun!.id,
+      providerRetryAt: new Date(RESET_AT),
+      now: new Date(),
+    })).toBeNull();
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
   });
 
   it("treats only failures of the fallback's own account as a broken fallback", () => {

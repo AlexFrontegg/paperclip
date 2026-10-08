@@ -185,7 +185,14 @@ recovery tries the fallback (`usageLimitFallbackRecoveryRetryAt`):
 - **Return to primary** records when it was used
   (`usageLimitFallbackReturnedAt`), and recovery does not switch again for a
   failure that finished before it. Only a new failure switches again.
-- Recovery logs `agent.usage_limit_fallback_activated` only for a new switch.
+- Only a new switch is logged as `agent.usage_limit_fallback_activated`; keeping
+  or extending an active fallback is not. A full session reset keeps the
+  fallback state and the last **Return to primary**.
+- A run whose retries belong to the chat completion outbox keeps its normal
+  quota wait.
+- When both lanes stay out of quota, each primary window costs one failed run
+  on each lane; a signed-out primary with a limited fallback costs one failed
+  fallback run every 30 minutes until the primary is reconnected.
 - Without a usable fallback the wait is unchanged.
 
 ### 5.2a When the primary is down or signed out

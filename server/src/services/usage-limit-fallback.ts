@@ -96,7 +96,7 @@ export async function readAgentUsageLimitFallbackState(db: Db, agentId: string):
   return readUsageLimitFallbackState(row?.stateJson);
 }
 
-const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
+export const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
 
 /** "Return to primary": ends the fallback and remembers when, so recovery does not switch again for an older failure. */
 export async function returnUsageLimitFallbackToPrimary(db: Db, agentId: string, now: Date): Promise<void> {
@@ -318,6 +318,9 @@ export async function usageLimitFallbackRecoveryRetryAt(db: Db, input: {
   const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
   if (!run || !agent || run.agentId !== agent.id) return null;
+  // The chat completion outbox owns this run's retries, so recovery cannot start one on another lane.
+  const chatDeliveryIds = isRecord(run.contextSnapshot) ? run.contextSnapshot.chatCompletionDeliveryIds : null;
+  if (Array.isArray(chatDeliveryIds) && chatDeliveryIds.some((id) => typeof id === "string")) return null;
   const [runtime] = await db.select({ stateJson: agentRuntimeState.stateJson }).from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agent.id));
   if (runUsageLimitLane(run) === "fallback") {
     // The fallback is out of quota too, so wait only until the primary is back; an ended fallback means it is back now.
