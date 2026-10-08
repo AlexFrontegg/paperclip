@@ -9,7 +9,7 @@ import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnecti
 import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, type UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
 import { aiConnectionService } from "../services/ai-connections.js";
-import { clearUsageLimitFallbackState } from "../services/usage-limit-fallback.js";
+import { returnUsageLimitFallbackToPrimary } from "../services/usage-limit-fallback.js";
 import { claimedAdapterType } from "../services/conversation-continuation.js";
 import { defaultAiConnectionForHire } from "../services/agent-ai-connection-default.js";
 import { assertAiConnectionCreateAccess, canInstallSharedAiConnectionForNewAgent, responsibleUserForAiRequest, validateAiApiKey } from "./ai-connections.js";
@@ -4512,7 +4512,7 @@ export function agentRoutes(
     const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    await clearUsageLimitFallbackState(db, id);
+    await returnUsageLimitFallbackToPrimary(db, id, new Date());
     await logActivity(db, {
       companyId: agent.companyId,
       actorType: "user",

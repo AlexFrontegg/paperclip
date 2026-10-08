@@ -176,10 +176,16 @@ recovery tries the fallback (`usageLimitFallbackRecoveryRetryAt`):
 
 - A primary-lane run activates the fallback like the retry path does, and the
   wait ends now instead of at the reset. When the monitor fires and the
-  fallback is active and not suspended, its retry gets one more attempt with no
-  delay, because the fallback takes it, not the work.
+  fallback is configured, active and not suspended, its retry gets one more
+  attempt with no delay, because the fallback takes it, not the work.
 - A fallback-lane run that hit its own limit waits only until the primary is
-  back (`activeUntil`) when that is earlier than the fallback's reset.
+  back (`activeUntil`, or now if the fallback already ended) when that is
+  earlier than the fallback's reset. When the monitor fires and the fallback
+  has ended, the primary takes one more attempt the same way.
+- **Return to primary** records when it was used
+  (`usageLimitFallbackReturnedAt`), and recovery does not switch again for a
+  failure that finished before it. Only a new failure switches again.
+- Recovery logs `agent.usage_limit_fallback_activated` only for a new switch.
 - Without a usable fallback the wait is unchanged.
 
 ### 5.2a When the primary is down or signed out

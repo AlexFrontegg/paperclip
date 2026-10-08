@@ -96,6 +96,19 @@ export async function readAgentUsageLimitFallbackState(db: Db, agentId: string):
   return readUsageLimitFallbackState(row?.stateJson);
 }
 
+const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
+
+/** "Return to primary": ends the fallback and remembers when, so recovery does not switch again for an older failure. */
+export async function returnUsageLimitFallbackToPrimary(db: Db, agentId: string, now: Date): Promise<void> {
+  await db
+    .update(agentRuntimeState)
+    .set({
+      stateJson: sql`jsonb_set(${agentRuntimeState.stateJson} - ${USAGE_LIMIT_FALLBACK_STATE_KEY}, ${`{${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}}`}::text[], ${JSON.stringify(now.toISOString())}::jsonb)`,
+      updatedAt: now,
+    })
+    .where(eq(agentRuntimeState.agentId, agentId));
+}
+
 /** Clears the fallback only if it is still the activation the caller saw, so a newer one survives. */
 export async function clearUsageLimitFallbackState(db: Db, agentId: string, activatedAt?: string): Promise<void> {
   const matchesActivation = activatedAt
@@ -305,13 +318,16 @@ export async function usageLimitFallbackRecoveryRetryAt(db: Db, input: {
   const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
   if (!run || !agent || run.agentId !== agent.id) return null;
+  const [runtime] = await db.select({ stateJson: agentRuntimeState.stateJson }).from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agent.id));
   if (runUsageLimitLane(run) === "fallback") {
-    // The fallback is out of quota too, so wait only until the primary is back.
-    const state = await readAgentUsageLimitFallbackState(db, agent.id);
-    return state && Date.parse(state.activeUntil) < input.providerRetryAt.getTime()
-      ? { retryAt: new Date(state.activeUntil), activated: null }
-      : null;
+    // The fallback is out of quota too, so wait only until the primary is back; an ended fallback means it is back now.
+    const state = readUsageLimitFallbackState(runtime?.stateJson);
+    const primaryBackAt = isUsageLimitFallbackStateActive(state, input.now) ? Date.parse(state!.activeUntil) : input.now.getTime();
+    return primaryBackAt < input.providerRetryAt.getTime() ? { retryAt: new Date(primaryBackAt), activated: null } : null;
   }
+  // "Return to primary" after this failure keeps the primary; only a newer failure switches again.
+  const returnedAt = Date.parse(String(isRecord(runtime?.stateJson) ? runtime.stateJson[USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY] : ""));
+  if (run.finishedAt && Number.isFinite(returnedAt) && run.finishedAt.getTime() <= returnedAt) return null;
   const activation = await activateUsageLimitFallback(db, {
     agent,
     run,

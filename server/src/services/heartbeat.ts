@@ -11833,17 +11833,19 @@ export function heartbeatService(
           const targetAgent = await getAgent(targetAgentId);
           if (!targetAgent)
             throw conflict("The quota recovery agent is unavailable.");
-          // Recovery switched this agent to its usage-limit fallback, which takes this attempt even when the run's own retries are spent.
+          // The other lane takes this attempt even when the run's own retries are spent, because the work did not use them up:
+          // the fallback after recovery switched to it, or the primary once it is back after the fallback hit its own limit.
           const fallbackState = await readAgentUsageLimitFallbackState(db, targetAgent.id);
-          const fallbackTakesOver = runUsageLimitLane(sourceRun) === "primary"
-            && isUsageLimitFallbackStateActive(fallbackState, input.now)
-            && !fallbackState?.suspendedReason;
+          const fallbackActive = isUsageLimitFallbackStateActive(fallbackState, input.now);
+          const otherLaneTakesOver = runUsageLimitLane(sourceRun) === "fallback"
+            ? !fallbackActive
+            : fallbackActive && !fallbackState?.suspendedReason && readUsageLimitFallbackConfig(targetAgent.runtimeConfig) !== null;
           const scheduled = await scheduleBoundedRetryForRun(
             sourceRun,
             targetAgent,
             {
               now: input.now,
-              ...(fallbackTakesOver
+              ...(otherLaneTakesOver
                 ? {
                     delayMs: 0,
                     maxAttempts: Math.max(

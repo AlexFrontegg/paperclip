@@ -14,6 +14,7 @@ import {
   isRunAiAccountFailure,
   readAgentUsageLimitFallbackState,
   resolveAdapterDispatchForClaim,
+  returnUsageLimitFallbackToPrimary,
   suspendUsageLimitFallback,
   usageLimitFallbackRecoveryRetryAt,
 } from "../services/usage-limit-fallback.ts";
@@ -865,6 +866,74 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     const finished = await runRetry(await retryOf(quotaRun.id));
     expect(dispatchOf(finished)?.lane).toBe("fallback");
     expect(finished.status).toBe("succeeded");
+  });
+
+  it("hands the work back to the primary when the fallback hits its own limit after its retries ran out", async () => {
+    const agent = await seedAgent();
+    const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: agent.companyId,
+      title: "Fallback quota after retries",
+      status: "todo",
+      priority: "medium",
+      responsibleUserId: "responsible-user",
+      assigneeAgentId: agent.id,
+      issueNumber: 1,
+      identifier: `${company!.issuePrefix}-1`,
+    });
+    const primaryBackAt = new Date(Date.now() + 1_500);
+    await activeFallback(agent, primaryBackAt.toISOString());
+    codexErrorCode = "provider_quota";
+    claudeHitsLimit = false;
+    const run = await heartbeat.wakeup(agent.id, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId, mutation: "update" },
+      contextSnapshot: {
+        issueId,
+        source: "issue.update",
+        executionRetryAccounting: { version: 1, failureRetries: 2, maxTurnContinuations: 0 },
+      },
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+    });
+    const fallbackRun = await waitForRun(run!.id);
+    expect(dispatchOf(fallbackRun)?.lane).toBe("fallback");
+    expect(fallbackRun.errorCode).toBe("provider_quota");
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    const [monitoredIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const nextCheckAt = Date.parse(String((monitoredIssue!.executionPolicy as Record<string, any>).monitor.nextCheckAt));
+    expect(nextCheckAt).toBe(primaryBackAt.getTime());
+
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, nextCheckAt - Date.now()) + 50));
+    expect((await heartbeat.tickTimers(new Date())).enqueued).toBe(1);
+    const finished = await runRetry(await retryOf(fallbackRun.id));
+    expect(dispatchOf(finished)).toEqual({ adapterType: "claude_local" });
+    expect(finished.status).toBe("succeeded");
+  });
+
+  it("does not switch again from recovery for a failure older than Return to primary", async () => {
+    const agent = await seedAgent();
+    const failedAt = new Date(Date.now() - 60_000);
+    const [olderFailure] = await db.insert(heartbeatRuns).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      status: "failed",
+      errorCode: "provider_quota",
+      finishedAt: failedAt,
+      runnerProfileJson: { adapterDispatch: { adapterType: "claude_local" } },
+    }).returning();
+    await db.insert(agentRuntimeState).values({ agentId: agent.id, companyId: agent.companyId, adapterType: "claude_local", stateJson: {} });
+    await returnUsageLimitFallbackToPrimary(db, agent.id, new Date());
+    const input = { agentId: agent.id, runId: olderFailure!.id, providerRetryAt: new Date(RESET_AT), now: new Date() };
+    expect(await usageLimitFallbackRecoveryRetryAt(db, input)).toBeNull();
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(Date.now() + 1_000) }).where(eq(heartbeatRuns.id, olderFailure!.id));
+    expect(await usageLimitFallbackRecoveryRetryAt(db, input)).toMatchObject({ activated: { reason: "provider_quota" } });
   });
 
   it("treats only failures of the fallback's own account as a broken fallback", () => {

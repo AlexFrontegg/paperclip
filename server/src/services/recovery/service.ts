@@ -2620,6 +2620,9 @@ export function recoveryService(
     if (!fallback.activated) {
       return { retryAt: fallback.retryAt, note: "Provider usage quota reached on the usage-limit fallback too; retry when the primary is back." };
     }
+    const note = "Provider usage quota reached; the usage-limit fallback takes the work now.";
+    // An earlier pass or run already switched; log only a new switch.
+    if (fallback.activated.activatedAt !== input.now.toISOString()) return { retryAt: fallback.retryAt, note };
     await logActivity(db, {
       companyId: input.companyId,
       actorType: "system",
@@ -2631,7 +2634,7 @@ export function recoveryService(
       entityId: input.agentId,
       details: { ...fallback.activated, source: "recovery.provider_quota_wait" },
     });
-    return { retryAt: fallback.retryAt, note: "Provider usage quota reached; the usage-limit fallback takes the work now." };
+    return { retryAt: fallback.retryAt, note };
   }
 
   async function ensureProviderQuotaWaitRecoveryMonitor(input: {
@@ -4327,7 +4330,7 @@ export function recoveryService(
         source: "recovery.provider_quota",
         latestRunId: input.latestRun.id,
         errorCode: "provider_quota",
-        nextCheckAt: input.classification.retryAt.toISOString(),
+        nextCheckAt: quotaRetry.retryAt.toISOString(),
         parsedResetTime: input.classification.parsedResetTime,
         targetAgentId,
       },
