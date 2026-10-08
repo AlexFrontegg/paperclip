@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentRuntimeState, agentTaskSessions, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
@@ -15,9 +15,10 @@ import {
   readAgentUsageLimitFallbackState,
   resolveAdapterDispatchForClaim,
   suspendUsageLimitFallback,
+  usageLimitFallbackRecoveryRetryAt,
 } from "../services/usage-limit-fallback.ts";
 
-vi.mock("../telemetry.js", () => ({ getTelemetryClient: () => ({ track: vi.fn() }) }));
+vi.mock("../telemetry.js", () => ({ getTelemetryClient: () => ({ track: vi.fn(), hashPrivateRef: vi.fn((value: string) => `hashed:${value}`) }) }));
 
 // Fake saved AI accounts by provider: `selectable` pass the account check, `broken` fail while being prepared.
 // With `selectable` null the real account services run.
@@ -466,6 +467,23 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       expect(await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", now)).toBeNull();
     });
 
+    it("lets recovery's quota wait for a fallback run that hit its own limit end when the primary is back", async () => {
+      const agent = await seedAgent();
+      const now = new Date("2030-04-22T10:00:00.000Z");
+      await activateUsageLimitFallback(db, { agent, run: quotaRun(), retryNotBefore: new Date("2030-04-22T15:00:00.000Z"), now });
+      const [fallbackRun] = await db.insert(heartbeatRuns).values({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        status: "failed",
+        errorCode: "provider_quota",
+        runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback" } },
+      }).returning();
+      const input = { agentId: agent.id, runId: fallbackRun!.id, now };
+      expect(await usageLimitFallbackRecoveryRetryAt(db, { ...input, providerRetryAt: new Date(RESET_AT) }))
+        .toEqual({ retryAt: new Date("2030-04-22T15:00:00.000Z"), activated: null });
+      expect(await usageLimitFallbackRecoveryRetryAt(db, { ...input, providerRetryAt: new Date("2030-04-22T12:00:00.000Z") })).toBeNull();
+    });
+
     it("does not activate when the fallback account cannot be used", async () => {
       const agent = await seedAgent({
         usageLimitFallback: { ...codexFallback, aiConnection: { provider: "openai", method: "api_key", mode: "responsible_user" } },
@@ -802,6 +820,51 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await activeFallback(agent);
     await heartbeat.resetRuntimeSession(agent.id);
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ activeUntil: RESET_AT });
+  });
+
+  it("switches to the fallback from recovery's quota wait after the run's own retries ran out", async () => {
+    const agent = await seedAgent();
+    const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: agent.companyId,
+      title: "Quota after retries",
+      status: "todo",
+      priority: "medium",
+      responsibleUserId: "responsible-user",
+      assigneeAgentId: agent.id,
+      issueNumber: 1,
+      identifier: `${company!.issuePrefix}-1`,
+    });
+    // The run's own retry budget is already spent, so its usage limit goes to recovery's quota wait.
+    const run = await heartbeat.wakeup(agent.id, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId, mutation: "update" },
+      contextSnapshot: {
+        issueId,
+        source: "issue.update",
+        executionRetryAccounting: { version: 1, failureRetries: 2, maxTurnContinuations: 0 },
+      },
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+    });
+    const quotaRun = await waitForRun(run!.id);
+    expect(quotaRun.errorCode).toBe("provider_quota");
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ reason: "provider_quota", activeUntil: RESET_AT });
+    const [monitoredIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const nextCheckAt = Date.parse(String((monitoredIssue!.executionPolicy as Record<string, any>).monitor.nextCheckAt));
+    expect(nextCheckAt - Date.now()).toBeLessThan(60_000);
+
+    expect((await heartbeat.tickTimers(new Date(nextCheckAt + 1))).enqueued).toBe(1);
+    const finished = await runRetry(await retryOf(quotaRun.id));
+    expect(dispatchOf(finished)?.lane).toBe("fallback");
+    expect(finished.status).toBe("succeeded");
   });
 
   it("treats only failures of the fallback's own account as a broken fallback", () => {

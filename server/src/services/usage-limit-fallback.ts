@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { agentRuntimeState, agentTaskSessions, type agents, type heartbeatRuns, type Db } from "@paperclipai/db";
+import { agentRuntimeState, agentTaskSessions, agents, heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   aiConnectionBindingSchema,
   buildUsageLimitFallbackAdapterConfig,
@@ -290,4 +290,34 @@ export async function activateUsageLimitFallback(db: Db, input: {
   });
   if (!state) return { activated: false, reason: "fallback_suspended" };
   return { activated: true, state };
+}
+
+/**
+ * A usage limit that outlasted the run's own retries reaches recovery's quota wait. The fallback can still take the
+ * work now. Returns when the waiting run should start, or null to keep the provider's reset time.
+ */
+export async function usageLimitFallbackRecoveryRetryAt(db: Db, input: {
+  agentId: string;
+  runId: string;
+  providerRetryAt: Date;
+  now: Date;
+}): Promise<{ retryAt: Date; activated: UsageLimitFallbackState | null } | null> {
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+  const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
+  if (!run || !agent || run.agentId !== agent.id) return null;
+  if (runUsageLimitLane(run) === "fallback") {
+    // The fallback is out of quota too, so wait only until the primary is back.
+    const state = await readAgentUsageLimitFallbackState(db, agent.id);
+    return state && Date.parse(state.activeUntil) < input.providerRetryAt.getTime()
+      ? { retryAt: new Date(state.activeUntil), activated: null }
+      : null;
+  }
+  const activation = await activateUsageLimitFallback(db, {
+    agent,
+    run,
+    reason: "provider_quota",
+    retryNotBefore: input.providerRetryAt,
+    now: input.now,
+  });
+  return activation.activated ? { retryAt: input.now, activated: activation.state } : null;
 }

@@ -11833,11 +11833,25 @@ export function heartbeatService(
           const targetAgent = await getAgent(targetAgentId);
           if (!targetAgent)
             throw conflict("The quota recovery agent is unavailable.");
+          // Recovery switched this agent to its usage-limit fallback, which takes this attempt even when the run's own retries are spent.
+          const fallbackState = await readAgentUsageLimitFallbackState(db, targetAgent.id);
+          const fallbackTakesOver = runUsageLimitLane(sourceRun) === "primary"
+            && isUsageLimitFallbackStateActive(fallbackState, input.now)
+            && !fallbackState?.suspendedReason;
           const scheduled = await scheduleBoundedRetryForRun(
             sourceRun,
             targetAgent,
             {
               now: input.now,
+              ...(fallbackTakesOver
+                ? {
+                    delayMs: 0,
+                    maxAttempts: Math.max(
+                      BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+                      executionRetryAttemptCount(sourceRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
+                    ),
+                  }
+                : {}),
               ...(isProviderQuotaReviewMonitor
                 ? {
                     retryReason:

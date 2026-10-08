@@ -230,7 +230,9 @@ instance admin, like changing its adapter.
 
 When a run on the primary fails with `provider_quota`, Paperclip turns on the
 fallback until the provider's reset time (one hour if the provider gives none)
-and retries immediately on the fallback. The agent row, its role, chat bindings
+and retries immediately on the fallback. A usage limit that arrives after the
+run's own retries are spent switches from recovery's quota wait instead of
+waiting for the reset. The agent row, its role, chat bindings
 and tasks do not change. Each run records the adapter it used in
 `adapterDispatch`. The first run claimed after the reset time uses the primary
 again. If the fallback account cannot be selected, the fallback is not used and
