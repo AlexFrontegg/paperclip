@@ -36,7 +36,7 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema, isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS, USAGE_LIMIT_FALLBACK_STATE_KEY, type UsageLimitFallbackReason } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS, USAGE_LIMIT_FALLBACK_STATE_KEY, usageLimitFallbackPermissionDefaults, type UsageLimitFallbackReason } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { activateUsageLimitFallback, effectiveAgentForRun, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
@@ -5696,14 +5696,21 @@ function parseIssueAssigneeAdapterOverrides(
   };
 }
 
-/** The fallback keeps its own engine settings; an issue's overrides of them were chosen for the primary's adapter. */
+/**
+ * The fallback keeps its own engine settings, since an issue's overrides of them were chosen for the primary's adapter.
+ * An issue that keeps permission checks still keeps them on the fallback.
+ */
 function withoutFallbackEngineOverrides(
   overrides: ParsedIssueAssigneeAdapterOverrides | null,
+  fallbackAdapterType: string,
 ): ParsedIssueAssigneeAdapterOverrides | null {
   if (!overrides?.adapterConfig) return overrides;
-  const remaining = Object.fromEntries(
-    Object.entries(overrides.adapterConfig).filter(([key]) => !USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS.includes(key)),
-  );
+  const remaining = {
+    ...Object.fromEntries(
+      Object.entries(overrides.adapterConfig).filter(([key]) => !USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS.includes(key)),
+    ),
+    ...usageLimitFallbackPermissionDefaults(overrides.adapterConfig, fallbackAdapterType),
+  };
   const adapterConfig = Object.keys(remaining).length > 0 ? remaining : null;
   if (!adapterConfig && overrides.useProjectWorkspace === null) return null;
   return { ...overrides, adapterConfig };
@@ -20923,7 +20930,7 @@ export function heartbeatService(
             )
           : null;
       const issueAssigneeOverrides = runUsageLimitLane(run) === "fallback"
-        ? withoutFallbackEngineOverrides(parsedIssueAssigneeOverrides)
+        ? withoutFallbackEngineOverrides(parsedIssueAssigneeOverrides, agent.adapterType)
         : parsedIssueAssigneeOverrides;
       const experimentalInstanceSettings =
         await instanceSettings.getExperimental();
@@ -26172,11 +26179,11 @@ export function heartbeatService(
                 lastError: runErrorMessage,
               });
             }
-            // A fallback turn that kept a conversation makes the primary's session for this task stale, so the primary
-            // resumes fresh with the handoff. A fallback run that never started one leaves the primary's session alone.
+            // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the
+            // handoff. Only a fallback run with positive evidence that no provider work started leaves it alone.
             const dispatch = readRunAdapterDispatch(finalizedRun);
-            const fallbackConversationKept = !adapterResult.clearSession && Boolean(nextSessionState.params || nextSessionState.displayId);
-            if (fallbackConversationKept && dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
+            const fallbackStartedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
+            if (!fallbackStartedNoWork && dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
               await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: dispatch.primaryAdapterType });
             }
           }

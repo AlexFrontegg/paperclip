@@ -91,16 +91,15 @@ usageLimitFallback?: {
     `cwd`, workspace, env, confinement, timeouts) plus the fallback keys. The
     primary's provider credentials, homes and routing (`AI_AUTH_ENV_KEYS`) are
     removed from the inherited env.
-- Saving a fallback on another adapter applies that adapter's create defaults to
-  the fallback keys, so a Codex fallback for a Claude agent gets
-  `dangerouslyBypassApprovalsAndSandbox` like a new Codex agent; the UI shows
-  that setting explicitly. A fallback on the primary's adapter gets no defaults
-  and never overrides the primary's sandbox and permission flags.
-- A primary that keeps its permission checks (`dangerouslySkipPermissions: false`
-  on Claude, `dangerouslyBypassApprovalsAndSandbox: false` on Codex) keeps them
-  on a fallback on the other adapter unless the fallback sets its own value.
-  This applies when saving and when building the run's config, and the UI shows
-  the Claude and Codex permission toggles for a cross-adapter fallback.
+- Saving does not pin new-agent defaults. When the run's config is built, a
+  fallback on another adapter takes its own permission value first, then the
+  primary's permission checks, then the adapter's own default. A Codex fallback
+  for a Claude agent therefore bypasses like a new Codex agent, unless the
+  primary keeps its checks (`dangerouslySkipPermissions: false` on Claude,
+  `dangerouslyBypassApprovalsAndSandbox` or the legacy `dangerouslyBypassSandbox`
+  set to false on Codex). The UI shows the resulting Claude or Codex permission
+  toggle for a cross-adapter fallback. A fallback on the primary's adapter never
+  overrides the primary's sandbox and permission flags.
 
 Validation on create, hire and update (`routes/agents.ts:4636, 4885, 5562-5570`):
 
@@ -259,8 +258,9 @@ and `runtimeConfig.aiConnection` for fallback-lane runs. `executeRun` reads
 
 An issue's assignee overrides of engine settings (model, effort, chrome, the
 permission flags and the other fallback keys) were chosen for the primary's
-adapter, so a fallback-lane run drops them and keeps its own. Workspace
-overrides apply on both lanes.
+adapter, so a fallback-lane run drops them and keeps its own. An issue that
+keeps permission checks still keeps them on the fallback. Workspace and network
+allowlist overrides apply on both lanes.
 
 The adapter guard at `heartbeat.ts:20507-20510` compares the claimed adapter
 with the effective agent's adapter, not the raw agent row:
@@ -281,10 +281,11 @@ with the effective agent's adapter, not the raw agent row:
     matches the run's effective adapter.
   - Explicit resume params from a prior run (`heartbeat.ts:27112-27123`): drop
     them when the prior run's lane adapter differs from this run's.
-- After a fallback turn that kept a conversation, the primary's task session
-  for that task is cleared, so the primary resumes fresh with the handoff after
-  the switch-back. A fallback run that never started one, for example because
-  it hit its own limit or could not sign in, leaves the primary's session alone.
+- After a fallback turn, the primary's task session for that task is cleared,
+  so the primary resumes fresh with the handoff after the switch-back. Only a
+  fallback run with positive evidence that no provider work started
+  (`executionRecovery.kind: "bootstrap"`, for example a sign-in or startup
+  failure) leaves the primary's session alone.
 - A full session reset (no task) keeps the fallback state; **Return to primary**
   ends it.
 - A new activation (not an extension) clears the fallback adapter's task
@@ -388,6 +389,11 @@ switch loses little.
 - Outage switching needs the CLI engine. The ACP engine, the default for both
   adapters, reports usage limits and sign-in failures but no transient upstream
   failures, so an ACP primary never switches on an outage. The UI says so.
+- Codex fallbacks saved before the permission carry-over keep the sandbox value
+  that was saved with them; turn the toggle off to match a primary that keeps
+  its checks.
+- A personal fallback account that cannot be prepared and is not marked for
+  sign-in keeps receiving that user's runs, each of which waits for the primary.
 - Only `codex_local` supports managed MCP gateways, so a Codex primary that falls
   back to Claude runs without its gateway tools for the window.
 - The adapters' failure classifiers search the whole failed transcript, so a

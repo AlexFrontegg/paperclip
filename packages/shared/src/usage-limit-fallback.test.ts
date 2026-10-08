@@ -128,7 +128,9 @@ describe("buildUsageLimitFallbackAdapterConfig", () => {
       .toMatchObject({ dangerouslySkipPermissions: false });
     expect(buildUsageLimitFallbackAdapterConfig(sandboxedCodex, { adapterType: "claude_local", adapterConfig: { dangerouslySkipPermissions: true } }, "codex_local"))
       .toMatchObject({ dangerouslySkipPermissions: true });
-    expect(usageLimitFallbackPermissionDefaults({ dangerouslySkipPermissions: false }, "codex_local")).toEqual({ dangerouslyBypassApprovalsAndSandbox: false });
+    expect(buildUsageLimitFallbackAdapterConfig({ dangerouslySkipPermissions: false }, { adapterType: "codex_local", adapterConfig: {} }, "claude_local"))
+      .toMatchObject({ dangerouslyBypassApprovalsAndSandbox: false });
+    expect(usageLimitFallbackPermissionDefaults({ dangerouslyBypassSandbox: false }, "claude_local")).toEqual({ dangerouslySkipPermissions: false });
     expect(usageLimitFallbackPermissionDefaults({}, "codex_local")).toEqual({});
   });
 

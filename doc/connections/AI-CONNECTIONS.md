@@ -243,7 +243,8 @@ environment, workspace, confinement and timeouts, minus the primary's provider
 credentials; a second account on the same adapter inherits everything. A
 primary that keeps its permission checks keeps them on a fallback on the other
 adapter unless the fallback sets its own value, and an issue's model or engine
-overrides apply only on the primary. A
+overrides apply only on the primary (an issue that keeps permission checks keeps
+them on the fallback). A
 switched run starts a fresh provider session from the task's history; provider
 sessions never move between adapters. If the fallback cannot run (sign-in or
 configuration failure), it is suspended until the primary resets and the work

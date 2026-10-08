@@ -6,7 +6,7 @@ import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnectionBindingSchema, type AiConnectionBinding } from "@paperclipai/shared";
-import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, usageLimitFallbackPermissionDefaults, type UsageLimitFallbackConfig } from "@paperclipai/shared";
+import { buildUsageLimitFallbackAdapterConfig, sameJsonValue, usageLimitFallbackConfigProblem, usageLimitFallbackConfigSchema, type UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { clearUsageLimitFallbackState } from "../services/usage-limit-fallback.js";
@@ -3436,16 +3436,8 @@ export function agentRoutes(
     });
     if (problem) throw unprocessable(problem, { code: "usage_limit_fallback_invalid" });
     await assertSelectableAdapterType(fallback.adapterType);
-    // A fallback on the primary's adapter keeps the primary's settings, so new-agent defaults must not override them.
-    const adapterConfig = fallback.adapterType === input.primaryAdapterType
-      ? fallback.adapterConfig
-      : usageLimitFallbackConfigSchema.shape.adapterConfig.parse(
-        applyCreateDefaultsByAdapterType(fallback.adapterType, {
-          ...usageLimitFallbackPermissionDefaults(input.primaryAdapterConfig, fallback.adapterType),
-          ...fallback.adapterConfig,
-        }),
-      );
-    const normalized: UsageLimitFallbackConfig = { ...fallback, adapterConfig };
+    // No new-agent defaults are saved: at run time the fallback's own value wins, then the primary's permission checks, then the adapter's default.
+    const normalized: UsageLimitFallbackConfig = fallback;
     if (!normalized.aiConnection) return { fallback: normalized };
     const effectiveConfig = buildUsageLimitFallbackAdapterConfig(input.primaryAdapterConfig, normalized, input.primaryAdapterType);
     if (!isAiConnectionCompatible(normalized.aiConnection, normalized.adapterType, effectiveConfig.model, effectiveConfig.provider, effectiveConfig.acpxAgent)) {

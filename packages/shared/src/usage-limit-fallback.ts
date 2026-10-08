@@ -45,8 +45,8 @@ const fallbackAdapterConfigSchema = z.object({
   networkAllowlist: z.array(z.string().trim().min(1)).optional(),
 }).strict();
 
-/** The settings a fallback chooses for itself; per-issue overrides of these were chosen for the primary's adapter. */
-export const USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS = Object.keys(fallbackAdapterConfigSchema.shape);
+/** Engine settings chosen for one adapter; per-issue overrides of these were chosen for the primary's adapter. */
+export const USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS = Object.keys(fallbackAdapterConfigSchema.shape).filter((key) => key !== "networkAllowlist");
 
 export const usageLimitFallbackConfigSchema = z.object({
   enabled: z.boolean(),
@@ -129,7 +129,9 @@ export function buildUsageLimitFallbackAdapterConfig(
 /** A primary that keeps its permission checks keeps them on a fallback on another adapter, unless the fallback sets its own. */
 export function usageLimitFallbackPermissionDefaults(primaryAdapterConfig: unknown, fallbackAdapterType: string): Record<string, unknown> {
   const primary = isRecord(primaryAdapterConfig) ? primaryAdapterConfig : {};
-  const primaryKeepsChecks = primary.dangerouslySkipPermissions === false || primary.dangerouslyBypassApprovalsAndSandbox === false;
+  const primaryKeepsChecks = primary.dangerouslySkipPermissions === false
+    || primary.dangerouslyBypassApprovalsAndSandbox === false
+    || primary.dangerouslyBypassSandbox === false;
   if (!primaryKeepsChecks) return {};
   return fallbackAdapterType === "claude_local" ? { dangerouslySkipPermissions: false } : { dangerouslyBypassApprovalsAndSandbox: false };
 }

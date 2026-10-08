@@ -83,7 +83,7 @@ function failedExecution(failure: Failure) {
   };
 }
 
-type Execution = { adapterType: string; model: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
+type Execution = { adapterType: string; model: unknown; bypass: unknown; instructionsFilePath: unknown; aiConnection: unknown; runId: string };
 
 describeEmbeddedPostgres("usage-limit fallback", () => {
   let db!: ReturnType<typeof createDb>;
@@ -99,6 +99,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     executions.push({
       adapterType,
       model: ctx.config.model,
+      bypass: ctx.config.dangerouslyBypassApprovalsAndSandbox,
       instructionsFilePath: ctx.config.instructionsFilePath,
       aiConnection: (ctx.agent as { runtimeConfig?: Record<string, unknown> }).runtimeConfig?.aiConnection,
       runId: ctx.runId,
@@ -732,7 +733,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     });
   });
 
-  it("runs the fallback with its own model when the issue overrides the primary's model", async () => {
+  it("runs the fallback with its own model, keeping the issue's permission checks, when the issue overrides the primary", async () => {
     const agent = await seedAgent();
     await activeFallback(agent);
     const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId));
@@ -747,7 +748,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       assigneeAgentId: agent.id,
       issueNumber: 1,
       identifier: `${company!.issuePrefix}-1`,
-      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-issue-override" } },
+      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-issue-override", dangerouslySkipPermissions: false } },
     });
     const run = await heartbeat.wakeup(agent.id, {
       source: "assignment",
@@ -759,7 +760,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       requestedByActorId: "local-board",
     });
     await waitForRun(run!.id);
-    expect(executions[0]).toMatchObject({ adapterType: "codex_local", model: "gpt-fallback-test" });
+    expect(executions[0]).toMatchObject({ adapterType: "codex_local", model: "gpt-fallback-test", bypass: false });
   });
 
   it("keeps the primary's session when a fallback run never starts a conversation", async () => {
