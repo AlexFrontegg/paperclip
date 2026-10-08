@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { agentRuntimeState, agentTaskSessions, type agents, type heartbeatRuns, type Db } from "@paperclipai/db";
+import { agentRuntimeState, agentTaskSessions, agents, heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   aiConnectionBindingSchema,
   buildUsageLimitFallbackAdapterConfig,
@@ -94,6 +94,19 @@ export function isRunAiAccountFailure(run: Pick<RunRow, "errorCode" | "resultJso
 export async function readAgentUsageLimitFallbackState(db: Db, agentId: string): Promise<UsageLimitFallbackState | null> {
   const [row] = await db.select({ stateJson: agentRuntimeState.stateJson }).from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agentId));
   return readUsageLimitFallbackState(row?.stateJson);
+}
+
+export const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
+
+/** "Return to primary": ends the fallback and remembers when, so recovery does not switch again for an older failure. */
+export async function returnUsageLimitFallbackToPrimary(db: Db, agentId: string, now: Date): Promise<void> {
+  await db
+    .update(agentRuntimeState)
+    .set({
+      stateJson: sql`jsonb_set(${agentRuntimeState.stateJson} - ${USAGE_LIMIT_FALLBACK_STATE_KEY}, ${`{${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}}`}::text[], ${JSON.stringify(now.toISOString())}::jsonb)`,
+      updatedAt: now,
+    })
+    .where(eq(agentRuntimeState.agentId, agentId));
 }
 
 /** Clears the fallback only if it is still the activation the caller saw, so a newer one survives. */
@@ -290,4 +303,40 @@ export async function activateUsageLimitFallback(db: Db, input: {
   });
   if (!state) return { activated: false, reason: "fallback_suspended" };
   return { activated: true, state };
+}
+
+/**
+ * A usage limit that outlasted the run's own retries reaches recovery's quota wait. The fallback can still take the
+ * work now. Returns when the waiting run should start, or null to keep the provider's reset time.
+ */
+export async function usageLimitFallbackRecoveryRetryAt(db: Db, input: {
+  agentId: string;
+  runId: string;
+  providerRetryAt: Date;
+  now: Date;
+}): Promise<{ retryAt: Date; activated: UsageLimitFallbackState | null } | null> {
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+  const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
+  if (!run || !agent || run.agentId !== agent.id) return null;
+  // The chat completion outbox owns this run's retries, so recovery cannot start one on another lane.
+  const chatDeliveryIds = isRecord(run.contextSnapshot) ? run.contextSnapshot.chatCompletionDeliveryIds : null;
+  if (Array.isArray(chatDeliveryIds) && chatDeliveryIds.some((id) => typeof id === "string")) return null;
+  const [runtime] = await db.select({ stateJson: agentRuntimeState.stateJson }).from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agent.id));
+  if (runUsageLimitLane(run) === "fallback") {
+    // The fallback is out of quota too, so wait only until the primary is back; an ended fallback means it is back now.
+    const state = readUsageLimitFallbackState(runtime?.stateJson);
+    const primaryBackAt = isUsageLimitFallbackStateActive(state, input.now) ? Date.parse(state!.activeUntil) : input.now.getTime();
+    return primaryBackAt < input.providerRetryAt.getTime() ? { retryAt: new Date(primaryBackAt), activated: null } : null;
+  }
+  // "Return to primary" after this failure keeps the primary; only a newer failure switches again.
+  const returnedAt = Date.parse(String(isRecord(runtime?.stateJson) ? runtime.stateJson[USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY] : ""));
+  if (run.finishedAt && Number.isFinite(returnedAt) && run.finishedAt.getTime() <= returnedAt) return null;
+  const activation = await activateUsageLimitFallback(db, {
+    agent,
+    run,
+    reason: "provider_quota",
+    retryNotBefore: input.providerRetryAt,
+    now: input.now,
+  });
+  return activation.activated ? { retryAt: input.now, activated: activation.state } : null;
 }

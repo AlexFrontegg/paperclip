@@ -38,7 +38,7 @@ import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema, isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS, USAGE_LIMIT_FALLBACK_STATE_KEY, usageLimitFallbackPermissionDefaults, type UsageLimitFallbackReason } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
-import { activateUsageLimitFallback, effectiveAgentForRun, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "./usage-limit-fallback.js";
+import { activateUsageLimitFallback, effectiveAgentForRun, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, resolveAdapterDispatchForClaim, runUsageLimitLane, suspendUsageLimitFallback, USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY, type UsageLimitFallbackActivation } from "./usage-limit-fallback.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -11833,11 +11833,27 @@ export function heartbeatService(
           const targetAgent = await getAgent(targetAgentId);
           if (!targetAgent)
             throw conflict("The quota recovery agent is unavailable.");
+          // The other lane takes this attempt even when the run's own retries are spent, because the work did not use them up:
+          // the fallback after recovery switched to it, or the primary once it is back after the fallback hit its own limit.
+          const fallbackState = await readAgentUsageLimitFallbackState(db, targetAgent.id);
+          const fallbackActive = isUsageLimitFallbackStateActive(fallbackState, input.now);
+          const otherLaneTakesOver = runUsageLimitLane(sourceRun) === "fallback"
+            ? !fallbackActive
+            : fallbackActive && !fallbackState?.suspendedReason && readUsageLimitFallbackConfig(targetAgent.runtimeConfig) !== null;
           const scheduled = await scheduleBoundedRetryForRun(
             sourceRun,
             targetAgent,
             {
               now: input.now,
+              ...(otherLaneTakesOver
+                ? {
+                    delayMs: 0,
+                    maxAttempts: Math.max(
+                      BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+                      executionRetryAttemptCount(sourceRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
+                    ),
+                  }
+                : {}),
               ...(isProviderQuotaReviewMonitor
                 ? {
                     retryReason:
@@ -15442,8 +15458,11 @@ export function heartbeatService(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
     activation: UsageLimitFallbackActivation,
+    now: Date,
   ) {
     if (activation.activated) {
+      // Keeping or extending an active fallback is not a new switch, so only a new one is logged.
+      if (activation.state.activatedAt !== now.toISOString()) return;
       await appendRunEvent(run, {
         eventType: "lifecycle",
         stream: "system",
@@ -15497,7 +15516,7 @@ export function heartbeatService(
       retryNotBefore: null,
       now,
     });
-    await recordUsageLimitFallbackActivation(failedRun, storedAgent, activation);
+    await recordUsageLimitFallbackActivation(failedRun, storedAgent, activation, now);
     if (!activation.activated) return false;
     const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, { now, delayMs: 0 });
     return retry.outcome === "scheduled";
@@ -15717,7 +15736,7 @@ export function heartbeatService(
         now,
       })
       : null;
-    if (usageLimitFallback) await recordUsageLimitFallbackActivation(run, agent, usageLimitFallback);
+    if (usageLimitFallback) await recordUsageLimitFallbackActivation(run, agent, usageLimitFallback, now);
 
     // A quota failure on the fallback itself waits only until the primary is back; a cleared fallback means it is back now.
     const primaryBackAt =
@@ -30372,8 +30391,11 @@ export function heartbeatService(
         lastError: null,
         updatedAt: new Date(),
       };
-      // The usage-limit fallback is not a session, so a full reset keeps it; "Return to primary" ends it.
-      const keptFallbackState = sql`jsonb_strip_nulls(jsonb_build_object(${USAGE_LIMIT_FALLBACK_STATE_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY}))`;
+      // The usage-limit fallback and the last "Return to primary" are not sessions, so a full reset keeps them.
+      const keptFallbackState = sql`jsonb_strip_nulls(jsonb_build_object(
+        ${USAGE_LIMIT_FALLBACK_STATE_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY},
+        ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}
+      ))`;
 
       const updated = await db
         .update(agentRuntimeState)

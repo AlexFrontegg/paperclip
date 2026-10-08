@@ -84,6 +84,7 @@ import {
   type ActivityPublication,
 } from "../activity-log.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
+import { usageLimitFallbackRecoveryRetryAt } from "../usage-limit-fallback.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { budgetService } from "../budgets.js";
 import { unadmittedChatWakeupCondition } from "../durable-chat-wakeup.js";
@@ -2599,6 +2600,43 @@ export function recoveryService(
     return new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS);
   }
 
+  /** A quota wait that outlasted the run's own retries can still move the work to the agent's usage-limit fallback now. */
+  async function usageLimitFallbackQuotaRetry(input: {
+    companyId: string;
+    agentId: string;
+    latestRun: LatestIssueRun;
+    providerRetryAt: Date;
+    now: Date;
+  }): Promise<{ retryAt: Date; note: string | null }> {
+    const fallback = input.latestRun
+      ? await usageLimitFallbackRecoveryRetryAt(db, {
+        agentId: input.agentId,
+        runId: input.latestRun.id,
+        providerRetryAt: input.providerRetryAt,
+        now: input.now,
+      })
+      : null;
+    if (!fallback) return { retryAt: input.providerRetryAt, note: null };
+    if (!fallback.activated) {
+      return { retryAt: fallback.retryAt, note: "Provider usage quota reached on the usage-limit fallback too; retry when the primary is back." };
+    }
+    const note = "Provider usage quota reached; the usage-limit fallback takes the work now.";
+    // An earlier pass or run already switched; log only a new switch.
+    if (fallback.activated.activatedAt !== input.now.toISOString()) return { retryAt: fallback.retryAt, note };
+    await logActivity(db, {
+      companyId: input.companyId,
+      actorType: "system",
+      actorId: "recovery",
+      agentId: input.agentId,
+      runId: input.latestRun?.id ?? null,
+      action: "agent.usage_limit_fallback_activated",
+      entityType: "agent",
+      entityId: input.agentId,
+      details: { ...fallback.activated, source: "recovery.provider_quota_wait" },
+    });
+    return { retryAt: fallback.retryAt, note };
+  }
+
   async function ensureProviderQuotaWaitRecoveryMonitor(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
@@ -2622,7 +2660,13 @@ export function recoveryService(
     if (existing) return existing;
 
     const now = new Date();
-    const retryAt = readProviderQuotaRetryAt(input.latestRun, now);
+    const { retryAt } = await usageLimitFallbackQuotaRetry({
+      companyId: input.issue.companyId,
+      agentId: input.agentId,
+      latestRun: input.latestRun,
+      providerRetryAt: readProviderQuotaRetryAt(input.latestRun, now),
+      now,
+    });
     return db.transaction(async (tx) => {
       const wakeup = await tx
         .insert(agentWakeupRequests)
@@ -4230,6 +4274,13 @@ export function recoveryService(
       input.issue.status === "in_review"
         ? "the active review participant"
         : "the original assignee";
+    const quotaRetry = await usageLimitFallbackQuotaRetry({
+      companyId: input.issue.companyId,
+      agentId: input.latestRun.agentId,
+      latestRun: input.latestRun,
+      providerRetryAt: input.classification.retryAt,
+      now: new Date(),
+    });
     const policy = {
       ...(previousPolicy ?? {
         mode: "normal" as const,
@@ -4237,10 +4288,10 @@ export function recoveryService(
         stages: [],
       }),
       monitor: {
-        nextCheckAt: input.classification.retryAt.toISOString(),
-        notes: input.classification.parsedResetTime
+        nextCheckAt: quotaRetry.retryAt.toISOString(),
+        notes: quotaRetry.note ?? (input.classification.parsedResetTime
           ? `Provider usage quota reached; retry ${retryTargetDescription} at the provider reset time.`
-          : `Provider usage quota reached; retry ${retryTargetDescription} after the default recovery backoff.`,
+          : `Provider usage quota reached; retry ${retryTargetDescription} after the default recovery backoff.`),
         scheduledBy: "assignee" as const,
         kind: "external_service" as const,
         serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
@@ -4279,7 +4330,7 @@ export function recoveryService(
         source: "recovery.provider_quota",
         latestRunId: input.latestRun.id,
         errorCode: "provider_quota",
-        nextCheckAt: input.classification.retryAt.toISOString(),
+        nextCheckAt: quotaRetry.retryAt.toISOString(),
         parsedResetTime: input.classification.parsedResetTime,
         targetAgentId,
       },

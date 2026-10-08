@@ -166,6 +166,35 @@ When it activates:
   activated; the retry waits for the reset as before, and a run event records
   why.
 
+### 5.2b After the run's own retries
+
+A `provider_quota` failure that arrives after the run's bounded retries are spent
+reaches recovery's provider-quota wait instead (the issue monitor in
+`scheduleProviderQuotaRecoveryMonitor`, or the scheduled run in
+`ensureProviderQuotaWaitRecoveryMonitor`). Before it waits for the reset,
+recovery tries the fallback (`usageLimitFallbackRecoveryRetryAt`):
+
+- A primary-lane run activates the fallback like the retry path does, and the
+  wait ends now instead of at the reset. When the monitor fires and the
+  fallback is configured, active and not suspended, its retry gets one more
+  attempt with no delay, because the fallback takes it, not the work.
+- A fallback-lane run that hit its own limit waits only until the primary is
+  back (`activeUntil`, or now if the fallback already ended) when that is
+  earlier than the fallback's reset. When the monitor fires and the fallback
+  has ended, the primary takes one more attempt the same way.
+- **Return to primary** records when it was used
+  (`usageLimitFallbackReturnedAt`), and recovery does not switch again for a
+  failure that finished before it. Only a new failure switches again.
+- Only a new switch is logged as `agent.usage_limit_fallback_activated`; keeping
+  or extending an active fallback is not. A full session reset keeps the
+  fallback state and the last **Return to primary**.
+- A run whose retries belong to the chat completion outbox keeps its normal
+  quota wait.
+- When both lanes stay out of quota, each primary window costs one failed run
+  on each lane; a signed-out primary with a limited fallback costs one failed
+  fallback run every 30 minutes until the primary is reconnected.
+- Without a usable fallback the wait is unchanged.
+
 ### 5.2a When the primary is down or signed out
 
 With `switchWhenUnavailable` (on by default for a new fallback in the UI), two
@@ -386,9 +415,7 @@ switch loses little.
 - A fallback to a second account on the same adapter shares that adapter's
   task sessions. A session from the other account cannot be resumed, so the
   adapter retries with a fresh session, which costs one attempt.
-- Activation happens only in the bounded transient retry path: a quota failure
-  after its retry budget is used up waits for the reset, and switching uses one
-  of the two bounded attempts.
+- Switching from the bounded retry path uses one of the two bounded attempts.
 - Outage switching needs the CLI engine. The ACP engine, the default for both
   adapters, reports usage limits and sign-in failures but no transient upstream
   failures, so an ACP primary never switches on an outage. The UI says so.
