@@ -763,7 +763,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(executions[0]).toMatchObject({ adapterType: "codex_local", model: "gpt-fallback-test", bypass: false });
   });
 
-  it("keeps the primary's session when a fallback run never starts a conversation", async () => {
+  it("keeps the primary's session when a fallback run reports that no provider work started", async () => {
     const agent = await seedAgent();
     const taskKey = "issue-task";
     await db.insert(agentTaskSessions).values({

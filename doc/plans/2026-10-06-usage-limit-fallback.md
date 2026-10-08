@@ -284,8 +284,11 @@ with the effective agent's adapter, not the raw agent row:
 - After a fallback turn, the primary's task session for that task is cleared,
   so the primary resumes fresh with the handoff after the switch-back. Only a
   fallback run with positive evidence that no provider work started
-  (`executionRecovery.kind: "bootstrap"`, for example a sign-in or startup
-  failure) leaves the primary's session alone.
+  (`executionRecovery.kind: "bootstrap"`, today an ACP run stopped before
+  provider startup) leaves the primary's session alone. The adapters report no
+  such evidence for sign-in, quota or turn-cap failures, so those still clear it:
+  a missed turn in a resumed session would be worse than a fresh start with the
+  handoff. Setup failures before the adapter runs never touch sessions.
 - A full session reset (no task) keeps the fallback state; **Return to primary**
   ends it.
 - A new activation (not an extension) clears the fallback adapter's task
