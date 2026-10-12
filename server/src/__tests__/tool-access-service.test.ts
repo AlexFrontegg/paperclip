@@ -13178,6 +13178,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(authorization.searchParams.get("client_id")).toBe("deployment-github-client");
 
     let tokenRequest: URLSearchParams | null = null;
+    let githubAccount = { id: 1001, login: "first-account", installed: true };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://api.githubcopilot.com/mcp/") {
@@ -13190,9 +13191,18 @@ describeEmbeddedPostgres("tool access service", () => {
             : { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "GitHub test", version: "1.0.0" } },
         });
       }
+      if (href === "https://api.github.com/user") return Response.json({ id: githubAccount.id, login: githubAccount.login });
+      if (href.startsWith("https://api.github.com/user/installations?")) {
+        return Response.json({ total_count: githubAccount.installed ? 1 : 0, installations: githubAccount.installed
+          ? [{ id: 88, repository_selection: "selected", account: { login: "frontegg" } }]
+          : [] });
+      }
+      if (href.startsWith("https://api.github.com/user/installations/88/repositories?")) {
+        return Response.json({ total_count: 1, repositories: [{ id: 2, full_name: "frontegg/auth-hub-service" }] });
+      }
       if (href !== "https://github.com/login/oauth/access_token") throw new Error(`unexpected fetch ${href}`);
       tokenRequest = new URLSearchParams(String(init?.body));
-      return Response.json({ access_token: "ghu-deployment", refresh_token: "ghr-deployment", expires_in: 28800, token_type: "bearer" });
+      return Response.json({ access_token: `ghu-${githubAccount.login}`, refresh_token: "ghr-deployment", expires_in: 28800, token_type: "bearer" });
     });
     await service.completeOAuthCallback({
       state: authorization.searchParams.get("state")!, code: "github-code", redirectUri, actor,
@@ -13203,7 +13213,24 @@ describeEmbeddedPostgres("tool access service", () => {
     const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId));
     expect(connection.credentialSecretRefs.map((ref) => ref.configPath)).not.toContain("oauth.client_secret");
     await expect(service.githubReadHeaders(company.id, connected.connectionId, userId))
-      .resolves.toEqual({ Authorization: "Bearer ghu-deployment" });
+      .resolves.toEqual({ Authorization: "Bearer ghu-first-account" });
+    const userGrant = async () => (await db.select().from(connectionGrants).where(and(
+      eq(connectionGrants.connectionId, connected.connectionId),
+      eq(connectionGrants.kind, "user"),
+      eq(connectionGrants.subjectUserId, userId),
+    )))[0]!;
+    expect((await userGrant()).providerTenant?.github).toMatchObject({ login: "first-account" });
+
+    githubAccount = { id: 1002, login: "second-account", installed: false };
+    const reconnect = new URL((await service.startOAuth(company.id, connected.connectionId, {
+      redirectUri, actor, subjectUserId: userId,
+    })).authorizationUrl);
+    await service.completeOAuthCallback({
+      state: reconnect.searchParams.get("state")!, code: "github-code-2", redirectUri, actor,
+    });
+    expect((await userGrant()).providerTenant?.github).toBeUndefined();
+    await expect(service.githubReadHeaders(company.id, connected.connectionId, userId))
+      .resolves.toEqual({ Authorization: "Bearer ghu-second-account" });
   });
 
   it("uses Asana v2 metadata instead of stale v1 endpoints for a saved custom app", async () => {

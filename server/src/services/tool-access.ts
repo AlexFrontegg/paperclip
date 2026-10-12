@@ -16366,7 +16366,8 @@ export function toolAccessService(
               tokenType: token.tokenType,
               refreshedAt: connectedAt.toISOString(),
             },
-            ...(githubMetadata ? { github: githubMetadata } : {}),
+            // A replaced token must not keep the previous account's GitHub identity.
+            github: githubMetadata ?? undefined,
           },
           credentialSecretRefs: nextCredentialSecretRefs,
           status: "active" as const,
