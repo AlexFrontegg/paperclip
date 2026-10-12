@@ -77,6 +77,7 @@ import { accessService } from "../services/access.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
+import { resolveManagedGitHubCredential } from "../services/git-credentials.js";
 import {
   canonicalToolArguments,
   signToolArguments,
@@ -11702,6 +11703,16 @@ describeEmbeddedPostgres("tool access service", () => {
         if (!current) return new Response("Bad credentials", { status: 401 });
         return Response.json(href.endsWith("page=1") ? [{ id: 1, full_name: "frontegg/identity-service", private: true }] : []);
       }
+      if (href === "https://api.github.com/user") return Response.json({ id: 140060214, login: "octo-own-app" });
+      if (href.startsWith("https://api.github.com/user/installations?")) {
+        return Response.json({ total_count: 1, installations: [{
+          id: 77, app_slug: "paperclip-identity", repository_selection: "selected",
+          account: { login: "frontegg" }, html_url: "https://github.com/organizations/frontegg/settings/installations/77",
+        }] });
+      }
+      if (href.startsWith("https://api.github.com/user/installations/77/repositories?")) {
+        return Response.json({ total_count: 1, repositories: [{ id: 1, full_name: "frontegg/identity-service", private: true }] });
+      }
       if (href !== "https://github.com/login/oauth/access_token") throw new Error(`unexpected fetch ${href}`);
       const body = new URLSearchParams(String(init?.body));
       tokenRequests.push(body);
@@ -11735,6 +11746,18 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(tokenRequests[0]!.get("client_secret")).toBe("github-app-secret");
     await expect(service.githubReadHeaders(company.id, connected.connectionId, userId))
       .resolves.toEqual({ Authorization: "Bearer ghu-1" });
+    expect((await userGrant()).providerTenant?.github).toMatchObject({
+      login: "octo-own-app", installationCount: 1, repositoryCount: 1,
+    });
+    const agent = await createAgent(db, company.id);
+    await db.insert(toolConnectionInstalls).values({
+      companyId: company.id, connectionId: connected.connectionId, targetType: "agent", targetId: agent.id,
+    });
+    await expect(resolveManagedGitHubCredential(db, secretService(db), company.id, {
+      responsibleUserId: userId, agentId: agent.id,
+    })).resolves.toMatchObject({
+      credential: { token: "ghu-1", githubIdentity: { login: "octo-own-app" }, identitySource: "personal" },
+    });
 
     const expireAccessToken = async () => {
       const grant = await userGrant();

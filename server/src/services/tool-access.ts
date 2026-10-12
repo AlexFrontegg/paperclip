@@ -2808,6 +2808,18 @@ export async function loadGitHubGrantMetadata(
   };
 }
 
+/** Account and installation access for a direct GitHub sign-in; an OAuth App token still proves identity without it. */
+async function directGitHubGrantMetadata(
+  connection: { config: unknown; transportConfig: unknown },
+  accessToken: string,
+) {
+  const sourceTemplateKey =
+    asRecord(connection.config).sourceTemplateKey ??
+    asRecord(connection.transportConfig).sourceTemplateKey;
+  if (sourceTemplateKey !== "github") return null;
+  return loadGitHubGrantMetadata(accessToken).catch(() => null);
+}
+
 function githubInstallationManagementUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 2_000) return null;
   try {
@@ -15725,6 +15737,7 @@ export function toolAccessService(
     const expiresAt = token.expiresIn
       ? new Date(connectedAt.getTime() + token.expiresIn * 1000).toISOString()
       : null;
+    const githubMetadata = await directGitHubGrantMetadata(connection, token.accessToken);
     if (stateRow.subjectUserId) {
       let personalCredentialSecretRefs: typeof connectionGrants.$inferSelect.credentialSecretRefs =
         [];
@@ -15825,6 +15838,7 @@ export function toolAccessService(
               tokenType: token.tokenType,
               refreshedAt: connectedAt.toISOString(),
             },
+            ...(githubMetadata ? { github: githubMetadata } : {}),
           },
           credentialSecretRefs: nextCredentialSecretRefs,
           status: "active" as const,
