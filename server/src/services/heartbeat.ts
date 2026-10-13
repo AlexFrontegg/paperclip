@@ -1315,6 +1315,13 @@ const failedProcessRunCancellations = new Map<
   string,
   { settled: Promise<void>; failed: boolean; error?: unknown }
 >();
+// A user's continuation admits its retry only after the executor exits, so a
+// usage-limit fallback retry refused during the run is scheduled after cleanup.
+type DeferredUsageLimitFallbackRetry = {
+  agent: typeof agents.$inferSelect;
+  opts: { now: Date; delayMs: number; maxAttempts?: number };
+};
+const deferredUsageLimitFallbackRetries = new Map<string, DeferredUsageLimitFallbackRetry>();
 // Background heartbeat executions are dispatched fire-and-forget (see
 // startNextQueuedRunForAgent), so the promise that resolves once a run's DB
 // writes are fully flushed is otherwise unobservable. Track those promises here
@@ -15538,8 +15545,20 @@ export function heartbeatService(
     });
     await recordUsageLimitFallbackActivation(failedRun, storedAgent, activation, now);
     if (!activation.activated) return false;
-    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, { now, delayMs: 0 });
-    return retry.outcome === "scheduled";
+    return scheduleUsageLimitFallbackRetry(failedRun, storedAgent, { now, delayMs: 0 });
+  }
+
+  /** A user's continuation refuses retries while this executor still owns the run, so that retry is scheduled after cleanup. */
+  async function scheduleUsageLimitFallbackRetry(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+    opts: DeferredUsageLimitFallbackRetry["opts"],
+  ): Promise<boolean> {
+    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, opts);
+    if (retry.outcome === "scheduled") return true;
+    if (retry.outcome !== "not_scheduled" || retry.errorCode !== "continuation_user_authorization_missing") return false;
+    deferredUsageLimitFallbackRetries.set(failedRun.id, { agent: storedAgent, opts });
+    return true;
   }
 
   /** A fallback run that cannot start suspends the fallback; its retry waits for the primary's reset like a plain quota wait. */
@@ -15556,7 +15575,7 @@ export function heartbeatService(
       : await suspendUsageLimitFallback(db, failedRun.agentId, failedRun.errorCode!, now);
     if (!state) return false;
     // The broken fallback, not the work, used this attempt, so the wait for the primary always gets one more.
-    const retry = await scheduleBoundedRetryForRun(failedRun, storedAgent, {
+    const waitingForPrimary = await scheduleUsageLimitFallbackRetry(failedRun, storedAgent, {
       now,
       delayMs: Math.max(0, Date.parse(state.activeUntil) - now.getTime()),
       maxAttempts: Math.max(
@@ -15564,7 +15583,6 @@ export function heartbeatService(
         executionRetryAttemptCount(failedRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
       ),
     });
-    const waitingForPrimary = retry.outcome === "scheduled";
     const cause = personalFallbackAccount
       ? `This user's usage-limit fallback account cannot run (${failedRun.errorCode})`
       : `Usage-limit fallback cannot run (${failedRun.errorCode})`;
@@ -26944,6 +26962,7 @@ export function heartbeatService(
       await nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      let deferredFallbackRetry: DeferredUsageLimitFallbackRetry | undefined;
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
@@ -27133,6 +27152,17 @@ export function heartbeatService(
         if (adapterExecutionControls.get(run.id) === executionControl) {
           adapterExecutionControls.delete(run.id);
         }
+        deferredFallbackRetry = deferredUsageLimitFallbackRetries.get(run.id);
+        deferredUsageLimitFallbackRetries.delete(run.id);
+      }
+      if (deferredFallbackRetry) {
+        // The run still holds the task, so the retry takes it over before the release below.
+        await (latestRun
+          ? scheduleBoundedRetryForRun(latestRun, deferredFallbackRetry.agent, deferredFallbackRetry.opts)
+          : releaseIssueExecutionAndPromote(run)
+        ).catch(err => {
+          logger.error({ err, runId: run.id }, "failed to schedule the usage-limit fallback retry after cleanup");
+        });
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
@@ -27181,6 +27211,8 @@ export function heartbeatService(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
     options: { suppressImmediateRecovery?: boolean } = {},
   ) {
+    // A fallback retry waiting for this run's cleanup takes the task over from the run.
+    if (deferredUsageLimitFallbackRetries.has(run.id)) return;
     try {
       const source = await getRun(run.id);
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
