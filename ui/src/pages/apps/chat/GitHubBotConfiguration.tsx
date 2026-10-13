@@ -86,11 +86,12 @@ export function GitHubPolicyEditor({
           }
         >
           <option value="linked_authors">
-            Linked members’ PRs and authorized mentions
+            PRs from linked members and reviewed authors, plus authorized mentions
           </option>
           <option value="mentions_only">Authorized mentions only</option>
           <option value="allowed_authors">
-            Allowed authors’ PRs and authorized mentions
+            PRs from linked members, reviewed authors and external contributors,
+            plus authorized mentions
           </option>
         </select>
         <p className="text-xs text-muted-foreground">

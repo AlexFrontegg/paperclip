@@ -366,12 +366,11 @@ export async function githubGuestBotConnectionForSession(
         eq(heartbeatRuns.id, session.runId),
       ),
     );
-  const commentId = run?.wakeCommentId;
-  if (typeof commentId !== "string") return null;
-  const [source] = await db
+  const sources = await db
     .select({
       event: chatDeliveries.normalizedEvent,
       connectionId: chatEndpoints.connectionId,
+      commentId: chatMessageLinks.commentId,
     })
     .from(chatMessageLinks)
     .innerJoin(
@@ -389,14 +388,21 @@ export async function githubGuestBotConnectionForSession(
     .where(
       and(
         eq(chatMessageLinks.companyId, session.companyId),
-        eq(chatMessageLinks.commentId, commentId),
+        eq(chatMessageLinks.direction, "inbound"),
         eq(chatConversations.issueId, session.issueId),
         eq(chatEndpoints.assignedAgentId, session.agentId),
         eq(chatEndpoints.provider, "github"),
       ),
     );
-  return (source?.event.githubAuthority as { guest?: boolean } | undefined)
-    ?.guest === true
-    ? source!.connectionId
-    : null;
+  const sponsored = (source: (typeof sources)[number]) =>
+    (source.event.githubAuthority as { guest?: boolean } | undefined)
+      ?.guest === true;
+  const wakeCommentId = run?.wakeCommentId;
+  const wakeSource =
+    typeof wakeCommentId === "string"
+      ? sources.find((source) => source.commentId === wakeCommentId)
+      : undefined;
+  if (wakeSource) return sponsored(wakeSource) ? wakeSource.connectionId : null;
+  // A run without its own GitHub request inherits any sponsored request on this task.
+  return sources.find(sponsored)?.connectionId ?? null;
 }

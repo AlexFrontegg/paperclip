@@ -4,7 +4,7 @@ import { githubChatManagementService } from "../services/chat-github-management.
 import { githubChatReviewService } from "../services/chat-github-reviews.js";
 import { githubReviewCheckService } from "../services/chat-github-checks.js";
 import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
-import { githubBotToolsForSession } from "../services/chat-github-tools.js";
+import { githubBotToolsForSession, githubGuestBotConnectionForSession } from "../services/chat-github-tools.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
 import { chatGitHubRegistrations, chatGitHubReviews, toolCatalogEntries } from "@paperclipai/db";
@@ -2670,6 +2670,18 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const exported = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id });
       expect(exported).toMatchObject({ status: "unavailable", reason: "No managed GitHub identity is available for this run" });
       expect(exported.env).toEqual({});
+      // A later run without its own GitHub request, such as a timer wake, stays limited to the bot.
+      const [timerRun] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "timer",
+        status: "running",
+        contextSnapshot: { issueId: task.id },
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: timerRun.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      expect(await githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id, issueId: task.id })).not.toBeNull();
+      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id }))
+        .toMatchObject({ reason: "No managed GitHub identity is available for this run" });
       f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/pulls/95")
         ? Response.json({ ...pullRequest, head: { sha: "c".repeat(40) } })
         : undefined);
@@ -2687,6 +2699,18 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         "owner-user",
       );
       await expect(readMetadata()).rejects.toThrow("The initiating GitHub person is no longer authorized");
+    });
+    it("keeps a linked member's PR task unrestricted for runs without a GitHub request", async () => {
+      const f = await reviewBotFixture();
+      const { task } = await openPullRequest(f, 97, { id: 42, login: "octocat" });
+      const [timerRun] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "timer",
+        status: "running",
+        contextSnapshot: { issueId: task.id },
+      }).returning();
+      expect(await githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id, issueId: task.id })).toBeNull();
     });
     it("reviews a reviewed author whose GitHub account is linked to a viewer", async () => {
       const f = await reviewBotFixture();
