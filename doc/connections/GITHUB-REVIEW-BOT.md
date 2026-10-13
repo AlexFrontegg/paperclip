@@ -58,6 +58,16 @@ for that person are a separate choice. Guests receive no company membership or
 sponsor credentials. Authority is checked again before tool calls and
 publication, so revocation also affects queued or ongoing work.
 
+To review the pull requests of a GitHub person without admitting them, add
+their verified account under **Reviewed authors**. Their pull request events
+start automatic reviews under the responsible member, with the same events and
+filters. A reviewed author gets no company membership and cannot mention or
+control the bot. Their reviews are not quarantined as low-trust work, so add
+only people you trust. The run never receives a person's or the host's GitHub
+credentials; only the agent's own GitHub account can be used, and gateway tools
+stay limited to the bot connection. When you remove the author, new admissions
+and tool calls stop.
+
 Automatic events use the configured responsible member. The PR author and
 webhook sender are recorded independently. Follow-ups preserve task ownership
 while checking the current requester's authority.

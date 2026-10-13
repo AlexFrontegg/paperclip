@@ -1,4 +1,4 @@
-import { toolActionRequests, toolInvocations } from "@paperclipai/db";
+import { connectionGrants, toolActionRequests, toolApplications, toolConnectionInstalls, toolInvocations } from "@paperclipai/db";
 import { GitHubPublicationLeaseLost, withGitHubPublicationLease } from "../services/chat-github-publication-lease.js";
 import { githubChatManagementService } from "../services/chat-github-management.js";
 import { githubChatReviewService } from "../services/chat-github-reviews.js";
@@ -2604,30 +2604,26 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         runId: run.id,
       }, "read_pull_request", { section: "metadata" })).rejects.toThrow("older pull request head");
     });
-    it("reviews a reviewed author's PR as trusted work until the author is removed", async () => {
-      const f = await reviewBotFixture();
+    async function addReviewedAuthor(f: Awaited<ReturnType<typeof reviewBotFixture>>, githubUserId: string, login: string) {
       const initial = await f.management.configuration(f.endpoint.id, "owner-user");
-      const saved = await f.management.saveConfiguration(
+      return f.management.saveConfiguration(
         f.endpoint.id,
-        {
-          expectedRevision: initial.revision,
-          configuration: {
-            ...initial.configuration,
-            reviewedAuthors: [{ githubUserId: "91", login: "teammate" }],
-          },
-        },
+        { expectedRevision: initial.revision, configuration: { ...initial.configuration, reviewedAuthors: [{ githubUserId, login }] } },
         "owner-user",
       );
+    }
+    async function openPullRequest(f: Awaited<ReturnType<typeof reviewBotFixture>>, number: number, author: { id: number; login: string }) {
+      const pullRequest = {
+        number, title: "Teammate change", body: "", draft: false,
+        base: { sha: "a".repeat(40), ref: "master" }, head: { sha: "b".repeat(40) },
+        user: { ...author, type: "User" }, labels: [],
+      };
       const payload = {
         action: "opened",
         installation: { id: 2468 },
         repository: { id: 97531, full_name: "paperclipai/paperclip", name: "paperclip", owner: { id: 1357, login: "paperclipai" } },
-        sender: { id: 91, login: "teammate" },
-        pull_request: {
-          number: 95, title: "Teammate change", body: "", draft: false,
-          base: { sha: "a".repeat(40), ref: "master" }, head: { sha: "b".repeat(40) },
-          user: { id: 91, login: "teammate", type: "User" }, labels: [],
-        },
+        sender: { id: 77, login: "maintainer" },
+        pull_request: pullRequest,
       };
       const response = await f.service.handleWebhook(
         f.endpoint.publicId,
@@ -2640,6 +2636,26 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         .toBe(1);
       const [review] = await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.endpointId, f.endpoint.id));
       const [task] = await db.select().from(issues).where(eq(issues.id, review.issueId));
+      return { pullRequest, task };
+    }
+    it("reviews a reviewed author's PR as trusted work until the author is removed", async () => {
+      const f = await reviewBotFixture();
+      const saved = await addReviewedAuthor(f, "91", "teammate");
+      // The responsible member's personal GitHub grant must never reach a reviewed author's run.
+      const applicationId = randomUUID();
+      const githubConnectionId = randomUUID();
+      await db.insert(toolApplications).values({ id: applicationId, companyId: f.companyId, name: applicationId, type: "mcp_http" });
+      await db.insert(toolConnections).values({
+        id: githubConnectionId, companyId: f.companyId, applicationId, name: "GitHub", uid: githubConnectionId,
+        transport: "mcp_remote", status: "active", enabled: true, credentialPolicy: "per_user", config: { sourceTemplateKey: "github" },
+      });
+      await db.insert(toolConnectionInstalls).values({ companyId: f.companyId, connectionId: githubConnectionId, targetType: "agent", targetId: f.assignedAgentId });
+      await db.insert(connectionGrants).values({
+        companyId: f.companyId, connectionId: githubConnectionId, kind: "user", subjectUserId: "owner-user", status: "active",
+        credentialSecretRefs: [{ secretId: randomUUID(), configPath: "oauth.access_token", versionSelector: "latest" }],
+        providerTenant: { github: { userId: "5", login: "owner", installationCount: 1, repositoryCount: 1, repositorySelection: "selected", installationIds: ["1"], installationOwnerLogins: ["owner"] } },
+      });
+      const { pullRequest, task } = await openPullRequest(f, 95, { id: 91, login: "teammate" });
       expect(task.responsibleUserId).toBe("owner-user");
       expect(task.sourceTrust).toBeNull();
       const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
@@ -2652,9 +2668,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       }).returning();
       await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
       const exported = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id });
-      expect(exported.status).not.toBe("unavailable");
+      expect(exported).toMatchObject({ status: "unavailable", reason: "No managed GitHub identity is available for this run" });
+      expect(exported.env).toEqual({});
       f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/pulls/95")
-        ? Response.json({ ...payload.pull_request, head: { sha: "c".repeat(40) } })
+        ? Response.json({ ...pullRequest, head: { sha: "c".repeat(40) } })
         : undefined);
       const readMetadata = () => githubChatReviewService(db, f.providerFetch).execute({
         companyId: f.companyId,
@@ -2669,7 +2686,21 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         { expectedRevision: saved.revision, configuration: { ...saved.configuration, reviewedAuthors: [] } },
         "owner-user",
       );
-      await expect(readMetadata()).rejects.toThrow("no longer authorized");
+      await expect(readMetadata()).rejects.toThrow("The initiating GitHub person is no longer authorized");
+    });
+    it("reviews a reviewed author whose GitHub account is linked to a viewer", async () => {
+      const f = await reviewBotFixture();
+      const now = new Date();
+      await db.insert(authUsers).values({ id: "viewer-user", name: "Viewer", email: `viewer-${f.companyId}@example.com`, emailVerified: true, createdAt: now, updatedAt: now });
+      await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: "viewer-user", status: "active", membershipRole: "viewer" });
+      const [principal] = await db.insert(chatExternalPrincipals).values({
+        companyId: f.companyId, provider: "github", providerAccountId: f.endpoint.providerAccountId!, externalId: "92",
+        kind: "user", displayName: "Viewer", handle: "viewer", isBot: false,
+      }).returning();
+      await db.insert(chatIdentityLinks).values({ companyId: f.companyId, endpointId: f.endpoint.id, principalId: principal.id, paperclipUserId: "viewer-user", status: "linked", confirmedAt: now });
+      await addReviewedAuthor(f, "92", "viewer");
+      const { task } = await openPullRequest(f, 96, { id: 92, login: "viewer" });
+      expect(task.sourceTrust).toBeNull();
     });
     it("supersedes a late review projection after its check already rejected the old head", async () => {
       const f = await reviewBotFixture();

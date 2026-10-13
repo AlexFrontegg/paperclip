@@ -15601,10 +15601,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           : false;
       // The task transaction re-runs automatic admission before any task changes.
       const principalAllowed =
-        !principalResolution.linkedDenied &&
-        (principalResolution.userId !== null ||
-          guestSponsorAllowed ||
-          githubAutomatic?.reviewedAuthor === true);
+        githubAutomatic?.reviewedAuthor === true ||
+        (!principalResolution.linkedDenied &&
+          (principalResolution.userId !== null || guestSponsorAllowed));
       const activationAllowed = addressed || existingConversation !== null;
       const allowed =
         endpointAllowed &&
@@ -16309,7 +16308,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           })
           .where(eq(toolConnections.id, taskEndpoint.connectionId));
         if (endpoint.provider === "github") {
-          const guest = !principalResolution.userId;
+          const guest = !principalResolution.userId || reviewedAuthorReview;
           await taskTx.update(chatDeliveries).set({ normalizedEvent: sql`${chatDeliveries.normalizedEvent} || ${JSON.stringify({ githubAuthority: { guest, responsibleUserId: taskUserId, sponsorUserId: guest ? taskEndpoint.sponsorUserId : null } })}::jsonb` }).where(eq(chatDeliveries.id, activeDelivery.id));
         }
         if (githubAutomatic) {

@@ -197,6 +197,14 @@ describe("GitHub review authorization and scheduling", () => {
       decide(config, { ...unlinked, context: { ...context, draft: true } })
         .reason,
     ).toBe("draft");
+    const pushedByOther = {
+      ...unlinked,
+      context: { ...context, sender: { id: "77", login: "maintainer" } },
+    };
+    expect(decide(config, pushedByOther).allowed).toBe(true);
+    config.reviewedAuthors = [{ githubUserId: "77", login: "maintainer" }];
+    expect(decide(config, pushedByOther).reason).toBe("person_not_authorized");
+    config.reviewedAuthors = [{ githubUserId: "42", login: "author" }];
     config.defaults.invocation = "mentions_only";
     expect(decide(config, unlinked).reason).toBe("mentions_only");
     config.defaults.invocation = "linked_authors";
