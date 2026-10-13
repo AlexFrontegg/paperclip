@@ -236,6 +236,16 @@ describe("usageLimitFallbackConfigProblem", () => {
     })).toMatch(/Choose an AI account for the fallback/);
   });
 
+  it("rejects a fallback on the primary's default account even with another sign-in method", () => {
+    const primaryDefault = { provider: "anthropic", method: "subscription", mode: "responsible_user" } as const;
+    const fallback = { ...codexFallback, adapterType: "claude_local" as const, aiConnection: { ...primaryDefault, method: "api_key" as const } };
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "claude_local",
+      primaryAiConnection: primaryDefault,
+      fallback,
+    })).toMatch(/different adapter or a different AI account/);
+  });
+
   it("rejects a primary on a connection pool", () => {
     expect(usageLimitFallbackConfigProblem({
       primaryAdapterType: "claude_local",

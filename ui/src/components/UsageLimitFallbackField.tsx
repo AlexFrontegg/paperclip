@@ -6,6 +6,7 @@ import {
   readUsageLimitFallbackState,
   USAGE_LIMIT_FALLBACK_ADAPTER_TYPES,
   usageLimitFallbackPermissionDefaults,
+  type AiRuntimeConnectionBinding,
   type UsageLimitFallbackAdapterType,
   type UsageLimitFallbackConfig,
   type UsageLimitFallbackReason,
@@ -32,6 +33,7 @@ export function UsageLimitFallbackField({
   agentName,
   primaryAdapterType,
   primaryAdapterConfig = {},
+  primaryAiConnection,
   environmentId,
   value,
   onChange,
@@ -41,6 +43,7 @@ export function UsageLimitFallbackField({
   agentName: string;
   primaryAdapterType: string;
   primaryAdapterConfig?: Record<string, unknown>;
+  primaryAiConnection?: AiRuntimeConnectionBinding;
   environmentId?: string;
   value: UsageLimitFallbackConfig | undefined;
   onChange: (next: UsageLimitFallbackConfig) => void;
@@ -126,6 +129,11 @@ export function UsageLimitFallbackField({
               </SelectContent>
             </Select>
           </Field>
+          {fallbackAdapterType === primaryAdapterType && primaryAiConnection?.mode === "responsible_user" && (
+            <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="usage-limit-fallback-shares-default">
+              The primary already uses your default account. Choose a shared account for the fallback: connecting a new account here makes it your default, which moves the primary too.
+            </p>
+          )}
           <AiConnectionField
             companyId={companyId}
             agentId={agentId}

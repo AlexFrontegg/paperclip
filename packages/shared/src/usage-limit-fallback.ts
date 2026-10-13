@@ -75,6 +75,8 @@ export const usageLimitFallbackStateSchema = z.object({
   waitForReconnect: z.boolean().optional(),
   /** Set when the fallback itself cannot run; the agent then waits for the primary's reset. */
   suspendedReason: z.string().min(1).optional(),
+  /** The primary's account when the fallback started; a different account ends it. Absent in states saved before it was recorded. */
+  primaryAiConnection: aiConnectionBindingSchema.nullable().optional(),
 });
 
 export type UsageLimitFallbackState = z.infer<typeof usageLimitFallbackStateSchema>;
@@ -150,7 +152,9 @@ export function sameJsonValue(left: unknown, right: unknown): boolean {
   return canonicalJson(left ?? null) === canonicalJson(right ?? null);
 }
 
-export function sameAiConnectionBinding(left: AiConnectionBinding | undefined, right: AiConnectionBinding | undefined): boolean {
+/** Whether two bindings run on the same account. A responsible user's binding always resolves to their provider default, whatever its method. */
+export function sameAiConnectionBinding(left: AiConnectionBinding | null | undefined, right: AiConnectionBinding | null | undefined): boolean {
+  if (left?.mode === "responsible_user" && right?.mode === "responsible_user") return left.provider === right.provider;
   return sameJsonValue(left, right);
 }
 

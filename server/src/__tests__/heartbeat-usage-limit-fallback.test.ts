@@ -545,6 +545,39 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     const quotaRun = (overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) =>
       ({ id: randomUUID(), runnerProfileJson: {}, responsibleUserId: null, ...overrides }) as typeof heartbeatRuns.$inferSelect;
 
+    it("does not switch for a model at capacity, which is the provider's outage rather than this account's limit", async () => {
+      const agent = await seedAgent();
+      const activation = await activateUsageLimitFallback(db, {
+        agent,
+        run: quotaRun({ error: "Selected model is at capacity. Please try a different model." }),
+        retryNotBefore: null,
+        now: new Date(),
+      });
+      expect(activation).toEqual({ activated: false, reason: "provider_capacity" });
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("ends the fallback at claim once the primary runs on another account", async () => {
+      const agent = await seedAgent({ aiConnection: sharedAnthropicBinding, usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
+      aiAccounts.selectable = ["anthropic", "openai"];
+      await activeFallback(agent);
+      expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date())).toMatchObject({ lane: "fallback" });
+      const replacedAccount = { ...sharedAnthropicBinding, connectionId: randomUUID(), grantId: randomUUID() };
+      const replaced = { ...agent, runtimeConfig: { ...agent.runtimeConfig, aiConnection: replacedAccount } };
+      expect(await resolveAdapterDispatchForClaim(db, replaced, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    });
+
+    it("keeps a fallback saved before the primary's account was recorded", async () => {
+      const agent = await seedAgent({ aiConnection: sharedAnthropicBinding, usageLimitFallback: { ...codexFallback, aiConnection: openAiBinding } });
+      aiAccounts.selectable = ["anthropic", "openai"];
+      await activeFallback(agent);
+      const { primaryAiConnection: _recorded, ...olderState } = (await readAgentUsageLimitFallbackState(db, agent.id))!;
+      await db.update(agentRuntimeState).set({ stateJson: { usageLimitFallback: olderState } }).where(eq(agentRuntimeState.agentId, agent.id));
+      const replaced = { ...agent, runtimeConfig: { ...agent.runtimeConfig, aiConnection: { ...sharedAnthropicBinding, grantId: randomUUID() } } };
+      expect(await resolveAdapterDispatchForClaim(db, replaced, { responsibleUserId: null }, new Date())).toMatchObject({ lane: "fallback" });
+    });
+
     it("keeps the later end time when two quota failures race", async () => {
       const agent = await seedAgent();
       const now = new Date("2030-04-22T10:00:00.000Z");
