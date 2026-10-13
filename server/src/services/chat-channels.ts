@@ -2999,7 +2999,7 @@ export async function hydrateOutboundAttachment(input: {
 export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const runtime = options.runtime ?? createChatSdkRuntime();
   const githubManualMessages = new WeakMap<object, { policy: GitHubReviewPolicy; revision: number; event: "mention" | "comment" }>();
-  const githubAutomaticMessages = new WeakMap<object, { context: GitHubReviewEventContext; revision: number; policy: GitHubReviewPolicy }>();
+  const githubAutomaticMessages = new WeakMap<object, { context: GitHubReviewEventContext; revision: number; policy: GitHubReviewPolicy; reviewedAuthor?: boolean }>();
   const runtimeVersions = new Map<string, string>();
   const runtimeLocalEpochs = new Map<string, number>();
   // One bounded publication lane per endpoint; credential/reconnect fencing
@@ -11756,6 +11756,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       const admission = await githubAutomaticAdmission(tx, endpoint, automatic.context);
       if (!admission?.allowed) throw deny();
       authorization.userId = admission.responsibleUserId ?? null;
+      if (admission.reviewedAuthor) authorization.allowed = true;
     }
     const expectedUserId =
       payload.requestedByActorType === "user"
@@ -15598,9 +15599,12 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         endpoint.allowUnlinkedPeople
           ? await sponsorAllowsGuest(endpoint)
           : false;
+      // The task transaction re-runs automatic admission before any task changes.
       const principalAllowed =
         !principalResolution.linkedDenied &&
-        (principalResolution.userId !== null || guestSponsorAllowed);
+        (principalResolution.userId !== null ||
+          guestSponsorAllowed ||
+          githubAutomatic?.reviewedAuthor === true);
       const activationAllowed = addressed || existingConversation !== null;
       const allowed =
         endpointAllowed &&
@@ -16022,6 +16026,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         taskTx: DbOrTransaction,
         taskEndpoint: EndpointRow,
         taskUserId: string | null,
+        reviewedAuthorReview: boolean,
       ) => {
         let conversation = existingConversation;
         if (!conversation) {
@@ -16099,7 +16104,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                 .then((rows) => rows[0] ?? null);
         if (!issue) throw notFound("Bound task not found");
           const [assignedAgentTrust] = taskEndpoint.provider === "github" ? await taskTx.select({ permissions: agents.permissions }).from(agents).where(and(eq(agents.companyId, taskEndpoint.companyId), eq(agents.id, taskEndpoint.assignedAgentId))) : [];
-        if (!taskUserId || (githubAutomatic && !principalResolution.userId) || assignedAgentTrust?.permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET) {
+        if (!taskUserId || (githubAutomatic && !principalResolution.userId && !reviewedAuthorReview) || assignedAgentTrust?.permissions?.trustPreset === LOW_TRUST_REVIEW_PRESET) {
             const reviewPreset = {
               id: LOW_TRUST_REVIEW_PRESET,
               version: LOW_TRUST_REVIEW_PRESET_VERSION,
@@ -16383,6 +16388,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         const automaticAdmission = githubAutomatic ? await githubAutomaticAdmission(tx, currentEndpoint, githubAutomatic.context) : null;
         if (githubAutomatic && !automaticAdmission?.allowed) currentPrincipalAuthorization.allowed = false;
         if (automaticAdmission?.allowed) currentPrincipalAuthorization.userId = automaticAdmission.responsibleUserId ?? null;
+        const reviewedAuthorReview = automaticAdmission?.allowed === true && automaticAdmission.reviewedAuthor === true;
+        if (reviewedAuthorReview) Object.assign(currentPrincipalAuthorization, { allowed: true, linkedDenied: false });
         const endpointStillAllowed =
           currentEndpoint.status === "verifying" ||
           currentEndpoint.status === "active";
@@ -16473,6 +16480,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           tx,
           currentPrincipalAuthorization.sponsorUserId ? { ...currentEndpoint, sponsorUserId: currentPrincipalAuthorization.sponsorUserId } : currentEndpoint,
           currentPrincipalAuthorization.userId,
+          reviewedAuthorReview,
         );
       });
       if (!taskMutation) return;
@@ -17198,7 +17206,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     if (endpointRuntime.provider === "github" && githubManual && typeof githubManual === "object") githubManualMessages.set(message, githubManual as { policy: GitHubReviewPolicy; revision: number; event: "mention" | "comment" });
     const githubAutomatic = delivery.normalizedEvent.githubAutomatic;
     if (endpointRuntime.provider === "github" && githubAutomatic && typeof githubAutomatic === "object") {
-      githubAutomaticMessages.set(message, githubAutomatic as { context: GitHubReviewEventContext; revision: number; policy: GitHubReviewPolicy });
+      githubAutomaticMessages.set(message, githubAutomatic as { context: GitHubReviewEventContext; revision: number; policy: GitHubReviewPolicy; reviewedAuthor?: boolean });
     }
     if (
       endpointRuntime.provider === "github" ||
@@ -27220,7 +27228,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         author: { userId: event.author.id, userName: event.author.login, fullName: event.author.login, isBot: false, isMe: false, isSystem: false },
         metadata: { dateSent: new Date(), edited: false }, attachments: [], links: [], isMention: true,
       } as unknown as Message;
-      githubAutomaticMessages.set(message, { context: event, revision: admission.revision, policy: admission.policy });
+      githubAutomaticMessages.set(message, { context: event, revision: admission.revision, policy: admission.policy, reviewedAuthor: admission.reviewedAuthor === true });
       await processMessage(endpoint, thread, message, "mention", true, `https://github.com/${event.repository}/pull/${event.pullNumber}`, { ...runtimeContext, endpointRuntime }, undefined, null, false);
       return new Response("accepted", { status: 202 });
     }

@@ -2604,6 +2604,73 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         runId: run.id,
       }, "read_pull_request", { section: "metadata" })).rejects.toThrow("older pull request head");
     });
+    it("reviews a reviewed author's PR as trusted work until the author is removed", async () => {
+      const f = await reviewBotFixture();
+      const initial = await f.management.configuration(f.endpoint.id, "owner-user");
+      const saved = await f.management.saveConfiguration(
+        f.endpoint.id,
+        {
+          expectedRevision: initial.revision,
+          configuration: {
+            ...initial.configuration,
+            reviewedAuthors: [{ githubUserId: "91", login: "teammate" }],
+          },
+        },
+        "owner-user",
+      );
+      const payload = {
+        action: "opened",
+        installation: { id: 2468 },
+        repository: { id: 97531, full_name: "paperclipai/paperclip", name: "paperclip", owner: { id: 1357, login: "paperclipai" } },
+        sender: { id: 91, login: "teammate" },
+        pull_request: {
+          number: 95, title: "Teammate change", body: "", draft: false,
+          base: { sha: "a".repeat(40), ref: "master" }, head: { sha: "b".repeat(40) },
+          user: { id: 91, login: "teammate", type: "User" }, labels: [],
+        },
+      };
+      const response = await f.service.handleWebhook(
+        f.endpoint.publicId,
+        "github",
+        signedGitHubWebhookRequest({ event: "pull_request", delivery: randomUUID(), payload, webhookSecret: f.webhookSecret }),
+      );
+      expect(response.status).toBeLessThan(300);
+      await expect
+        .poll(async () => (await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.endpointId, f.endpoint.id))).length, { timeout: 10000 })
+        .toBe(1);
+      const [review] = await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.endpointId, f.endpoint.id));
+      const [task] = await db.select().from(issues).where(eq(issues.id, review.issueId));
+      expect(task.responsibleUserId).toBe("owner-user");
+      expect(task.sourceTrust).toBeNull();
+      const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: task.id, wakeCommentId: comment.id },
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      const exported = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id });
+      expect(exported.status).not.toBe("unavailable");
+      f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/pulls/95")
+        ? Response.json({ ...payload.pull_request, head: { sha: "c".repeat(40) } })
+        : undefined);
+      const readMetadata = () => githubChatReviewService(db, f.providerFetch).execute({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        issueId: task.id,
+        runId: run.id,
+      }, "read_pull_request", { section: "metadata" });
+      // Authorization passes; the stale head check is the next guard.
+      await expect(readMetadata()).rejects.toThrow("older pull request head");
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: saved.revision, configuration: { ...saved.configuration, reviewedAuthors: [] } },
+        "owner-user",
+      );
+      await expect(readMetadata()).rejects.toThrow("no longer authorized");
+    });
     it("supersedes a late review projection after its check already rejected the old head", async () => {
       const f = await reviewBotFixture();
       const deliveryId = randomUUID();

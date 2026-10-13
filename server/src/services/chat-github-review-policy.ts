@@ -95,6 +95,7 @@ export function githubReviewSchedulingDecision(input: {
   reason: string;
   responsibleUserId?: string;
   guest?: boolean;
+  reviewedAuthor?: boolean;
 } {
   const { configuration, context } = input;
   if (!input.repositoryEnabled)
@@ -113,7 +114,14 @@ export function githubReviewSchedulingDecision(input: {
   const guestAllowed =
     person?.kind === "guest" &&
     input.activeSponsorUserIds.has(person.sponsorUserId);
-  if (!linkedAllowed && !guestAllowed)
+  const reviewedAuthor =
+    !input.manual &&
+    !linkedAllowed &&
+    !guestAllowed &&
+    (configuration.reviewedAuthors ?? []).some(
+      (author) => author.githubUserId === context.author.id,
+    );
+  if (!linkedAllowed && !guestAllowed && !reviewedAuthor)
     return { allowed: false, reason: "person_not_authorized" };
   const responsibleUserId = input.manual
     ? linkedAllowed
@@ -183,6 +191,7 @@ export function githubReviewSchedulingDecision(input: {
     reason: "automatic_review",
     responsibleUserId,
     guest: !linkedAllowed,
+    reviewedAuthor,
   };
 }
 
