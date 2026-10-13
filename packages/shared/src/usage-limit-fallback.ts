@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { aiConnectionBindingSchema, type AiConnectionBinding } from "./ai-connections.js";
+import type { AiRuntimeConnectionBinding } from "./ai-connection-router.js";
 
 export const USAGE_LIMIT_FALLBACK_ADAPTER_TYPES = ["claude_local", "codex_local"] as const;
 export type UsageLimitFallbackAdapterType = (typeof USAGE_LIMIT_FALLBACK_ADAPTER_TYPES)[number];
@@ -156,11 +157,14 @@ export function sameAiConnectionBinding(left: AiConnectionBinding | undefined, r
 /** Explains why a fallback cannot be used with this primary, or returns null when it can. */
 export function usageLimitFallbackConfigProblem(input: {
   primaryAdapterType: string;
-  primaryAiConnection?: AiConnectionBinding;
+  primaryAiConnection?: AiRuntimeConnectionBinding;
   fallback: UsageLimitFallbackConfig;
 }): string | null {
   if (!isUsageLimitFallbackAdapterType(input.primaryAdapterType)) {
     return `Usage-limit fallback is supported only for ${USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.join(" and ")} agents`;
+  }
+  if (input.primaryAiConnection?.mode === "router") {
+    return "Usage-limit fallback is not available for an agent on a connection pool: the pool already moves tasks between accounts";
   }
   if (input.fallback.adapterType === input.primaryAdapterType && sameAiConnectionBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
     return "The fallback must use a different adapter or a different AI account than the primary";

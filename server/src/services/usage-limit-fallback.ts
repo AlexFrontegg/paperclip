@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { agentRuntimeState, agentTaskSessions, agents, heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   aiConnectionBindingSchema,
+  aiRuntimeConnectionBindingSchema,
   buildUsageLimitFallbackAdapterConfig,
   isUsageLimitFallbackStateActive,
   readUsageLimitFallbackConfig,
@@ -79,7 +80,7 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
 }
 
 function fallbackConfigProblem(agent: AgentRow, fallback: UsageLimitFallbackConfig): string | null {
-  const primaryAiConnection = aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
+  const primaryAiConnection = aiRuntimeConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
   return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
 }
 

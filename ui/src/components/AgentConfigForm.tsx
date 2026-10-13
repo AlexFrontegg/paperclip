@@ -1,6 +1,6 @@
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
 import { UsageLimitFallbackField } from "./UsageLimitFallbackField";
-import { aiConnectionBindingSchema, usageLimitFallbackConfigSchema } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, usageLimitFallbackConfigSchema } from "@paperclipai/shared";
 import { testAgentSetup } from "@/lib/test-agent-setup";
 import { setupEfforts } from "../lib/agent-setup-fields";
 import { RuntimeTestCard } from "./RuntimeTestCard";
@@ -1064,7 +1064,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       });
       const adapterConfig = buildAdapterConfigForTest(adapterConfigPatch);
       const agentId = isCreate ? undefined : props.agent.id;
-      const aiConnection = isCreate ? undefined : aiConnectionBindingSchema.safeParse(
+      const aiConnection = isCreate ? undefined : aiRuntimeConnectionBindingSchema.safeParse(
         (overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? props.agent.runtimeConfig.aiConnection,
       ).data;
       if (props.compactTestFeedback) {
@@ -1662,7 +1662,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           )}
 
           {!isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={adapterType === "paperclip_runner" ? eff("adapterConfig", "provider", config.provider) === "codex" ? "codex_local" : eff("adapterConfig", "provider", config.provider) === "opencode" ? "opencode_local" : eff("adapterConfig", "provider", config.provider) === "acpx" && eff("adapterConfig", "acpxAgent", config.acpxAgent) === "grok" ? "grok_local" : eff("adapterConfig", "provider", config.provider) === "acpx" && eff("adapterConfig", "acpxAgent", config.acpxAgent) === "claude" ? "claude_local" : adapterType : adapterType}
-            value={aiConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
+            routerAdapterType={adapterType} value={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
             onChange={binding => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, aiConnection: binding })} />}
 

@@ -1,11 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
+import * as connectionIntents from "../services/connection-intents.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import {
   activateUsageLimitFallback,
@@ -33,7 +34,15 @@ vi.mock("../services/ai-connection-runtime.js", async (importOriginal) => {
       if (aiAccounts.broken.includes(binding.provider)) throw new Error("Reconnect this AI account");
       if (!aiAccounts.selectable) return actual.prepareManagedAiRuntime(...args);
       const attribution = { provider: binding.provider, method: binding.method, connectionId: randomUUID(), grantId: randomUUID() };
-      return { config, attribution, identity: `${binding.provider}-identity`, cleanup: async () => {} } as unknown as Awaited<ReturnType<typeof actual.prepareManagedAiRuntime>>;
+      const identity = `${binding.provider}-identity`;
+      return {
+        config,
+        attribution,
+        accountName: `${binding.provider} account`,
+        identity,
+        sessionIdentity: `${(binding as { grantId?: string }).grantId ?? binding.provider}:shared:secret:1`,
+        cleanup: async () => {},
+      } as unknown as Awaited<ReturnType<typeof actual.prepareManagedAiRuntime>>;
     },
   };
 });
@@ -244,6 +253,97 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     return (run.runnerProfileJson as Record<string, unknown> | null)?.adapterDispatch as Record<string, unknown> | undefined;
   }
 
+  /** A queued task run that continues a user's comment after an earlier failed run. */
+  async function seedUserContinuationRun(agent: typeof agents.$inferSelect) {
+    const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId));
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issueId = randomUUID();
+    const sourceRunId = randomUUID();
+    const commentId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId: agent.companyId,
+      agentId: agent.id,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_commented",
+      payload: { issueId },
+      status: "queued",
+      runId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId,
+      companyId: agent.companyId,
+      agentId: agent.id,
+      status: "failed",
+      createdAt: new Date("2020-01-01T00:00:00Z"),
+      finishedAt: new Date("2020-01-01T00:00:01Z"),
+      contextSnapshot: { issueId },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: agent.companyId,
+      agentId: agent.id,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId,
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        wakeReason: "issue_commented",
+        wakeCommentId: commentId,
+        previousRunId: sourceRunId,
+        explicitUserContinuation: { previousRunId: sourceRunId, commentId },
+      },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: agent.companyId,
+      title: "Continue after a failed run",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agent.id,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      responsibleUserId: "responsible-user",
+      issueNumber: 1,
+      identifier: `${company!.issuePrefix}-1`,
+      startedAt: new Date(),
+    });
+    const [comment] = await db.insert(issueComments).values({
+      id: commentId,
+      companyId: agent.companyId,
+      issueId,
+      authorType: "user",
+      authorUserId: "responsible-user",
+      body: "Continue the task.",
+    }).returning();
+    await db.insert(issueRecoveryActions).values({
+      companyId: agent.companyId,
+      sourceIssueId: issueId,
+      kind: "active_run_watchdog",
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: sourceRunId,
+      status: "resolved",
+      outcome: "cancelled",
+      nextAction: "User continued.",
+      evidence: {
+        explicitUserContinuation: {
+          runId,
+          previousRunId: sourceRunId,
+          commentId,
+          actorId: "responsible-user",
+          recordedAt: new Date().toISOString(),
+          commentUpdatedAt: comment!.updatedAt.toISOString(),
+          commentBodyHash: createHash("sha256").update(comment!.body).digest("hex"),
+        },
+      },
+    });
+    return runId;
+  }
+
   it("switches to the fallback right away and runs the retry on Codex with the agent's shared settings", async () => {
     const agent = await seedAgent();
     const first = await heartbeat.invoke(agent.id, "on_demand", {}, "manual");
@@ -348,6 +448,19 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBe("codex_auth_required");
     expect(await resolveAdapterDispatchForClaim(db, agent, { responsibleUserId: null }, new Date())).toEqual({ adapterType: "claude_local" });
     expect(await readAgentUsageLimitFallbackState(db, agent.id)).not.toBeNull();
+  });
+
+  it("makes a user's continuation wait for the primary's reset after cleanup when the fallback cannot sign in", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    codexErrorCode = "codex_auth_required";
+    const runId = await seedUserContinuationRun(agent);
+    await heartbeat.resumeQueuedRuns();
+    expect((await waitForRun(runId)).errorCode).toBe("codex_auth_required");
+    const retry = await retryOf(runId);
+    expect(retry.scheduledRetryAt!.toISOString()).toBe(RESET_AT);
+    expect(retry.contextSnapshot).toMatchObject({ explicitUserContinuation: { previousRunId: runId } });
+    expect((await readAgentUsageLimitFallbackState(db, agent.id))?.suspendedReason).toBe("codex_auth_required");
   });
 
   it("suspends a fallback whose account cannot be prepared and makes the retry wait for the primary's reset", async () => {
@@ -604,6 +717,32 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       const state = await readAgentUsageLimitFallbackState(db, agent.id);
       expect(state?.reason).toBe("primary_signed_out");
       expect(state?.waitForReconnect).toBeUndefined();
+    });
+
+    it("moves to Codex once the run is cleaned up when the signed-out turn continued a user's comment", async () => {
+      const agent = await seedAgent(whenUnavailable);
+      claudeFailures = [{ errorCode: "claude_auth_required" }];
+      const runId = await seedUserContinuationRun(agent);
+      // The sign-in card blocks the run, so generic recovery leaves the retry to the fallback.
+      const realConnectionIntentService = connectionIntents.connectionIntentService;
+      const signInCard = vi.spyOn(connectionIntents, "connectionIntentService").mockImplementation((...args) => ({
+        ...realConnectionIntentService(...args),
+        requestForRunAuthFailure: async () => ({ interactionId: randomUUID() }),
+      }) as unknown as ReturnType<typeof realConnectionIntentService>);
+      try {
+        await heartbeat.resumeQueuedRuns();
+        const failed = await waitForRun(runId);
+        expect(failed).toMatchObject({ errorCode: "claude_auth_required" });
+        const retry = await retryOf(runId);
+        expect((await heartbeat.getRun(runId))?.livenessState).toBe("blocked");
+        expect(retry.contextSnapshot).toMatchObject({ explicitUserContinuation: { previousRunId: runId } });
+        const finished = await runRetry(retry);
+        expect(finished.status).toBe("succeeded");
+        expect(dispatchOf(finished)?.lane).toBe("fallback");
+        expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({ reason: "primary_signed_out" });
+      } finally {
+        signInCard.mockRestore();
+      }
     });
 
     it("moves to Codex when Claude's managed account cannot be prepared, until it is reconnected", async () => {

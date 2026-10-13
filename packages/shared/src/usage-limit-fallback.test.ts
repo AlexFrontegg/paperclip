@@ -235,4 +235,12 @@ describe("usageLimitFallbackConfigProblem", () => {
       fallback: codexFallback,
     })).toMatch(/Choose an AI account for the fallback/);
   });
+
+  it("rejects a primary on a connection pool", () => {
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "claude_local",
+      primaryAiConnection: { mode: "router", connectionId: "00000000-0000-4000-8000-000000000001" },
+      fallback: { ...codexFallback, aiConnection: sharedClaudeBinding },
+    })).toMatch(/connection pool/);
+  });
 });
