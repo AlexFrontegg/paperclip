@@ -7,6 +7,7 @@ import {
   isUsageLimitFallbackStateActive,
   readUsageLimitFallbackConfig,
   readUsageLimitFallbackState,
+  sameAiConnectionBinding,
   usageLimitFallbackConfigProblem,
   USAGE_LIMIT_FALLBACK_STATE_KEY,
   type AiConnectionBinding,
@@ -82,6 +83,18 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
 function fallbackConfigProblem(agent: AgentRow, fallback: UsageLimitFallbackConfig): string | null {
   const primaryAiConnection = aiRuntimeConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
   return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
+}
+
+function primaryAiAccount(agent: AgentRow): AiConnectionBinding | null {
+  return aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data ?? null;
+}
+
+// Codex reports a model at capacity like a usage limit, but it is the provider's outage, not this account's limit.
+const PROVIDER_CAPACITY_RE = /model (?:is )?at capacity|at capacity for this model|capacity limit/i;
+
+export function isProviderCapacityFailure(run: Pick<RunRow, "error" | "stderrExcerpt">): boolean {
+  const message = `${run.error ?? ""}\n${run.stderrExcerpt ?? ""}`;
+  return PROVIDER_CAPACITY_RE.test(message) && !/usage limit/i.test(message);
 }
 
 /** Failures of the AI account the run used, as opposed to a problem with the work or a setup gap both lanes share. */
@@ -204,7 +217,8 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
     && !fallbackConfigProblem(agent, fallback)
     && (state.reason === "provider_quota" || fallback.switchWhenUnavailable)
     && state.primaryAdapterType === agent.adapterType
-    && state.fallbackAdapterType === fallback.adapterType;
+    && state.fallbackAdapterType === fallback.adapterType
+    && (state.primaryAiConnection === undefined || sameAiConnectionBinding(state.primaryAiConnection, primaryAiAccount(agent)));
   // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
   const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason
     ? await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null)
@@ -244,6 +258,7 @@ export async function activateUsageLimitFallback(db: Db, input: {
   const { agent, run, now } = input;
   const reason = input.reason ?? "provider_quota";
   if (runUsageLimitLane(run) === "fallback") return { activated: false, reason: "already_on_fallback" };
+  if (reason === "provider_quota" && !input.retryNotBefore && isProviderCapacityFailure(run)) return { activated: false, reason: "provider_capacity" };
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
   if (!fallback || (reason !== "provider_quota" && !fallback.switchWhenUnavailable)) return { activated: false, reason: "not_configured" };
   const problem = fallbackConfigProblem(agent, fallback);
@@ -270,13 +285,14 @@ export async function activateUsageLimitFallback(db: Db, input: {
     // The activation that lasts longer decides the reason and how the switch-back happens.
     const keepCurrent = currentActive && Date.parse(currentActive.activeUntil) >= proposedUntil.getTime();
     const next: UsageLimitFallbackState = keepCurrent
-      ? { ...currentActive, primaryAdapterType: agent.adapterType, fallbackAdapterType: fallback.adapterType }
+      ? { ...currentActive, primaryAdapterType: agent.adapterType, fallbackAdapterType: fallback.adapterType, primaryAiConnection: primaryAiAccount(agent) }
       : {
         activeUntil: proposedUntil.toISOString(),
         activatedAt: currentActive?.activatedAt ?? now.toISOString(),
         sourceRunId: currentActive?.sourceRunId ?? run.id,
         primaryAdapterType: agent.adapterType,
         fallbackAdapterType: fallback.adapterType,
+        primaryAiConnection: primaryAiAccount(agent),
         reason,
         ...(waitForReconnect ? { waitForReconnect: true } : {}),
       };

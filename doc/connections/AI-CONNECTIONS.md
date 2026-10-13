@@ -236,7 +236,17 @@ waiting for the reset. The agent row, its role, chat bindings
 and tasks do not change. Each run records the adapter it used in
 `adapterDispatch`. The first run claimed after the reset time uses the primary
 again. If the fallback account cannot be selected, the fallback is not used and
-the retry waits for the reset as before.
+the retry waits for the reset as before. A model at capacity is the provider's
+outage, not the account's limit, so it does not switch even though Codex reports
+it as `provider_quota`. Moving the primary to another account ends the fallback
+at the next claim.
+
+A same-adapter fallback needs a different account than the primary. A primary
+and a fallback that both use the responsible user's default account for one
+provider are the same account, whatever their sign-in method, so that fallback
+is rejected; choose a shared account for it. Connecting an account from the
+fallback field makes it the user's default, which also moves a primary that
+uses that default.
 
 The fallback config holds only engine-specific settings (model, effort, the
 sandbox and permission flags, turn cap, network allowlist). A fallback on

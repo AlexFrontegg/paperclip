@@ -85,6 +85,14 @@ describe("UsageLimitFallbackField", () => {
 describe("UsageLimitFallbackField safety controls", () => {
   const enabledCodex: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset", switchWhenUnavailable: false };
 
+  it("warns that a same-adapter fallback on the primary's default account would move the primary too", async () => {
+    const primaryDefault = { provider: "anthropic", method: "subscription", mode: "responsible_user" } as const;
+    await mountField({ value: { ...enabledCodex, adapterType: "claude_local" }, primaryAiConnection: primaryDefault });
+    expect(container.querySelector("[data-testid='usage-limit-fallback-shares-default']")).not.toBeNull();
+    await mountField({ value: enabledCodex, primaryAiConnection: primaryDefault });
+    expect(container.querySelector("[data-testid='usage-limit-fallback-shares-default']")).toBeNull();
+  });
+
   it("still lets the user turn the fallback off after switching the primary to an unsupported adapter", async () => {
     await mountField({ primaryAdapterType: "gemini_local", value: enabledCodex });
     expect(container.textContent).toContain("works only with Claude Code and Codex agents");
