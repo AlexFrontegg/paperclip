@@ -1,5 +1,5 @@
 import { agentAppearanceSchema } from "../agent-appearance.js";
-import { aiConnectionBindingSchema } from "../ai-connections.js";
+import { aiRuntimeConnectionBindingSchema as aiConnectionBindingSchema } from "../ai-connection-router.js";
 import { usageLimitFallbackConfigSchema } from "../usage-limit-fallback.js";
 import { z } from "zod";
 import {

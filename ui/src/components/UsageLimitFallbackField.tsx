@@ -134,7 +134,9 @@ export function UsageLimitFallbackField({
             model={fallbackModel}
             environmentId={environmentId}
             value={base.aiConnection}
-            onChange={(binding) => onChange({ ...base, aiConnection: binding })}
+            onChange={(binding) => {
+              if (binding.mode !== "router") onChange({ ...base, aiConnection: binding });
+            }}
           />
           {fallbackAdapterType === "codex_local" && primaryAdapterType !== "codex_local" && (
             <ToggleField
