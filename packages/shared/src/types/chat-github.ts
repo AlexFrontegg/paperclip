@@ -41,6 +41,11 @@ export type GitHubAllowedPerson = {
   | { kind: "guest"; sponsorUserId: string; permissionProfile: "restricted" }
 );
 
+export interface GitHubReviewedAuthor {
+  githubUserId: string;
+  login: string;
+}
+
 export interface GitHubChatConfiguration {
   version: 1;
   /** Enabling the feature and bot tools is explicit for existing endpoints. */
@@ -48,6 +53,8 @@ export interface GitHubChatConfiguration {
   responsibleUserId: string;
   memberAccess: "all_linked" | "selected";
   people: GitHubAllowedPerson[];
+  /** Their pull requests get automatic reviews; they cannot invoke or control the bot. */
+  reviewedAuthors?: GitHubReviewedAuthor[];
   defaults: GitHubReviewPolicy;
   /** Keys are stable GitHub repository IDs; labels never grant access. */
   repositories: Record<string, Partial<GitHubReviewPolicy>>;

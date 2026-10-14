@@ -50,9 +50,12 @@ export const githubReviewPolicySchema = z
     ]),
   })
   .strict();
+const githubLoginSchema = z
+  .string()
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}(?:\[bot\])?$/);
 const person = {
   githubUserId: githubIdSchema,
-  login: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}(?:\[bot\])?$/),
+  login: githubLoginSchema,
   automaticReviews: z.boolean(),
 };
 export const githubAllowedPersonSchema = z.discriminatedUnion("kind", [
@@ -75,6 +78,12 @@ export const githubChatConfigurationSchema = z
     responsibleUserId: z.string().min(1),
     memberAccess: z.enum(["all_linked", "selected"]),
     people: z.array(githubAllowedPersonSchema).max(500),
+    reviewedAuthors: z
+      .array(
+        z.object({ githubUserId: githubIdSchema, login: githubLoginSchema }).strict(),
+      )
+      .max(500)
+      .optional(),
     defaults: githubReviewPolicySchema,
     repositories: z
       .record(githubIdSchema, githubReviewPolicySchema.partial())
@@ -90,6 +99,16 @@ export const githubChatConfigurationSchema = z
         code: z.ZodIssueCode.custom,
         path: ["people"],
         message: "Each GitHub account can be allowed only once.",
+      });
+    const listedIds = [...value.people, ...(value.reviewedAuthors ?? [])].map(
+      (entry) => entry.githubUserId,
+    );
+    if (new Set(listedIds).size !== listedIds.length)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reviewedAuthors"],
+        message:
+          "Each GitHub account can appear only once across people and reviewed authors.",
       });
   });
 export const updateGitHubChatConfigurationSchema = z

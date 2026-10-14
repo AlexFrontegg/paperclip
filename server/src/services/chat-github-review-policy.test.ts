@@ -180,6 +180,37 @@ describe("GitHub review authorization and scheduling", () => {
     config.repositories["12"] = { events: [] };
     expect(decide(config).reason).toBe("event_disabled");
   });
+  it("reviews listed authors automatically but never lets them invoke the bot", () => {
+    const config = configuration();
+    config.reviewedAuthors = [{ githubUserId: "42", login: "author" }];
+    const unlinked = { linkedMemberUserId: null };
+    expect(decide(config, unlinked)).toMatchObject({
+      allowed: true,
+      responsibleUserId: "owner",
+      guest: true,
+      reviewedAuthor: true,
+    });
+    expect(decide(config, { ...unlinked, manual: true }).reason).toBe(
+      "person_not_authorized",
+    );
+    expect(
+      decide(config, { ...unlinked, context: { ...context, draft: true } })
+        .reason,
+    ).toBe("draft");
+    const pushedByOther = {
+      ...unlinked,
+      context: { ...context, sender: { id: "77", login: "maintainer" } },
+    };
+    expect(decide(config, pushedByOther).allowed).toBe(true);
+    config.reviewedAuthors = [{ githubUserId: "77", login: "maintainer" }];
+    expect(decide(config, pushedByOther).reason).toBe("person_not_authorized");
+    config.reviewedAuthors = [{ githubUserId: "42", login: "author" }];
+    config.defaults.invocation = "mentions_only";
+    expect(decide(config, unlinked).reason).toBe("mentions_only");
+    config.defaults.invocation = "linked_authors";
+    config.reviewedAuthors = [];
+    expect(decide(config, unlinked).reason).toBe("person_not_authorized");
+  });
 });
 describe("GitHub score validation", () => {
   it("never accepts an agent-declared conclusion or mismatched commit", () => {

@@ -6,6 +6,7 @@ import {
   type GitHubChatConfiguration,
   type GitHubReviewPolicy,
   type GitHubAllowedPerson,
+  type GitHubReviewedAuthor,
 } from "@paperclipai/shared";
 import { accessApi } from "@/api/access";
 import { chatEndpointsApi } from "@/api/chatEndpoints";
@@ -85,11 +86,12 @@ export function GitHubPolicyEditor({
           }
         >
           <option value="linked_authors">
-            Linked members’ PRs and authorized mentions
+            PRs from linked members and reviewed authors, plus authorized mentions
           </option>
           <option value="mentions_only">Authorized mentions only</option>
           <option value="allowed_authors">
-            Allowed authors’ PRs and authorized mentions
+            PRs from linked members, reviewed authors and external contributors,
+            plus authorized mentions
           </option>
         </select>
         <p className="text-xs text-muted-foreground">
@@ -357,7 +359,9 @@ export function GitHubAccessEditor({
     queryKey: ["github-linked-members", endpointId],
     queryFn: () => chatEndpointsApi.listPrincipals(endpointId),
   });
-  const [kind, setKind] = useState<"member" | "guest" | null>(null);
+  const [kind, setKind] = useState<"member" | "guest" | "reviewed" | null>(
+    null,
+  );
   const [login, setLogin] = useState("");
   const [sponsor, setSponsor] = useState(configuration.responsibleUserId);
   const [candidate, setCandidate] = useState<{
@@ -366,19 +370,28 @@ export function GitHubAccessEditor({
   } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const reviewedAuthors = configuration.reviewedAuthors ?? [];
+  const isListed = (githubUserId: string) =>
+    configuration.people.some((p) => p.githubUserId === githubUserId) ||
+    reviewedAuthors.some((author) => author.githubUserId === githubUserId);
+  const closeForm = () => {
+    setKind(null);
+    setCandidate(null);
+    setLogin("");
+  };
   const add = (person: GitHubAllowedPerson) => {
-    if (
-      configuration.people.some((p) => p.githubUserId === person.githubUserId)
-    )
-      return;
+    if (isListed(person.githubUserId)) return;
     onChange({
       ...configuration,
       ...(person.kind === "member" ? { memberAccess: "selected" } : {}),
       people: [...configuration.people, person],
     });
-    setKind(null);
-    setCandidate(null);
-    setLogin("");
+    closeForm();
+  };
+  const addReviewedAuthor = (author: GitHubReviewedAuthor) => {
+    if (isListed(author.githubUserId)) return;
+    onChange({ ...configuration, reviewedAuthors: [...reviewedAuthors, author] });
+    closeForm();
   };
   const activeMembers = (members.data?.members ?? []).filter(
     (member) =>
@@ -573,6 +586,9 @@ export function GitHubAccessEditor({
         <Button variant="outline" onClick={() => setKind("guest")}>
           Allow external contributor
         </Button>
+        <Button variant="outline" onClick={() => setKind("reviewed")}>
+          Add reviewed author
+        </Button>
       </div>
       {kind === "member" && (
         <div className="space-y-3 rounded-lg border border-border p-4">
@@ -616,11 +632,12 @@ export function GitHubAccessEditor({
           </Button>
         </div>
       )}
-      {kind === "guest" && (
+      {(kind === "guest" || kind === "reviewed") && (
         <div className="space-y-4 rounded-lg border border-border p-4">
           <p className="text-sm">
-            Allow one GitHub account to mention the bot with restricted guest
-            permissions. A sponsor is required.
+            {kind === "guest"
+              ? "Allow one GitHub account to mention the bot with restricted guest permissions. A sponsor is required."
+              : "Review every pull request from one GitHub account automatically. The account needs no Paperclip access and cannot mention or control the bot."}
           </p>
           <div className="space-y-2">
             <Label htmlFor="github-guest-login">GitHub username</Label>
@@ -654,21 +671,23 @@ export function GitHubAccessEditor({
               </Button>
             </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="github-guest-sponsor">Sponsor</Label>
-            <select
-              id="github-guest-sponsor"
-              className={githubSelectClass}
-              value={sponsor}
-              onChange={(e) => setSponsor(e.target.value)}
-            >
-              {activeMembers.map((member) => (
-                <option key={member.principalId} value={member.principalId}>
-                  {member.user?.name ?? member.principalId}
-                </option>
-              ))}
-            </select>
-          </div>
+          {kind === "guest" && (
+            <div className="space-y-2">
+              <Label htmlFor="github-guest-sponsor">Sponsor</Label>
+              <select
+                id="github-guest-sponsor"
+                className={githubSelectClass}
+                value={sponsor}
+                onChange={(e) => setSponsor(e.target.value)}
+              >
+                {activeMembers.map((member) => (
+                  <option key={member.principalId} value={member.principalId}>
+                    {member.user?.name ?? member.principalId}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           {candidate && (
             <p className="text-sm">
               @{candidate.login} · GitHub ID {candidate.githubUserId}
@@ -681,27 +700,65 @@ export function GitHubAccessEditor({
             <Button
               disabled={
                 !candidate ||
-                !sponsor ||
-                configuration.people.some(
-                  (p) => p.githubUserId === candidate.githubUserId,
-                )
+                (kind === "guest" && !sponsor) ||
+                isListed(candidate.githubUserId)
               }
-              onClick={() =>
-                candidate &&
+              onClick={() => {
+                if (!candidate) return;
+                if (kind === "reviewed") {
+                  addReviewedAuthor(candidate);
+                  return;
+                }
                 add({
                   ...candidate,
                   kind: "guest",
                   sponsorUserId: sponsor,
                   permissionProfile: "restricted",
                   automaticReviews: false,
-                })
-              }
+                });
+              }}
             >
-              Allow this account
+              {kind === "guest" ? "Allow this account" : "Add this account"}
             </Button>
           </div>
         </div>
       )}
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium">Reviewed authors</h3>
+        <p className="text-xs text-muted-foreground">
+          Pull requests from these GitHub accounts get automatic reviews under
+          the responsible user, without the guest sandbox. Add only people you
+          trust, because their pull request content drives the review. Reviews
+          never use a person&apos;s or the server&apos;s GitHub credentials,
+          and tools stay limited to this bot&apos;s connection. Removing an
+          account stops new reviews and bot tool calls right away.
+        </p>
+        {reviewedAuthors.length === 0 && (
+          <p className="text-sm text-muted-foreground">No reviewed authors.</p>
+        )}
+        {reviewedAuthors.map((author) => (
+          <div
+            key={author.githubUserId}
+            className="flex items-center justify-between gap-3 rounded-lg border border-border p-3"
+          >
+            <p className="text-sm">@{author.login}</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                onChange({
+                  ...configuration,
+                  reviewedAuthors: reviewedAuthors.filter(
+                    (entry) => entry.githubUserId !== author.githubUserId,
+                  ),
+                })
+              }
+            >
+              Remove
+            </Button>
+          </div>
+        ))}
+      </div>
       {(error || members.error || links.error) && (
         <p role="alert" className="text-sm text-destructive">
           {error ||

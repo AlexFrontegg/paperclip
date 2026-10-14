@@ -17,6 +17,7 @@ import {
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
+import { githubGuestBotConnectionForSession } from "./chat-github-tools.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
@@ -138,6 +139,14 @@ export async function resolveGitHubOperationCredentials(
     };
   }
   try {
+    const issueId =
+      typeof run.contextSnapshot?.issueId === "string"
+        ? run.contextSnapshot.issueId
+        : null;
+    // A run started for a guest or reviewed author may use only the agent's own account.
+    const botScoped = Boolean(
+      await githubGuestBotConnectionForSession(db, { ...input, issueId }),
+    );
     const resolved = await resolveManagedGitHubCredential(
       db,
       secretService(db),
@@ -147,13 +156,10 @@ export async function resolveGitHubOperationCredentials(
         heartbeatRunId: input.runId,
         allowStandingDelegation: false,
         responsibleUserId:
-          context?.cause === "company_default"
+          botScoped || context?.cause === "company_default"
             ? null
             : (context?.responsibleUserId ?? null),
-        issueId:
-          typeof run.contextSnapshot?.issueId === "string"
-            ? run.contextSnapshot.issueId
-            : null,
+        issueId,
       },
     );
     if (resolved.credential) {
