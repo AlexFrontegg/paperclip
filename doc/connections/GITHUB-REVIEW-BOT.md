@@ -86,6 +86,11 @@ permissions. Ordinary discussion does not change a review score. Repeat review
 mentions and pushes continue the existing task; inline replies return to the
 task owning that thread.
 
+An automatic review of a push starts 30 seconds after the push, so several quick
+pushes get one review of the newest commit. A push cancels a running automatic
+review of an older commit unless that review is already publishing. Reviews a
+person asked for by mention are not cancelled.
+
 Event prompts supplement the agent's instructions. Repository content and PR
 prose are untrusted input and cannot change tool authority or publication policy.
 The execution records the configuration revision and event context used.
