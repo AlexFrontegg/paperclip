@@ -18,13 +18,22 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
 import { Field, ToggleField } from "./agent-config-primitives";
-import { ModelDropdown } from "./AgentConfigForm";
+import { ModelDropdown, ThinkingEffortDropdown } from "./AgentConfigForm";
+import { setupEfforts } from "../lib/agent-setup-fields";
 
 const SWITCH_BACK_HINT =
   "Switches back once the primary limit resets. A switched run starts fresh from the task history, comments and documents.";
 
 function defaultFallbackAdapter(primaryAdapterType: string): UsageLimitFallbackAdapterType {
   return USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.find((type) => type !== primaryAdapterType) ?? "codex_local";
+}
+
+function effortKeyFor(adapterType: UsageLimitFallbackAdapterType): "effort" | "modelReasoningEffort" {
+  return adapterType === "codex_local" ? "modelReasoningEffort" : "effort";
+}
+
+function effortLabel(effort: string): string {
+  return effort === "xhigh" ? "X-High" : effort[0]!.toUpperCase() + effort.slice(1);
 }
 
 export function UsageLimitFallbackField({
@@ -49,6 +58,7 @@ export function UsageLimitFallbackField({
   onChange: (next: UsageLimitFallbackConfig) => void;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
+  const [effortOpen, setEffortOpen] = useState(false);
   const enabled = value?.enabled === true;
   const fallbackAdapterType = value?.adapterType ?? defaultFallbackAdapter(primaryAdapterType);
   const fallbackModel = typeof value?.adapterConfig?.model === "string" ? value.adapterConfig.model : "";
@@ -85,6 +95,20 @@ export function UsageLimitFallbackField({
   };
   const primaryLabel = getAdapterDisplay(primaryAdapterType).label;
   const permissionDefaults = usageLimitFallbackPermissionDefaults(primaryAdapterConfig, fallbackAdapterType);
+  const sameAdapter = fallbackAdapterType === primaryAdapterType;
+  const effortKey = effortKeyFor(fallbackAdapterType);
+  const fallbackEffort = typeof base.adapterConfig[effortKey] === "string" ? String(base.adapterConfig[effortKey]) : "";
+  // An empty model on the primary's adapter runs the primary's model, so its efforts are the ones that apply.
+  const primaryModel = typeof primaryAdapterConfig.model === "string" ? primaryAdapterConfig.model : "";
+  const runModel = (model: string) => model || (sameAdapter ? primaryModel : "");
+  const supportedEfforts = setupEfforts(fallbackAdapterType, runModel(fallbackModel));
+  const effortOptions = [
+    { id: "", label: sameAdapter ? "Same as primary" : "Auto" },
+    ...supportedEfforts.map((id) => ({ id, label: effortLabel(id) })),
+    ...(fallbackEffort && !supportedEfforts.includes(fallbackEffort)
+      ? [{ id: fallbackEffort, label: `${effortLabel(fallbackEffort)} (not supported by this model)` }]
+      : []),
+  ];
   const switchBackHint = `${primaryLabel} is tried again after 30 minutes, or as soon as its account is reconnected.`;
   // Only the CLI engine reports provider outages; the default ACP engine reports usage limits and sign-in failures.
   const unavailableHint = primaryAdapterConfig.engine === "cli"
@@ -109,73 +133,90 @@ export function UsageLimitFallbackField({
             onChange={(next) => onChange({ ...base, switchWhenUnavailable: next })}
             toggleTestId="usage-limit-fallback-when-unavailable"
           />
-          <Field label="Fallback adapter">
-            <Select
-              value={fallbackAdapterType}
-              onValueChange={(next) => {
-                if (!isUsageLimitFallbackAdapterType(next)) return;
-                onChange({ ...base, adapterType: next, adapterConfig: {}, aiConnection: undefined });
+          <div className="space-y-3 border-t border-border pt-3" data-testid="usage-limit-fallback-target">
+            <p className="text-xs font-medium text-muted-foreground">Fallback agent settings</p>
+            <Field label="Fallback adapter">
+              <Select
+                value={fallbackAdapterType}
+                onValueChange={(next) => {
+                  if (!isUsageLimitFallbackAdapterType(next)) return;
+                  onChange({ ...base, adapterType: next, adapterConfig: {}, aiConnection: undefined });
+                }}
+              >
+                <SelectTrigger className="w-full" aria-label="Fallback adapter">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.map((type) => (
+                    <SelectItem key={type} value={type}>
+                      {getAdapterDisplay(type).label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            {fallbackAdapterType === primaryAdapterType && primaryAiConnection?.mode === "responsible_user" && (
+              <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="usage-limit-fallback-shares-default">
+                The primary already uses your default account. Choose a shared account for the fallback: connecting a new account here makes it your default, which moves the primary too.
+              </p>
+            )}
+            <AiConnectionField
+              companyId={companyId}
+              agentId={agentId}
+              agentName={agentName}
+              adapterType={fallbackAdapterType}
+              model={fallbackModel}
+              environmentId={environmentId}
+              value={base.aiConnection}
+              onChange={(binding) => {
+                if (binding.mode !== "router") onChange({ ...base, aiConnection: binding });
               }}
-            >
-              <SelectTrigger className="w-full" aria-label="Fallback adapter">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.map((type) => (
-                  <SelectItem key={type} value={type}>
-                    {getAdapterDisplay(type).label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          {fallbackAdapterType === primaryAdapterType && primaryAiConnection?.mode === "responsible_user" && (
-            <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="usage-limit-fallback-shares-default">
-              The primary already uses your default account. Choose a shared account for the fallback: connecting a new account here makes it your default, which moves the primary too.
-            </p>
-          )}
-          <AiConnectionField
-            companyId={companyId}
-            agentId={agentId}
-            agentName={agentName}
-            adapterType={fallbackAdapterType}
-            model={fallbackModel}
-            environmentId={environmentId}
-            value={base.aiConnection}
-            onChange={(binding) => {
-              if (binding.mode !== "router") onChange({ ...base, aiConnection: binding });
-            }}
-          />
-          {fallbackAdapterType === "codex_local" && primaryAdapterType !== "codex_local" && (
-            <ToggleField
-              label="Bypass Codex approvals and sandbox"
-              hint="Matches new Codex agents. Turn off to keep Codex's own approval prompts and sandbox for fallback runs."
-              checked={(base.adapterConfig.dangerouslyBypassApprovalsAndSandbox ?? permissionDefaults.dangerouslyBypassApprovalsAndSandbox) !== false}
-              onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslyBypassApprovalsAndSandbox: next } })}
-              toggleTestId="usage-limit-fallback-codex-bypass"
             />
-          )}
-          {fallbackAdapterType === "claude_local" && primaryAdapterType !== "claude_local" && (
-            <ToggleField
-              label="Skip Claude permission prompts"
-              hint="Matches new Claude Code agents. Turn off to keep Claude's permission checks for fallback runs."
-              checked={(base.adapterConfig.dangerouslySkipPermissions ?? permissionDefaults.dangerouslySkipPermissions) !== false}
-              onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslySkipPermissions: next } })}
-              toggleTestId="usage-limit-fallback-claude-skip-permissions"
-            />
-          )}
-          <Field label="Fallback model">
+            {fallbackAdapterType === "codex_local" && primaryAdapterType !== "codex_local" && (
+              <ToggleField
+                label="Bypass Codex approvals and sandbox"
+                hint="Matches new Codex agents. Turn off to keep Codex's own approval prompts and sandbox for fallback runs."
+                checked={(base.adapterConfig.dangerouslyBypassApprovalsAndSandbox ?? permissionDefaults.dangerouslyBypassApprovalsAndSandbox) !== false}
+                onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslyBypassApprovalsAndSandbox: next } })}
+                toggleTestId="usage-limit-fallback-codex-bypass"
+              />
+            )}
+            {fallbackAdapterType === "claude_local" && primaryAdapterType !== "claude_local" && (
+              <ToggleField
+                label="Skip Claude permission prompts"
+                hint="Matches new Claude Code agents. Turn off to keep Claude's permission checks for fallback runs."
+                checked={(base.adapterConfig.dangerouslySkipPermissions ?? permissionDefaults.dangerouslySkipPermissions) !== false}
+                onChange={(next) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, dangerouslySkipPermissions: next } })}
+                toggleTestId="usage-limit-fallback-claude-skip-permissions"
+              />
+            )}
             <ModelDropdown
+              label="Fallback model"
+              defaultLabel={sameAdapter ? "Same as primary" : undefined}
               models={models}
               value={fallbackModel}
-              onChange={(model) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, model: model || undefined } })}
+              onChange={(model) => {
+                const keepsEffort = !fallbackEffort || setupEfforts(fallbackAdapterType, runModel(model)).includes(fallbackEffort);
+                onChange({
+                  ...base,
+                  adapterConfig: { ...base.adapterConfig, model: model || undefined, ...(keepsEffort ? {} : { [effortKey]: undefined }) },
+                });
+              }}
               open={modelOpen}
               onOpenChange={setModelOpen}
               allowDefault
               required={false}
               groupByProvider={false}
             />
-          </Field>
+            <ThinkingEffortDropdown
+              label="Fallback thinking effort"
+              value={fallbackEffort}
+              options={effortOptions}
+              onChange={(effort) => onChange({ ...base, adapterConfig: { ...base.adapterConfig, [effortKey]: effort || undefined } })}
+              open={effortOpen}
+              onOpenChange={setEffortOpen}
+            />
+          </div>
         </>
       )}
     </div>
