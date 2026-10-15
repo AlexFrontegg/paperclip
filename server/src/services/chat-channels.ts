@@ -13,7 +13,7 @@ import { buildChatCommunicationGuidance } from "./chat-communication-guidance.js
 function githubPolicyRecord(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 import { githubChatManagementService } from "./chat-github-management.js";
 import { githubReviewCheckService } from "./chat-github-checks.js";
-import { githubAutomaticReviewEvent, githubAutomaticAdmission, githubPreviousAssessment } from "./chat-github-events.js";
+import { githubAutomaticReviewEvent, githubAutomaticAdmission, githubPreviousAssessment, githubReviewedAuthorCommentAdmission } from "./chat-github-events.js";
 import { githubReviewPrompt } from "./chat-github-review-policy.js";
 import { chatGitHubConfigurations, chatGitHubReviews } from "@paperclipai/db";
 import type { GitHubReviewEventContext, GitHubReviewPolicy } from "@paperclipai/shared";
@@ -5088,7 +5088,12 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     if (!destinationAllowed) return false;
     if (!action.principalId) return false;
     return (
-      await lockCurrentPrincipalAuthorization(tx, endpoint, action.principalId)
+      await lockCurrentPrincipalAuthorization(
+        tx,
+        endpoint,
+        action.principalId,
+        payload.threadId,
+      )
     ).allowed;
   }
 
@@ -10350,6 +10355,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     tx: DbOrTransaction,
     endpoint: EndpointRow,
     principalId: string,
+    // Only conversation turns pass this; governed actions never accept a reviewed author.
+    githubConversationId?: string | null,
   ): Promise<{
     allowed: boolean;
     linkedDenied: boolean;
@@ -10357,7 +10364,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     sponsorUserId?: string | null;
   }> {
     const githubAccess = await githubChatPrincipalAccess(tx, endpoint, principalId);
-    if (githubAccess) return githubAccess;
+    if (githubAccess) {
+      if (githubAccess.allowed || !githubConversationId) return githubAccess;
+      const commentAdmission = await githubReviewedAuthorCommentAdmission(tx, endpoint, principalId, githubConversationId);
+      return commentAdmission?.allowed
+        ? { ...githubAccess, allowed: true, linkedDenied: false, userId: commentAdmission.responsibleUserId ?? null }
+        : githubAccess;
+    }
     // Link confirmation already uses this transaction-scoped identity key.
     // Taking it at the final task mutation boundary prevents a newly confirmed
     // identity from racing the authorization snapshot. Row locks below also
@@ -11746,12 +11759,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           .limit(1)
           .then((rows) => rows[0] ?? null)
       : null;
+    const automatic = delivery.normalizedEvent.githubAutomatic as { context: GitHubReviewEventContext } | undefined;
     const authorization = await lockCurrentPrincipalAuthorization(
       tx,
       endpoint,
       action.principalId,
+      automatic ? null : conversation.externalThreadId,
     );
-    const automatic = delivery.normalizedEvent.githubAutomatic as { context: GitHubReviewEventContext } | undefined;
     if (endpoint.provider === "github" && automatic) {
       const admission = await githubAutomaticAdmission(tx, endpoint, automatic.context);
       if (!admission?.allowed) throw deny();
@@ -15599,11 +15613,26 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         endpoint.allowUnlinkedPeople
           ? await sponsorAllowsGuest(endpoint)
           : false;
-      // The task transaction re-runs automatic admission before any task changes.
+      const linkedOrGuestAllowed =
+        !principalResolution.linkedDenied &&
+        (principalResolution.userId !== null || guestSponsorAllowed);
+      // The task transaction re-runs both reviewed-author admissions before any task changes.
+      const reviewedAuthorComment =
+        endpoint.provider === "github" &&
+        !githubAutomatic &&
+        !linkedOrGuestAllowed &&
+        (
+          await githubReviewedAuthorCommentAdmission(
+            db,
+            endpoint,
+            principalResolution.principal.id,
+            thread.id,
+          )
+        )?.allowed === true;
       const principalAllowed =
         githubAutomatic?.reviewedAuthor === true ||
-        (!principalResolution.linkedDenied &&
-          (principalResolution.userId !== null || guestSponsorAllowed));
+        reviewedAuthorComment ||
+        linkedOrGuestAllowed;
       const activationAllowed = addressed || existingConversation !== null;
       const allowed =
         endpointAllowed &&
@@ -16383,6 +16412,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             tx,
             currentEndpoint,
             principalResolution.principal.id,
+            githubAutomatic ? null : thread.id,
           );
         const automaticAdmission = githubAutomatic ? await githubAutomaticAdmission(tx, currentEndpoint, githubAutomatic.context) : null;
         if (githubAutomatic && !automaticAdmission?.allowed) currentPrincipalAuthorization.allowed = false;
@@ -18325,6 +18355,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   tx,
                   currentEndpoint,
                   lifecyclePrincipal.id,
+                  lifecycle.threadId,
                 )
               : null;
           const authorizedPrincipalId = authorization?.allowed

@@ -195,6 +195,37 @@ export function githubReviewSchedulingDecision(input: {
   };
 }
 
+/** A reviewed author may talk to the bot in pull request conversations, under the responsible member. */
+export function githubReviewedAuthorCommentDecision(input: {
+  configuration: GitHubChatConfiguration;
+  commenterGithubUserId: string;
+  pullRequestConversation: boolean;
+  repositoryEnabled: boolean;
+  identityRevoked: boolean;
+  activeMemberUserIds: ReadonlySet<string>;
+}): { allowed: boolean; reason: string; responsibleUserId?: string } {
+  const { configuration } = input;
+  if (!configuration.toolsEnabled)
+    return { allowed: false, reason: "bot_tools_disabled" };
+  if (!input.pullRequestConversation)
+    return { allowed: false, reason: "not_pull_request" };
+  if (!input.repositoryEnabled)
+    return { allowed: false, reason: "repository_disabled" };
+  if (input.identityRevoked)
+    return { allowed: false, reason: "identity_revoked" };
+  const listed = (configuration.reviewedAuthors ?? []).some(
+    (author) => author.githubUserId === input.commenterGithubUserId,
+  );
+  if (!listed) return { allowed: false, reason: "person_not_authorized" };
+  if (!input.activeMemberUserIds.has(configuration.responsibleUserId))
+    return { allowed: false, reason: "responsible_user_unavailable" };
+  return {
+    allowed: true,
+    reason: "reviewed_author_comment",
+    responsibleUserId: configuration.responsibleUserId,
+  };
+}
+
 export function validateGitHubReviewAssessment(
   input: unknown,
   headSha: string,

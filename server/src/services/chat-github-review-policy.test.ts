@@ -8,6 +8,7 @@ import {
 import {
   githubReviewConclusion,
   githubReviewLineIsInPatch,
+  githubReviewedAuthorCommentDecision,
   githubReviewSchedulingDecision,
   matchesGitHubReviewPattern,
   validateGitHubReviewAssessment,
@@ -210,6 +211,42 @@ describe("GitHub review authorization and scheduling", () => {
     config.defaults.invocation = "linked_authors";
     config.reviewedAuthors = [];
     expect(decide(config, unlinked).reason).toBe("person_not_authorized");
+  });
+  it("lets listed authors comment in pull request conversations only", () => {
+    const config = configuration();
+    config.reviewedAuthors = [{ githubUserId: "42", login: "author" }];
+    const decideComment = (overrides = {}) =>
+      githubReviewedAuthorCommentDecision({
+        configuration: config,
+        commenterGithubUserId: "42",
+        pullRequestConversation: true,
+        repositoryEnabled: true,
+        identityRevoked: false,
+        activeMemberUserIds: new Set(["owner"]),
+        ...overrides,
+      });
+    expect(decideComment()).toEqual({
+      allowed: true,
+      reason: "reviewed_author_comment",
+      responsibleUserId: "owner",
+    });
+    expect(decideComment({ pullRequestConversation: false }).reason).toBe(
+      "not_pull_request",
+    );
+    expect(decideComment({ repositoryEnabled: false }).reason).toBe(
+      "repository_disabled",
+    );
+    expect(decideComment({ identityRevoked: true }).reason).toBe(
+      "identity_revoked",
+    );
+    expect(decideComment({ commenterGithubUserId: "77" }).reason).toBe(
+      "person_not_authorized",
+    );
+    expect(decideComment({ activeMemberUserIds: new Set() }).reason).toBe(
+      "responsible_user_unavailable",
+    );
+    config.toolsEnabled = false;
+    expect(decideComment().reason).toBe("bot_tools_disabled");
   });
 });
 describe("GitHub score validation", () => {
