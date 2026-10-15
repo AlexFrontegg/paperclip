@@ -3,7 +3,7 @@ import { GitHubPublicationLeaseLost, withGitHubPublicationLease } from "../servi
 import { githubChatManagementService } from "../services/chat-github-management.js";
 import { githubChatReviewService } from "../services/chat-github-reviews.js";
 import { githubReviewCheckService } from "../services/chat-github-checks.js";
-import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
+import { githubAutomaticReviewEvent, githubPreviousAssessment } from "../services/chat-github-events.js";
 import { githubBotToolsForSession, githubGuestBotConnectionForSession } from "../services/chat-github-tools.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
@@ -106,6 +106,7 @@ import {
 } from "../routes/chat-channels.js";
 import {
   chatChannelService,
+  GITHUB_PUSH_REVIEW_DEBOUNCE_MS,
   type ChatChannelServiceOptions,
   type ChatChannelService,
 } from "../services/chat-channels.js";
@@ -2767,6 +2768,156 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await checks.processPending();
       expect((await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.id, late.id)))[0].state).toBe("superseded");
       expect((await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.id, unrelated.id)))[0].state).toBe("queued");
+    });
+    describe("pushes during an automatic review", () => {
+      type ReviewBot = Awaited<ReturnType<typeof reviewBotFixture>>;
+      type PullRequest = Awaited<ReturnType<typeof openPullRequest>>["pullRequest"];
+      async function pushToPullRequest(f: ReviewBot, pullRequest: PullRequest, before: string, after: string) {
+        const payload = {
+          action: "synchronize",
+          before,
+          after,
+          installation: { id: 2468 },
+          repository: { id: 97531, full_name: "paperclipai/paperclip", name: "paperclip", owner: { id: 1357, login: "paperclipai" } },
+          sender: { id: 42, login: "octocat" },
+          pull_request: { ...pullRequest, head: { sha: after } },
+        };
+        const response = await f.service.handleWebhook(
+          f.endpoint.publicId,
+          "github",
+          signedGitHubWebhookRequest({ event: "pull_request", delivery: randomUUID(), payload, webhookSecret: f.webhookSecret }),
+        );
+        expect(response.status).toBeLessThan(300);
+      }
+      async function reviewOfHead(f: ReviewBot, headSha: string) {
+        const [review] = await db.select().from(chatGitHubReviews)
+          .where(and(eq(chatGitHubReviews.endpointId, f.endpoint.id), eq(chatGitHubReviews.headSha, headSha)));
+        if (!review) return null;
+        const [wake] = await db.select().from(chatActions)
+          .where(and(eq(chatActions.deliveryId, review.deliveryId), eq(chatActions.kind, "inbound_wakeup")));
+        return { review, wake };
+      }
+      const wakeStatus = async (f: ReviewBot, headSha: string) => (await reviewOfHead(f, headSha))?.wake?.status;
+      async function endPushPause(f: ReviewBot, headSha: string) {
+        const pushed = await reviewOfHead(f, headSha);
+        await db.update(chatActions)
+          .set({ result: { code: "github_push_debounce", retryAt: new Date(Date.now() - 1000).toISOString() } })
+          .where(eq(chatActions.id, pushed!.wake.id));
+        await f.service.processPendingDeliveries();
+      }
+      async function runningReview(f: ReviewBot, issueId: string, wakeCommentId: string) {
+        const [run] = await db.insert(heartbeatRuns).values({
+          companyId: f.companyId,
+          agentId: f.assignedAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId, wakeCommentId },
+        }).returning();
+        await db.update(issues).set({ executionRunId: run.id }).where(eq(issues.id, issueId));
+        return run;
+      }
+      async function openedReview(f: ReviewBot, number: number) {
+        const opened = await openPullRequest(f, number, { id: 42, login: "octocat" });
+        await expect.poll(() => wakeStatus(f, opened.pullRequest.head.sha), { timeout: 10000 }).toBe("processed");
+        const { review } = (await reviewOfHead(f, opened.pullRequest.head.sha))!;
+        const [link] = await db.select({ commentId: chatMessageLinks.commentId }).from(chatMessageLinks)
+          .where(eq(chatMessageLinks.deliveryId, review.deliveryId));
+        return { ...opened, review, commentId: link.commentId! };
+      }
+      const [b, c, d] = ["b", "c", "d"].map((letter) => letter.repeat(40));
+      const assessment = (reviewedCommit: string, score: 2 | 4) => ({
+        reviewedCommit, score, complete: true, summary: "", rationale: "",
+        coverage: { reviewedPaths: [], omittedPaths: [], limitations: [] }, findings: [],
+      });
+
+      it("cancels the review of an older head and reviews the new head after a short pause", async () => {
+        const f = await reviewBotFixture();
+        const { pullRequest, task, commentId } = await openedReview(f, 84);
+        const run = await runningReview(f, task.id, commentId);
+        await pushToPullRequest(f, pullRequest, b, c);
+        await expect.poll(() => f.cancelRun.mock.calls.length, { timeout: 10000 }).toBe(1);
+        expect(f.cancelRun).toHaveBeenCalledWith(run.id, expect.any(String), expect.objectContaining({
+          errorCode: "github_review_superseded",
+          eventPayload: expect.objectContaining({ headSha: c, supersededHeadSha: b }),
+        }));
+        const pushed = (await reviewOfHead(f, c))!;
+        const [delivery] = await db.select().from(chatDeliveries).where(eq(chatDeliveries.id, pushed.review.deliveryId));
+        expect(pushed.wake).toMatchObject({
+          status: "issued",
+          result: {
+            code: "github_push_debounce",
+            retryAt: new Date(delivery.receivedAt.getTime() + GITHUB_PUSH_REVIEW_DEBOUNCE_MS).toISOString(),
+          },
+        });
+        await f.service.processPendingDeliveries();
+        expect(f.wakeup).toHaveBeenCalledTimes(1);
+        await endPushPause(f, c);
+        await expect.poll(() => wakeStatus(f, c), { timeout: 10000 }).toBe("processed");
+        expect(f.wakeup).toHaveBeenCalledTimes(2);
+      });
+      it("reviews only the newest of several quick pushes", async () => {
+        const f = await reviewBotFixture();
+        const { pullRequest } = await openedReview(f, 85);
+        await pushToPullRequest(f, pullRequest, b, c);
+        await expect.poll(() => wakeStatus(f, c), { timeout: 10000 }).toBe("issued");
+        await pushToPullRequest(f, pullRequest, c, d);
+        await endPushPause(f, c);
+        await expect.poll(() => wakeStatus(f, c), { timeout: 10000 }).toBe("failed");
+        const skipped = (await reviewOfHead(f, c))!;
+        expect(skipped.wake.result).toMatchObject({ code: "inbound_wakeup_superseded" });
+        expect(skipped.review.state).toBe("superseded");
+        await expect.poll(() => wakeStatus(f, d), { timeout: 10000 }).toBe("issued");
+        await endPushPause(f, d);
+        await expect.poll(() => wakeStatus(f, d), { timeout: 10000 }).toBe("processed");
+        expect(f.wakeup).toHaveBeenCalledTimes(2);
+        expect(f.cancelRun).not.toHaveBeenCalled();
+      });
+      it("keeps a running review that a push does not make outdated", async () => {
+        const f = await reviewBotFixture();
+        const { pullRequest, task, commentId } = await openedReview(f, 86);
+        const [request] = await db.insert(issueComments).values({
+          companyId: f.companyId, issueId: task.id, authorType: "user", authorUserId: "owner-user", body: "Also check the migration.",
+        }).returning();
+        const run = await runningReview(f, task.id, request.id);
+        await pushToPullRequest(f, pullRequest, b, c);
+        await expect.poll(() => wakeStatus(f, c), { timeout: 10000 }).toBe("issued");
+        // A later push is accepted only after the first push settles, so its cancel proves the first push left the run alone.
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: task.id, wakeCommentId: commentId } }).where(eq(heartbeatRuns.id, run.id));
+        await pushToPullRequest(f, pullRequest, c, d);
+        await endPushPause(f, c);
+        await expect.poll(() => f.cancelRun.mock.calls.length, { timeout: 10000 }).toBe(1);
+        expect(f.cancelRun).toHaveBeenCalledWith(run.id, expect.any(String), expect.objectContaining({
+          eventPayload: expect.objectContaining({ headSha: d, supersededHeadSha: b }),
+        }));
+      });
+      it("lets a review that already submitted its assessment finish publishing", async () => {
+        const f = await reviewBotFixture();
+        const { pullRequest, task, commentId, review } = await openedReview(f, 88);
+        const run = await runningReview(f, task.id, commentId);
+        await db.update(chatGitHubReviews).set({ runId: run.id, assessment: assessment(b, 4) }).where(eq(chatGitHubReviews.id, review.id));
+        await pushToPullRequest(f, pullRequest, b, c);
+        await expect.poll(() => wakeStatus(f, c), { timeout: 10000 }).toBe("issued");
+        // Once publishing ends, the next push cancels the run, which proves the first push left it alone.
+        await db.update(chatGitHubReviews).set({ assessment: null }).where(eq(chatGitHubReviews.id, review.id));
+        await pushToPullRequest(f, pullRequest, c, d);
+        await endPushPause(f, c);
+        await expect.poll(() => f.cancelRun.mock.calls.length, { timeout: 10000 }).toBe(1);
+        expect(f.cancelRun).toHaveBeenCalledWith(run.id, expect.any(String), expect.objectContaining({
+          eventPayload: expect.objectContaining({ headSha: d }),
+        }));
+      });
+      it("compares the next review with the last published review, not a superseded one", async () => {
+        const f = await reviewBotFixture();
+        const { review } = await openedReview(f, 87);
+        await db.update(chatGitHubReviews).set({ state: "completed", assessment: assessment(b, 4) }).where(eq(chatGitHubReviews.id, review.id));
+        const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...copy } = review;
+        await db.insert(chatGitHubReviews).values({
+          ...copy, headSha: c, deliveryId: randomUUID(), state: "superseded", assessment: assessment(c, 2),
+          createdAt: new Date(review.createdAt.getTime() + 1000),
+        });
+        const [endpoint] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, f.endpoint.id));
+        expect((await githubPreviousAssessment(db, endpoint, review.repositoryId, 87))?.headSha).toBe(b);
+      });
     });
     it("links a gated GitHub check to the current vanity review page before a task exists", async () => {
       const publicOrigin = vi.spyOn(cloudRuntimeIdentity, "runtimePublicOrigin").mockReturnValue("https://current-vanity.example");
