@@ -124,6 +124,23 @@ describe("UsageLimitFallbackField model and effort", () => {
     expect(onChange).toHaveBeenCalledWith({ ...claudeFallback, adapterConfig: { model: "claude-sonnet-4-5", effort: undefined } });
   });
 
+  it("offers the primary model's efforts when a same-adapter fallback keeps the primary's model", async () => {
+    await mountField({ primaryAdapterConfig: { model: "claude-sonnet-4-5" }, value: { ...claudeFallback, adapterConfig: {} } });
+    expect(pickerProps.effort!.options.map((option: { id: string }) => option.id)).toEqual(["", "low", "medium", "high"]);
+  });
+
+  it("keeps an unsupported stored effort visible instead of showing it as the default", async () => {
+    await mountField({ primaryAdapterConfig: { model: "claude-sonnet-4-5" }, value: { ...claudeFallback, adapterConfig: { effort: "max" } } });
+    expect(pickerProps.effort!.value).toBe("max");
+    expect(pickerProps.effort!.options.at(-1)).toEqual({ id: "max", label: "Max (not supported by this model)" });
+  });
+
+  it("drops an effort the primary's model does not support when the fallback switches back to it", async () => {
+    await mountField({ primaryAdapterConfig: { model: "claude-sonnet-4-5" }, value: { ...claudeFallback, adapterConfig: { model: "claude-opus-5-5", effort: "max" } } });
+    flushSync(() => pickerProps.model!.onChange(""));
+    expect(onChange).toHaveBeenCalledWith({ ...claudeFallback, adapterConfig: { model: undefined, effort: undefined } });
+  });
+
   it("says a same-adapter fallback keeps the primary's model and effort by default", async () => {
     await mountField({ value: claudeFallback });
     expect(pickerProps.model!.defaultLabel).toBe("Same as primary");

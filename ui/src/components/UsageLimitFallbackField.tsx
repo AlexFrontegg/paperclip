@@ -98,9 +98,16 @@ export function UsageLimitFallbackField({
   const sameAdapter = fallbackAdapterType === primaryAdapterType;
   const effortKey = effortKeyFor(fallbackAdapterType);
   const fallbackEffort = typeof base.adapterConfig[effortKey] === "string" ? String(base.adapterConfig[effortKey]) : "";
+  // An empty model on the primary's adapter runs the primary's model, so its efforts are the ones that apply.
+  const primaryModel = typeof primaryAdapterConfig.model === "string" ? primaryAdapterConfig.model : "";
+  const runModel = (model: string) => model || (sameAdapter ? primaryModel : "");
+  const supportedEfforts = setupEfforts(fallbackAdapterType, runModel(fallbackModel));
   const effortOptions = [
     { id: "", label: sameAdapter ? "Same as primary" : "Auto" },
-    ...setupEfforts(fallbackAdapterType, fallbackModel).map((id) => ({ id, label: effortLabel(id) })),
+    ...supportedEfforts.map((id) => ({ id, label: effortLabel(id) })),
+    ...(fallbackEffort && !supportedEfforts.includes(fallbackEffort)
+      ? [{ id: fallbackEffort, label: `${effortLabel(fallbackEffort)} (not supported by this model)` }]
+      : []),
   ];
   const switchBackHint = `${primaryLabel} is tried again after 30 minutes, or as soon as its account is reconnected.`;
   // Only the CLI engine reports provider outages; the default ACP engine reports usage limits and sign-in failures.
@@ -189,7 +196,7 @@ export function UsageLimitFallbackField({
               models={models}
               value={fallbackModel}
               onChange={(model) => {
-                const keepsEffort = !fallbackEffort || setupEfforts(fallbackAdapterType, model).includes(fallbackEffort);
+                const keepsEffort = !fallbackEffort || setupEfforts(fallbackAdapterType, runModel(model)).includes(fallbackEffort);
                 onChange({
                   ...base,
                   adapterConfig: { ...base.adapterConfig, model: model || undefined, ...(keepsEffort ? {} : { [effortKey]: undefined }) },
