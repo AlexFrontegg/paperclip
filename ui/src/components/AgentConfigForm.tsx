@@ -1666,20 +1666,6 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
             onChange={binding => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, aiConnection: binding })} />}
 
-          {!isCreate && selectedCompanyId && (
-            <UsageLimitFallbackField
-              companyId={selectedCompanyId}
-              agentId={props.agent.id}
-              agentName={props.agent.name}
-              primaryAdapterType={adapterType}
-              primaryAdapterConfig={{ ...config, ...overlay.adapterConfig }}
-              primaryAiConnection={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
-              environmentId={currentDefaultEnvironmentId || undefined}
-              value={usageLimitFallbackConfigSchema.safeParse(pendingRuntimeConfig.usageLimitFallback).data}
-              onChange={(next) => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, usageLimitFallback: next })}
-            />
-          )}
-
           {showInlineAdapterTestEnvironmentFeedback && !props.compactTestFeedback && (testActionError || testEnvironment.error) && (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {testActionError
@@ -1819,6 +1805,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 </>
               )}
           </>)}
+          {!isCreate && selectedCompanyId && (
+            <UsageLimitFallbackField
+              companyId={selectedCompanyId}
+              agentId={props.agent.id}
+              agentName={props.agent.name}
+              primaryAdapterType={adapterType}
+              primaryAdapterConfig={{ ...config, ...overlay.adapterConfig }}
+              primaryAiConnection={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
+              environmentId={currentDefaultEnvironmentId || undefined}
+              value={usageLimitFallbackConfigSchema.safeParse(pendingRuntimeConfig.usageLimitFallback).data}
+              onChange={(next) => mark("runtime", "runtimeConfig", { ...pendingRuntimeConfig, usageLimitFallback: next })}
+            />
+          )}
         </div>
 
       </div>
@@ -3753,6 +3752,7 @@ export function ModelDropdown({
   detectModelLabel,
   emptyDetectHint,
   defaultLabel,
+  label = "Model",
 }: {
   models: AdapterModel[];
   value: string;
@@ -3773,6 +3773,7 @@ export function ModelDropdown({
   detectModelLabel?: string;
   emptyDetectHint?: string;
   defaultLabel?: string;
+  label?: string;
 }) {
   const [modelSearch, setModelSearch] = useState("");
   const [detectingModel, setDetectingModel] = useState(false);
@@ -3844,7 +3845,7 @@ export function ModelDropdown({
   }
 
   return (
-    <Field label="Model" hint={help.model}>
+    <Field label={label} hint={help.model}>
       <Popover
         open={open}
         onOpenChange={(nextOpen) => {
@@ -4054,23 +4055,25 @@ export function ModelDropdown({
   );
 }
 
-function ThinkingEffortDropdown({
+export function ThinkingEffortDropdown({
   value,
   options,
   onChange,
   open,
   onOpenChange,
+  label = "Thinking effort",
 }: {
   value: string;
   options: ReadonlyArray<{ id: string; label: string }>;
   onChange: (id: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  label?: string;
 }) {
   const selected = options.find((option) => option.id === value) ?? options[0];
 
   return (
-    <Field label="Thinking effort" hint={help.thinkingEffort}>
+    <Field label={label} hint={help.thinkingEffort}>
       <Popover open={open} onOpenChange={onOpenChange}>
         <PopoverTrigger asChild>
           <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">

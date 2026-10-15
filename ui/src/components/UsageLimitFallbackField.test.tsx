@@ -9,6 +9,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { UsageLimitFallbackField, UsageLimitFallbackStatus } from "./UsageLimitFallbackField";
 
 const connectionFieldProps = vi.hoisted(() => ({ last: undefined as Record<string, unknown> | undefined }));
+const pickerProps = vi.hoisted(() => ({
+  model: undefined as Record<string, any> | undefined,
+  effort: undefined as Record<string, any> | undefined,
+}));
 vi.mock("../api/agents", () => ({ agentsApi: { adapterModels: vi.fn().mockResolvedValue([]) } }));
 vi.mock("./ai-connections/AiConnectionField", () => ({
   AiConnectionField: (props: Record<string, unknown>) => {
@@ -16,7 +20,16 @@ vi.mock("./ai-connections/AiConnectionField", () => ({
     return <div>Fallback account for {String(props.adapterType)}</div>;
   },
 }));
-vi.mock("./AgentConfigForm", () => ({ ModelDropdown: () => <div>Fallback model picker</div> }));
+vi.mock("./AgentConfigForm", () => ({
+  ModelDropdown: (props: Record<string, unknown>) => {
+    pickerProps.model = props;
+    return <div>Fallback model picker</div>;
+  },
+  ThinkingEffortDropdown: (props: Record<string, unknown>) => {
+    pickerProps.effort = props;
+    return <div>Fallback effort picker</div>;
+  },
+}));
 
 let root: Root;
 let container: HTMLDivElement;
@@ -45,6 +58,8 @@ async function mountField(props: Partial<ComponentProps<typeof UsageLimitFallbac
 beforeEach(() => {
   vi.clearAllMocks();
   connectionFieldProps.last = undefined;
+  pickerProps.model = undefined;
+  pickerProps.effort = undefined;
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -79,6 +94,40 @@ describe("UsageLimitFallbackField", () => {
     expect(container.textContent).toContain("Fallback model picker");
     expect(connectionFieldProps.last).toMatchObject({ adapterType: "codex_local", model: "gpt-x" });
     expect(connectionFieldProps.last).not.toHaveProperty("legacy");
+  });
+});
+
+describe("UsageLimitFallbackField model and effort", () => {
+  const codexFallback: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-x" }, switchBack: "on_reset", switchWhenUnavailable: false };
+  const claudeFallback: UsageLimitFallbackConfig = { ...codexFallback, adapterType: "claude_local", adapterConfig: { model: "claude-opus-5-5" } };
+
+  it("labels the fallback pickers once and stores a Codex effort under modelReasoningEffort", async () => {
+    await mountField({ value: codexFallback });
+    expect(pickerProps.model).toMatchObject({ label: "Fallback model", defaultLabel: undefined });
+    expect(pickerProps.effort).toMatchObject({ label: "Fallback thinking effort", value: "" });
+    expect(pickerProps.effort!.options[0]).toEqual({ id: "", label: "Auto" });
+    flushSync(() => pickerProps.effort!.onChange("high"));
+    expect(onChange).toHaveBeenCalledWith({ ...codexFallback, adapterConfig: { model: "gpt-x", modelReasoningEffort: "high" } });
+  });
+
+  it("stores a Claude effort under effort and offers the model's efforts", async () => {
+    await mountField({ primaryAdapterType: "codex_local", value: { ...claudeFallback, adapterConfig: { ...claudeFallback.adapterConfig, effort: "max" } } });
+    expect(pickerProps.effort!.value).toBe("max");
+    expect(pickerProps.effort!.options.map((option: { id: string }) => option.id)).toEqual(["", "low", "medium", "high", "xhigh", "max"]);
+    flushSync(() => pickerProps.effort!.onChange(""));
+    expect(onChange).toHaveBeenCalledWith({ ...claudeFallback, adapterConfig: { model: "claude-opus-5-5", effort: undefined } });
+  });
+
+  it("drops an effort the newly chosen fallback model does not support", async () => {
+    await mountField({ primaryAdapterType: "codex_local", value: { ...claudeFallback, adapterConfig: { ...claudeFallback.adapterConfig, effort: "max" } } });
+    flushSync(() => pickerProps.model!.onChange("claude-sonnet-4-5"));
+    expect(onChange).toHaveBeenCalledWith({ ...claudeFallback, adapterConfig: { model: "claude-sonnet-4-5", effort: undefined } });
+  });
+
+  it("says a same-adapter fallback keeps the primary's model and effort by default", async () => {
+    await mountField({ value: claudeFallback });
+    expect(pickerProps.model!.defaultLabel).toBe("Same as primary");
+    expect(pickerProps.effort!.options[0]).toEqual({ id: "", label: "Same as primary" });
   });
 });
 
