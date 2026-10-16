@@ -1995,12 +1995,15 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
         oauthGrantRefresher: (input) => service.refreshOAuthGrantCredentials(input),
       });
       fixture.revokeAccessToken();
+      const callTool = () => gateway.executeTestCall({ companyId: company.id, connectionId: connected.connectionId, agentId: agent!.id, userId: "board-user", toolName: "list_insights", parameters: {} });
 
-      await expect(gateway.executeTestCall({ companyId: company.id, connectionId: connected.connectionId, agentId: agent!.id, userId: "board-user", toolName: "list_insights", parameters: {} }))
-        .resolves.toMatchObject({ decision: "allowed" });
+
+      // The gateway renews the token but never replays a rejected call; the caller's retry uses the new token.
+      await expect(callTool()).resolves.toMatchObject({ error: { reasonCode: "oauth_refreshed_retry_required" } });
+      await expect(callTool()).resolves.toMatchObject({ decision: "allowed", result: { content: "ok" } });
 
       expect(fixture.tokenRequests.map((body) => body.get("grant_type"))).toEqual(["client_credentials", "client_credentials"]);
-      expect(fixture.mcpAuthorizations.slice(-2)).toEqual(["Bearer cc-access-1", "Bearer cc-access-2"]);
+      expect(fixture.mcpAuthorizations.at(-1)).toBe("Bearer cc-access-2");
     });
   });
 

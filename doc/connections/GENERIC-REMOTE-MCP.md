@@ -115,8 +115,10 @@ and when the MCP server rejects it with a 401:
    a new token with the client credentials. A rejected refresh token is then
    discarded.
 
-The connection does not need a reconnect while the client credentials stay
-valid.
+After a 401, the call that was rejected is not replayed, because the server may
+already have applied it. It fails with `oauth_refreshed_retry_required`, and the
+caller's retry uses the new token. The connection does not need a reconnect
+while the client credentials stay valid.
 
 Paperclip always uses the client ID and secret you entered, even when the
 deployment sets `PAPERCLIP_TOOL_OAUTH_*` client variables. If the MCP server
