@@ -12907,6 +12907,8 @@ describeEmbeddedPostgres("tool access service", () => {
     expect((await userGrant()).providerTenant?.github).toBeUndefined();
     await expect(service.githubReadHeaders(company.id, connected.connectionId, userId))
       .resolves.toEqual({ Authorization: "Bearer ghu-second-account" });
+  });
+
   it.each(["new", "saved"])("starts Sentry MCP sign-in for a %s connection without a manual OAuth app", async (state) => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
