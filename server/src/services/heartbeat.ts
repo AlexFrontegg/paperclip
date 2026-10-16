@@ -67,7 +67,10 @@ import {
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
   isWorkspaceBusyDeferral,
   createHeartbeatRetries,
+  deferredUsageLimitFallbackRetries,
+  type DeferredUsageLimitFallbackRetry,
 } from "./heartbeat/retries.js";
+import { effectiveAgentForRun, runUsageLimitLane } from "./usage-limit-fallback.js";
 export {
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS,
   WORKSPACE_BUSY_RETRY_WAKE_REASON,
@@ -433,6 +436,7 @@ import {
   applyDefaultIsolatedExecutionWorkspacePolicy,
   buildExecutionWorkspaceAdapterConfig,
   parseIssueAssigneeAdapterOverrides,
+  withoutFallbackEngineOverrides,
   gateProjectExecutionWorkspacePolicy,
   parseIssueExecutionWorkspaceSettings,
   parseProjectExecutionWorkspacePolicy,
@@ -957,6 +961,7 @@ export function heartbeatService(
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
     scheduleBoundedRetry,
+    handleUsageLimitFallbackAccountFailure,
   } = createHeartbeatRetries(db, {
     appendRunEvent,
     escalatePlanApprovalResumeFailureNeedsAttention,
@@ -1786,6 +1791,7 @@ export function heartbeatService(
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
+    handleUsageLimitFallbackAccountFailure,
     releaseIssueExecutionAndPromote,
     finalizeAgentStatus,
     enqueueWakeup,
@@ -1988,8 +1994,8 @@ export function heartbeatService(
     let identityRedactor = createAgentIdentityRedactor();
 
     try {
-      let agent = await getAgent(run.agentId);
-      if (!agent) {
+      const storedAgent = await getAgent(run.agentId);
+      if (!storedAgent) {
         await setRunStatus(runId, "failed", {
           error: "Agent not found",
           errorCode: "agent_not_found",
@@ -2003,6 +2009,8 @@ export function heartbeatService(
         if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
         return;
       }
+      // A usage-limit fallback run executes the fallback adapter, settings and AI connection; the agent row is unchanged.
+      let agent = effectiveAgentForRun(storedAgent, run);
 
       // The claimed adapter identity is immutable recovery evidence. Do not
       // execute a newly selected adapter under a previous adapter's claim.
@@ -2248,12 +2256,15 @@ export function heartbeatService(
                   : row;
               })
           : null;
-      let issueAssigneeOverrides =
+      const parsedIssueAssigneeOverrides =
         issueContext && issueContext.assigneeAgentId === agent.id
           ? parseIssueAssigneeAdapterOverrides(
               issueContext.assigneeAdapterOverrides,
             )
           : null;
+      let issueAssigneeOverrides = runUsageLimitLane(run) === "fallback"
+        ? withoutFallbackEngineOverrides(parsedIssueAssigneeOverrides, agent.adapterType)
+        : parsedIssueAssigneeOverrides;
       const experimentalInstanceSettings =
         await instanceSettings.getExperimental();
       const isolatedWorkspacesEnabled =
@@ -2562,6 +2573,19 @@ export function heartbeatService(
       const taskSessionDecodedParams = normalizeSessionParams(
         sessionCodec.deserialize(context.workspaceSelectionChanged ? null : taskSession?.sessionParamsJson ?? null),
       );
+      const resumeFromRunId = readNonEmptyString(context.resumeFromRunId);
+      if (resumeFromRunId && context.resumeSessionParams) {
+        const [resumeSource] = await db
+          .select({ runnerProfileJson: heartbeatRuns.runnerProfileJson })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, resumeFromRunId));
+        const resumeAdapterType = resumeSource ? claimedAdapterType(resumeSource) : null;
+        // Only the adapter that created a session can resume it; a usage-limit fallback can make them differ.
+        if (resumeAdapterType && resumeAdapterType !== agent.adapterType) {
+          delete context.resumeSessionParams;
+          delete context.resumeSessionDisplayId;
+        }
+      }
       const explicitResumeSessionParams = normalizeResumeParamsForAdapter(
         agent.adapterType,
         sessionCodec.deserialize(parseObject(context.resumeSessionParams)),
@@ -3505,7 +3529,7 @@ export function heartbeatService(
           adapterResult, runtimeServices,
         });
         await measureRunPhase("completion.run", () => runCompletion.completeRun({
-          run, agent, issueId, issueRef, signal: executionControl.controller.signal,
+          run, agent, storedAgent, issueId, issueRef, signal: executionControl.controller.signal,
           output: runOutput,
           session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
           readFailureReportSecrets,
@@ -3637,7 +3661,7 @@ export function heartbeatService(
         }
         if (!(await preserveNativeWorkspaceOnFailure())) return;
         await runCompletion.failRun({
-          run, agent, issueId, issueRef, signal: executionControl.controller.signal,
+          run, agent, storedAgent, issueId, issueRef, signal: executionControl.controller.signal,
           output: runOutput,
           session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
           readFailureReportSecrets,
@@ -3693,6 +3717,7 @@ export function heartbeatService(
       await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      let deferredFallbackRetry: DeferredUsageLimitFallbackRetry | undefined;
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
@@ -3896,6 +3921,17 @@ export function heartbeatService(
         if (adapterExecutionControls.get(run.id) === executionControl) {
           adapterExecutionControls.delete(run.id);
         }
+        deferredFallbackRetry = deferredUsageLimitFallbackRetries.get(run.id);
+        deferredUsageLimitFallbackRetries.delete(run.id);
+      }
+      if (deferredFallbackRetry) {
+        // The run still holds the task, so the retry takes it over before the release below.
+        await (latestRun
+          ? scheduleBoundedRetryForRun(latestRun, deferredFallbackRetry.agent, deferredFallbackRetry.opts)
+          : releaseIssueExecutionAndPromote(run)
+        ).catch(err => {
+          logger.error({ err, runId: run.id }, "failed to schedule the usage-limit fallback retry after cleanup");
+        });
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.

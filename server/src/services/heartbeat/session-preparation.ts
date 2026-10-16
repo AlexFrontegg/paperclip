@@ -229,7 +229,7 @@ export interface HeartbeatAdapterSessionInput {
     executionContinuation: TaskContext["executionContinuation"];
   };
   session: {
-    runtime: { sessionId: string | null };
+    runtime: { sessionId: string | null; adapterType: string };
     taskSession: TaskSession;
     sessionCodec: SessionCodec;
     explicitResumeSessionDisplayId: string | null;
@@ -253,7 +253,7 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
   const { sessionConfigMetadata, sessionConfigFreshness, resetTaskSession, taskSessionForRun, previousSessionParams } = prepared;
   const { latestWorkspaceConfigMetadata, workspaceConfigFreshness, reusedExecutionWorkspace, resolvedWorkspaceReusePolicy, persistedExecutionWorkspace, runtimeWorkspaceWarnings, requestedShouldReuseExisting, workspaceReuseRequest } = input.workspace;
   const runtimeSessionFallback =
-    taskKey || resetTaskSession
+    taskKey || resetTaskSession || runtime.adapterType !== agent.adapterType
       ? null
       : isCanonicalSessionIdForAdapter(agent.adapterType, runtime.sessionId)
         ? runtime.sessionId

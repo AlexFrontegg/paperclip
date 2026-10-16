@@ -29,6 +29,7 @@ import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publi
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
+import { readRunAdapterDispatch } from "../usage-limit-fallback.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
@@ -62,7 +63,8 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
     "finalizeIssueCommentPolicy" | "handleIssueReviewPathDisposition" | "handleRunLivenessContinuation" |
     "handleSuccessfulRunHandoff" | "updateRuntimeState">,
   Pick<ReturnType<typeof createHeartbeatRetries>,
-    "scheduleBoundedRetryForRun" | "scheduleInteractionContinuationInfrastructureRetryIfEligible" | "timerClaimWasFirstHeartbeat">,
+    "scheduleBoundedRetryForRun" | "scheduleInteractionContinuationInfrastructureRetryIfEligible" | "timerClaimWasFirstHeartbeat" |
+    "handleUsageLimitFallbackAccountFailure">,
   Pick<ReturnType<typeof createHeartbeatRunControl>, "releaseIssueExecutionAndPromote">,
   Pick<HeartbeatRetryDependencies, "finalizeAgentStatus">,
   Pick<ReturnType<typeof createHeartbeatQueue>, "enqueueWakeup"> {
@@ -96,6 +98,8 @@ interface RunCompletionSession {
 interface RunCompletionInput {
   run: Run;
   agent: Agent;
+  /** The stored agent row; `agent` runs the fallback's adapter on a usage-limit fallback run. */
+  storedAgent: Agent;
   issueId: string | null;
   issueRef: Pick<NonNullable<IssueContext>, "workMode" | "identifier" | "title"> | null;
   signal: AbortSignal;
@@ -365,6 +369,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     scheduleBoundedRetryForRun,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     timerClaimWasFirstHeartbeat,
+    handleUsageLimitFallbackAccountFailure,
     releaseIssueExecutionAndPromote,
     finalizeAgentStatus,
     enqueueWakeup,
@@ -379,7 +384,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   } = dependencies;
 
   async function completeRun(input: CompleteHeartbeatRunInput) {
-    const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
+    const { run, agent, storedAgent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
       providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
@@ -879,6 +884,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         }
       } else if (
         outcome === "failed" &&
+        await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent)
+      ) {
+        // The retry waits for the primary's reset, or runs on the fallback while the primary signs in again.
+      } else if (
+        outcome === "failed" &&
         readTransientRecoveryContractFromRun(livenessRun)
       ) {
         await scheduleBoundedRetryForRun(livenessRun, agent);
@@ -1019,6 +1029,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             lastError: runErrorMessage,
           });
         }
+        // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the
+        // handoff. Only a fallback run with positive evidence that no provider work started leaves it alone.
+        const dispatch = readRunAdapterDispatch(finalizedRun);
+        const fallbackStartedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
+        if (!fallbackStartedNoWork && dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
+          await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: dispatch.primaryAdapterType });
+        }
       }
     }
     await finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
@@ -1033,7 +1050,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   }
 
   async function failRun(input: FailHeartbeatRunInput) {
-    const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
+    const { run, agent, storedAgent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
       legacyAdapterEntered, goalCheckpointSession, previousSessionDisplayId, taskSession } = input;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const { handle, outputProgressState, flushOutputProgress } = output;
@@ -1202,6 +1219,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         livenessRun,
         agent,
       );
+      await handleUsageLimitFallbackAccountFailure(livenessRun, storedAgent).catch((fallbackError) => {
+        logger.warn({ err: fallbackError, runId: livenessRun.id }, "failed to apply the usage-limit fallback after adapter failure");
+      });
       await releaseIssueExecutionAndPromote(livenessRun, {
         // Native recovery owns the original heartbeat run through
         // exhaustion. Once its durable coordinator has classified a
@@ -1442,18 +1462,24 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             () => undefined,
           );
         }
+        const fallbackHandled = await handleUsageLimitFallbackAccountFailure(livenessRun, failedAgent).catch((fallbackError) => {
+          logger.warn({ err: fallbackError, runId: livenessRun.id }, "failed to apply the usage-limit fallback after setup failure");
+          return false;
+        });
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
-          ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
-          : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
-        ).catch((retryError) => {
-          logger.warn(
-            { err: retryError, runId: livenessRun.id },
-            "failed to schedule interaction continuation retry after setup failure",
-          );
-        });
+        if (!fallbackHandled) {
+          await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+            ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
+            : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
+          ).catch((retryError) => {
+            logger.warn(
+              { err: retryError, runId: livenessRun.id },
+              "failed to schedule interaction continuation retry after setup failure",
+            );
+          });
+        }
       }
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery:

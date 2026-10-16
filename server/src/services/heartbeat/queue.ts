@@ -151,6 +151,7 @@ import {
 } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
+import { resolveAdapterDispatchForClaim } from "../usage-limit-fallback.js";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 
 import type { HeartbeatServiceOptions } from "../heartbeat.js";
@@ -976,6 +977,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
     // Keep accepted work in the durable queue until setup completes.
     if (isAgentAwaitingSetup(agent)) return null;
+    const adapterDispatch = await resolveAdapterDispatchForClaim(db, agent, run, new Date());
     const invokability = companyAgents
       ? evaluateAgentInvokability(toAgentOrgRow(agent), companyAgents)
       : await getAgentInvokability(agent);
@@ -1365,7 +1367,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   .update(heartbeatRuns)
                   .set({
                     status: "running",
-                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1464,7 +1466,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 .update(heartbeatRuns)
                 .set({
                   status: "running",
-                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                   responsibleUserId,
                   startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1531,7 +1533,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : await withChatControlRecoveryGate(run, "claim", async (tx) => {
           const claimValues = {
             status: "running",
-            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
             ...legacyControllerClaim(run.runtimeMode),
             responsibleUserId,
             startedAt: run.startedAt ?? claimedAt,

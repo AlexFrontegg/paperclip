@@ -18,6 +18,7 @@ import { connectionIntentService } from "../connection-intents.js";
 import { prepareConnectionInstructionDelivery } from "../connection-instructions.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "../connector-runtime.js";
 import { githubGuestBotConnectionForSession } from "../chat-github-tools.js";
+import { readRunAdapterDispatch } from "../usage-limit-fallback.js";
 import { resolveManagedGitHubIdentitySelection } from "../git-credentials.js";
 import { resolveAssignedConnectionInstructionsForRun } from "../native-runtime/assigned-mcp-tools.js";
 import { recordFailedSkillPreparation, type NativeRunHistoricalSpan } from "../native-runtime/native-run-trace.js";
@@ -187,7 +188,8 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
         await finalizeAiConnectionBusyDeferral(run, error, !authorizedNonAssigneeWake);
         return { prepared: false as const };
       }
-      if (responsibleUserId && issueId) {
+      // A broken fallback account is suspended and repaired from the agent's settings, not from a sign-in card on the task.
+      if (responsibleUserId && issueId && readRunAdapterDispatch(run)?.lane !== "fallback") {
         await connectionIntentService(db).request({ sub: agent.id, company_id: agent.companyId, run_id: run.id, responsible_user_id: responsibleUserId }, aiBinding.provider, { purpose: "ai" }).catch(() => {
           logger.warn({ runId: run.id, agentId: agent.id }, "Could not attach AI connection request; runtime configuration action remains available");
         });
@@ -214,6 +216,10 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     for (const key of AI_AUTH_ENV_KEYS) secretKeys.add(key);
     context.aiConnection = { ...managedAiRuntime.attribution, accountName: managedAiRuntime.accountName, identity: managedAiRuntime.identity, sessionIdentity: managedAiRuntime.sessionIdentity };
     await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection, ...(context.aiRouterTaskKey ? { aiRouterTaskKey: context.aiRouterTaskKey } : {}), ...(context.aiRouterSelection ? { aiRouterSelection: context.aiRouterSelection } : {}) })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+  } else if (context.aiConnection && agent.runtimeConfig?.usageLimitFallback !== undefined) {
+    // The retry copied the other lane's account attribution; this run uses no managed account.
+    delete context.aiConnection;
+    await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) - 'aiConnection'` }).where(eq(heartbeatRuns.id, run.id));
   }
   if (secretManifest.length > 0) {
     context.paperclipSecrets = {

@@ -51,6 +51,7 @@ function callbacks(db: Db) {
     scheduleBoundedRetryForRun: vi.fn<Dependencies["scheduleBoundedRetryForRun"]>(),
     scheduleInteractionContinuationInfrastructureRetryIfEligible: vi.fn<Dependencies["scheduleInteractionContinuationInfrastructureRetryIfEligible"]>(async () => null),
     timerClaimWasFirstHeartbeat: vi.fn<Dependencies["timerClaimWasFirstHeartbeat"]>(() => undefined),
+    handleUsageLimitFallbackAccountFailure: vi.fn<Dependencies["handleUsageLimitFallbackAccountFailure"]>(async () => false),
     releaseIssueExecutionAndPromote: vi.fn<Dependencies["releaseIssueExecutionAndPromote"]>(async () => undefined),
     finalizeAgentStatus: vi.fn<Dependencies["finalizeAgentStatus"]>(async () => undefined),
     enqueueWakeup: vi.fn<Dependencies["enqueueWakeup"]>(),
@@ -97,7 +98,7 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     const deps = callbacks(db);
     const controller = new AbortController();
     const input: CompleteHeartbeatRunInput = {
-      run, agent, issueId: null, issueRef: null, signal: controller.signal,
+      run, agent, storedAgent: agent, issueId: null, issueRef: null, signal: controller.signal,
       output: { handle: { store: "local_file", logRef: "test-log" }, outputProgressState: { pending: { bytes: 7 } }, flushOutputProgress: vi.fn(async () => {}), stdoutExcerpt: "answer", stderrExcerpt: "diagnostic" },
       session: { runtimeForAdapter: { sessionId: null, sessionDisplayId: null }, previousSessionParams: null, taskKey: "completion-task", configuredModel: "test-model",
         sessionConfigMetadata: await buildEffectiveRunSessionConfigMetadata({ adapterType: agent.adapterType, effectiveAdapterConfig: {}, agentRuntimeConfig: {}, issueOverrides: null, workspaceConfig: null, environment: null, environmentEnv: null, projectEnv: null, routineEnv: null, runtimeSkills: [] }),

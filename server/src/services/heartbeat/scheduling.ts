@@ -13,6 +13,8 @@ import {
   type IssueExecutionMonitorRecoveryPolicy,
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
   isUuidLike,
+  isUsageLimitFallbackStateActive,
+  readUsageLimitFallbackConfig,
 } from "@paperclipai/shared";
 import {
   and,
@@ -50,6 +52,9 @@ import {
 import { logger } from "../../middleware/logger.js";
 import { failRunnerGoalAction } from "../runner-goals.js";
 import { evaluateAgentInvokability } from "../agent-invokability.js";
+import { executionRetryAttemptCount } from "../execution-recovery-attempt.js";
+import { readAgentUsageLimitFallbackState, runUsageLimitLane } from "../usage-limit-fallback.js";
+import { BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON } from "./retries.js";
 import type { Db } from "@paperclipai/db";
 import type { issueService } from "../issues.js";
 import type { createHeartbeatQueue } from "./queue.js";
@@ -665,11 +670,27 @@ export function createHeartbeatScheduling(
           const targetAgent = await getAgent(targetAgentId);
           if (!targetAgent)
             throw conflict("The quota recovery agent is unavailable.");
+          // The other lane takes this attempt even when the run's own retries are spent, because the work did not use them up:
+          // the fallback after recovery switched to it, or the primary once it is back after the fallback hit its own limit.
+          const fallbackState = await readAgentUsageLimitFallbackState(db, targetAgent.id);
+          const fallbackActive = isUsageLimitFallbackStateActive(fallbackState, input.now);
+          const otherLaneTakesOver = runUsageLimitLane(sourceRun) === "fallback"
+            ? !fallbackActive
+            : fallbackActive && !fallbackState?.suspendedReason && readUsageLimitFallbackConfig(targetAgent.runtimeConfig) !== null;
           const scheduled = await scheduleBoundedRetryForRun(
             sourceRun,
             targetAgent,
             {
               now: input.now,
+              ...(otherLaneTakesOver
+                ? {
+                    delayMs: 0,
+                    maxAttempts: Math.max(
+                      BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+                      executionRetryAttemptCount(sourceRun, BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) + 1,
+                    ),
+                  }
+                : {}),
               ...(isProviderQuotaReviewMonitor
                 ? {
                     retryReason:

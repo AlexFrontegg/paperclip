@@ -16,7 +16,10 @@ import type { Db } from "@paperclipai/db";
 import {
   type BillingType,
   type CostStatus,
+  readUsageLimitFallbackConfig,
+  USAGE_LIMIT_FALLBACK_STATE_KEY,
 } from "@paperclipai/shared";
+import { USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY } from "../usage-limit-fallback.js";
 import {
   agents,
   agentConfigRevisions,
@@ -139,6 +142,7 @@ const heartbeatRunListContextRecord = sql`lateral jsonb_to_record(
   "wakeSource" text, "wakeTriggerDetail" text)`;
 
 const heartbeatRunListContextColumns = {
+  dispatchedAdapterType: sql<string | null>`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
   contextIssueId: sql<string | null>`coalesce(
     ${heartbeatRuns.issueId}::text,
     run_context."issueId"
@@ -382,6 +386,7 @@ const heartbeatRunIssueSummaryColumns = {
   lastOutputStream: heartbeatRuns.lastOutputStream,
   lastOutputBytes: heartbeatRuns.lastOutputBytes,
   issueId: heartbeatRuns.issueId,
+  dispatchedAdapterType: sql<string | null>`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'adapterType'`.as("dispatchedAdapterType"),
 } as const;
 
 export type UsageTotals = {
@@ -1827,7 +1832,7 @@ export function createHeartbeatRunState(db: Db) {
       if (!agent) throw notFound("Agent not found");
       await ensureRuntimeState(agent);
       const taskKey = readNonEmptyString(opts?.taskKey);
-      const clearedTaskSessions = await clearTaskSessions(
+      const clearedPrimarySessions = await clearTaskSessions(
         agent.companyId,
         agent.id,
         taskKey
@@ -1838,18 +1843,26 @@ export function createHeartbeatRunState(db: Db) {
             }
           : undefined,
       );
+      // A usage-limit fallback on another adapter keeps its own session for the task, so the reset clears it too.
+      const fallbackAdapterType = readUsageLimitFallbackConfig(agent.runtimeConfig)?.adapterType;
+      const clearedFallbackSessions = taskKey && fallbackAdapterType && fallbackAdapterType !== agent.adapterType
+        ? await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: fallbackAdapterType, includeIssueAliases: true })
+        : 0;
+      const clearedTaskSessions = clearedPrimarySessions + clearedFallbackSessions;
       const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
         sessionId: null,
         lastError: null,
         updatedAt: new Date(),
       };
-      if (!taskKey) {
-        runtimePatch.stateJson = {};
-      }
+      // The usage-limit fallback and the last "Return to primary" are not sessions, so a full reset keeps them.
+      const keptFallbackState = sql`jsonb_strip_nulls(jsonb_build_object(
+        ${USAGE_LIMIT_FALLBACK_STATE_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY},
+        ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}
+      ))`;
 
       const updated = await db
         .update(agentRuntimeState)
-        .set(runtimePatch)
+        .set(taskKey ? runtimePatch : { ...runtimePatch, stateJson: keptFallbackState })
         .where(eq(agentRuntimeState.agentId, agentId))
         .returning()
         .then((rows) => rows[0] ?? null);

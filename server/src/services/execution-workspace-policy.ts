@@ -6,6 +6,7 @@ import type {
   ProjectExecutionWorkspacePolicy,
   SharedWorkspaceConcurrency,
 } from "@paperclipai/shared";
+import { USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS, usageLimitFallbackPermissionDefaults } from "@paperclipai/shared";
 import { asString, parseObject } from "../adapters/utils.js";
 
 export type ParsedExecutionWorkspaceMode = Exclude<ExecutionWorkspaceMode, "inherit" | "reuse_existing">;
@@ -416,6 +417,26 @@ export function parseIssueAssigneeAdapterOverrides(
     adapterConfig,
     useProjectWorkspace,
   };
+}
+
+/**
+ * The fallback keeps its own engine settings, since an issue's overrides of them were chosen for the primary's adapter.
+ * An issue that keeps permission checks still keeps them on the fallback.
+ */
+export function withoutFallbackEngineOverrides(
+  overrides: ParsedIssueAssigneeAdapterOverrides | null,
+  fallbackAdapterType: string,
+): ParsedIssueAssigneeAdapterOverrides | null {
+  if (!overrides?.adapterConfig) return overrides;
+  const remaining = {
+    ...Object.fromEntries(
+      Object.entries(overrides.adapterConfig).filter(([key]) => !USAGE_LIMIT_FALLBACK_ENGINE_CONFIG_KEYS.includes(key)),
+    ),
+    ...usageLimitFallbackPermissionDefaults(overrides.adapterConfig, fallbackAdapterType),
+  };
+  const adapterConfig = Object.keys(remaining).length > 0 ? remaining : null;
+  if (!adapterConfig && overrides.useProjectWorkspace === null) return null;
+  return { ...overrides, adapterConfig };
 }
 
 function parseSharedWorkspaceConcurrency(raw: unknown): SharedWorkspaceConcurrency | undefined {

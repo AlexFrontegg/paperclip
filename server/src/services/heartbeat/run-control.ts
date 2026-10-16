@@ -38,6 +38,7 @@ import {
 } from "../execution-blocker.js";
 import {
   CONVERSATION_CONTINUATION_POLICY,
+  claimedAdapterType,
   runUsedConversationAdapter,
   hasConversationContinuationPolicy,
 } from "../conversation-continuation.js";
@@ -114,6 +115,7 @@ import {
 import type { createHeartbeatRunState } from "./run-state.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
+import { deferredUsageLimitFallbackRetries } from "./retries.js";
 import type { createHeartbeatQueue } from "./queue.js";
 import type { createHeartbeatRecovery } from "./recovery.js";
 import type { createWakeQueue, PostCommitEffect as WakeQueuePostCommitEffect } from "../../modules/wake-queue/index.js";
@@ -689,6 +691,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
     options: { suppressImmediateRecovery?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] } = {},
   ) {
+    // A fallback retry waiting for this run's cleanup takes the task over from the run.
+    if (deferredUsageLimitFallbackRetries.has(run.id)) return;
     try {
       const source = await getRun(run.id);
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
@@ -1045,7 +1049,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 processGroupId: running.processGroupId,
                 // Codex handles Ctrl-C by cancelling its tool sessions. SIGTERM
                 // can leave commands in their separate process groups alive.
-                signal: !control && agent?.adapterType === "codex_local" ? "SIGINT" : undefined,
+                signal: !control && (claimedAdapterType(run) ?? agent?.adapterType) === "codex_local" ? "SIGINT" : undefined,
                 graceMs: cancellationTerminationGraceMs(
                   running.graceSec,
                   options.terminationGraceMs,
