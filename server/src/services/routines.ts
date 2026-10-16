@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { verifyAppWebhook } from "./app-webhook.js";
 import crypto from "node:crypto";
 import { verifyFirefliesWebhook } from "./fireflies-webhook.js";
@@ -253,8 +254,13 @@ function getZonedMinuteParts(date: Date, timeZone: string) {
   };
 }
 
-function matchesCronMinute(expression: string, timeZone: string, date: Date) {
-  const cron = parseCron(expression);
+function matchesCronMinute(cron: ReturnType<typeof parseCron>, timeZone: string, date: Date) {
+  if (timeZone === "UTC" && Number.isFinite(date.getTime()) && (
+    !cron.minutes.includes(date.getUTCMinutes())
+    || !cron.daysOfMonth.includes(date.getUTCDate())
+    || !cron.months.includes(date.getUTCMonth() + 1)
+    || !cron.daysOfWeek.includes(date.getUTCDay())
+  )) return false;
   const parts = getZonedMinuteParts(date, timeZone);
   return (
     cron.minutes.includes(parts.minute) &&
@@ -268,16 +274,18 @@ function matchesCronMinute(expression: string, timeZone: string, date: Date) {
 export function nextCronTickInTimeZone(expression: string, timeZone: string, after: Date) {
   const trimmed = expression.trim();
   assertTimeZone(timeZone);
-  const error = validateCron(trimmed);
-  if (error) {
-    throw unprocessable(error);
+  let cron: ReturnType<typeof parseCron>;
+  try {
+    cron = parseCron(trimmed);
+  } catch (error) {
+    throw unprocessable(error instanceof Error ? error.message : String(error));
   }
 
   const cursor = floorToMinute(after);
   cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
   const limit = 366 * 24 * 60 * 5;
   for (let i = 0; i < limit; i += 1) {
-    if (matchesCronMinute(trimmed, timeZone, cursor)) {
+    if (matchesCronMinute(cron, timeZone, cursor)) {
       return new Date(cursor.getTime());
     }
     cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
@@ -2230,6 +2238,7 @@ export function routineService(
       }
       const createdRoutine = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         const [created] = await txDb
           .insert(routines)
           .values({
@@ -2334,6 +2343,7 @@ export function routineService(
       }
       const updatedRoutine = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${id} for update`);
         const locked = await txDb
           .select()
@@ -2488,6 +2498,7 @@ export function routineService(
 
       const { trigger, revision } = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${routine.id} for update`);
         const [createdTrigger] = await txDb
           .insert(routineTriggers)
@@ -2562,6 +2573,7 @@ export function routineService(
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         const [updated] = await txDb
           .update(routineTriggers)
@@ -2601,6 +2613,7 @@ export function routineService(
       if (!existing) return { deleted: false, revision: null };
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         await txDb.delete(routineTriggers).where(eq(routineTriggers.id, id));
         const routine = await txDb
@@ -2719,6 +2732,7 @@ export function routineService(
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        await notifyDeliveryWork(txDb, DELIVERY_QUEUES.routineSchedules);
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existingRoutine.id} for update`);
         const locked = await txDb
           .select()

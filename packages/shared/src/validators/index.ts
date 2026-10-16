@@ -390,12 +390,14 @@ export {
   projectDiscoverySchema,
   createProjectSchema,
   updateProjectSchema,
+  addProjectAccessMemberSchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
   projectExecutionWorkspacePolicySchema,
   projectWorkspaceRuntimeConfigSchema,
   type CreateProject,
   type UpdateProject,
+  type AddProjectAccessMember,
   type CreateProjectWorkspace,
   type UpdateProjectWorkspace,
   type ProjectExecutionWorkspacePolicy,
@@ -433,10 +435,13 @@ export {
   updateIssueSchema,
   stalledReviewDecisionSchema,
   issueExecutionPolicySchema,
+  issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,
   resolveIssueRecoveryActionSchema,
+  isValidExistingBranchName,
   retryWorkspaceExportSchema,
+  resumeWorkspaceFinalizationSchema,
   issueReviewRequestSchema,
   issueExecutionWorkspaceSettingsSchema,
   checkoutIssueSchema,
@@ -711,7 +716,7 @@ export {
 } from "./routine.js";
 
 export {
-  createCostEventSchema,
+  createCostEventSchema, createServiceCostEventSchema,
   updateBudgetSchema,
   type CreateCostEvent,
   type UpdateBudget,
@@ -991,3 +996,6 @@ export * from "./email.js";
 export { restoreAgentInstructionSchema } from "./agent.js";
 
 export * from "./skill-source.js";
+export * from "./agent-commentary.js";
+export * from "./task-workspace.js";
+export * from "./workspace-repository.js";

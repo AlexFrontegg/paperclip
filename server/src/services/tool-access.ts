@@ -1,3 +1,10 @@
+import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
+import { assertProfileEntryInputs, assertProfileEntryShape } from "./tool-profile-entry-validation.js";
+import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
+import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
+import { notifyChatEndpointWork } from "./chat-work-notifications.js";
+import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
+import { chatEndpoints } from "@paperclipai/db";
 import { AGGREGATOR_NAMES, isAppAggregator, type AggregatorAppsResponse, type ArcadeDiscoverySetupInput } from "@paperclipai/shared/aggregator-apps";
 import { resolveAggregatorApp, type AppCatalogAggregator } from "@paperclipai/shared/aggregator-app-catalog";
 import { AggregatorDiscoveryUnavailableError, discoverArcadeApps, discoverExecutorApps, type DiscoveredApp } from "./aggregator-app-discovery.js";
@@ -7,6 +14,7 @@ import { composioAppAccounts, composioAppSetupResult } from "./composio-app-setu
 import { honchoManagedArguments } from "./honcho-connection.js";
 import { defaultConnectionAgentInstructions } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
+import { mcpDiscoveryHttpFailure, retainMcpConnectionFailure, withMcpConnectionFailure } from "./mcp-connection-failure.js";
 import { ASANA_CONNECTOR_SCOPES, isAsanaConnectorProfileId, type AsanaConnectorProfileId } from "@paperclipai/shared";
 import { BROWSER_USE_TOOLS } from "@paperclipai/shared";
 import { browserUseClient, isBrowserUseConnection } from "./browser-use-client.js";
@@ -249,6 +257,7 @@ import {
   profileIdsInBindingOrder,
 } from "./tool-profile-binding-precedence.js";
 import { assertGoogleChatToolArgumentsSupported, googleChatToolDescription, googleChatToolInputSchema } from "./google-chat-tool-policy.js";
+import { gmailArchiveToolDescription, gmailArchiveToolInputSchema } from "./gmail-archive-tool-policy.js";
 import {
   recordToolRuntimeAuditWriteFailure,
   TOOL_RUNTIME_AUDIT_WRITE_FAILURE_METRIC,
@@ -1373,6 +1382,7 @@ export function projectedConnectionToolInputSchema(
   const managed = honchoManagedArguments(connection, inputSchema);
   if (managed) inputSchema = stripManagedToolArgumentSchema(inputSchema, managed);
   inputSchema = googleChatToolInputSchema(connection, toolName, inputSchema);
+  inputSchema = gmailArchiveToolInputSchema(connection, toolName, inputSchema);
   const sourceTemplateKey =
     typeof connection.config.sourceTemplateKey === "string"
       ? connection.config.sourceTemplateKey
@@ -1767,7 +1777,11 @@ function toCatalogEntryForConnection(
       rawCatalogEntry.inputSchema ?? {},
       row.toolName,
     ),
-    description: googleChatToolDescription(connection, row.toolName, rawCatalogEntry.description),
+    description: gmailArchiveToolDescription(
+      connection,
+      row.toolName,
+      googleChatToolDescription(connection, row.toolName, rawCatalogEntry.description),
+    ),
   };
   if (
     connection.transport === "local_stdio" &&
@@ -2279,11 +2293,6 @@ function buildProfileDetails(input: {
   };
 }
 
-function stableHash(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(value, Object.keys(flattenKeys(value)).sort()))
-    .digest("hex");
-}
 
 function connectionSetupMutationFingerprint(
   row: typeof toolConnections.$inferSelect,
@@ -2304,20 +2313,6 @@ function connectionSetupMutationFingerprint(
   });
 }
 
-function flattenKeys(
-  value: unknown,
-  keys: Record<string, true> = {},
-): Record<string, true> {
-  if (value && typeof value === "object") {
-    for (const [key, nested] of Object.entries(
-      value as Record<string, unknown>,
-    )) {
-      keys[key] = true;
-      flattenKeys(nested, keys);
-    }
-  }
-  return keys;
-}
 
 function normalizeToolDescriptor(tool: unknown): McpToolDescriptor | null {
   const record = asRecord(tool);
@@ -2425,6 +2420,7 @@ export function classifyRisk(
   if (sourceTemplateKey === "browser-use-cloud") {
     return BROWSER_USE_TOOLS.find(t => t.name === tool.name)?.annotations.readOnlyHint ? "read" : "destructive";
   }
+  if (sourceTemplateKey === "daytona") return daytonaRisk(tool.name);
   if (sourceTemplateKey === "railway") {
     const reviewed = railwayRisk(normalizedToolName);
     return reviewed === "read" && (annotations.readOnlyHint === false || annotations.writeHint === true) ? "write" : reviewed;
@@ -2434,8 +2430,26 @@ export function classifyRisk(
   if (sourceTemplateKey === "fireflies" && [
     "fireflies-share-meeting", "fireflies-revoke-meeting-access", "fireflies-move-meeting",
   ].includes(normalizedToolName)) return "write";
+  // Enterpret's run_graph_query self-reports readOnlyHint: true, but Cypher is
+  // not a read-only language and live validation never established the tool as
+  // safe. Treat it as write so Ask-first defaults can restrict it.
+  if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
+    return "write";
+  // Gmail archive removes a system label. Keep it behind the archive method's
+  // destructive Ask-first default even when the preview provider omits hints.
+  if (sourceTemplateKey === "gmail" && normalizedToolName === "unlabel-thread")
+    return "destructive";
   if (sourceTemplateKey === "posthog" && normalizedToolName === "exec")
     return "destructive";
+  // Superagent mirrors its REST API, and several mutations use verbs the
+  // generic classifier reads as reads: billable triage_finding, scans,
+  // restore_agent_builtin_rule, and credential-revoking revoke_agent_client.
+  // Only list/get tools and tools the provider marks read-only are reads.
+  if (sourceTemplateKey === "superagent") {
+    if (verbMatches(tool.name, "delete|remove|destroy|revoke")) return "destructive";
+    if (annotations.readOnlyHint === false || annotations.writeHint === true) return "write";
+    return /^(list|get)-/.test(normalizedToolName) || annotations.readOnlyHint === true ? "read" : "write";
+  }
   if (
     sourceTemplateKey === "shopify" &&
     SHOPIFY_DESTRUCTIVE_TOOLS.has(normalizedToolName)
@@ -2476,6 +2490,7 @@ export function classifyRisk(
 export function isGmailToolPermanentlyBlocked(
   tool: McpToolDescriptor,
 ): boolean {
+  if (googleWorkspaceToolLeafName(tool.name) === "unlabel-thread") return false;
   const riskLevel = classifyRisk(tool, "gmail");
   return (
     verbMatches(
@@ -2580,6 +2595,12 @@ function managedConnectorProfile(value: string | undefined): {
   return null;
 }
 
+function gitHubRepositoryOwnerType(repository: Record<string, unknown>) {
+  const type = recordValue(repository.owner) ? repository.owner.type : undefined;
+  return type === "Organization" ? "organization" as const
+    : type === "User" ? "personal" as const : undefined;
+}
+
 export async function loadGitHubTokenRepositories(
   headers: Record<string, string>,
   request: typeof fetch = fetch,
@@ -2587,6 +2608,7 @@ export async function loadGitHubTokenRepositories(
   const repositories: Array<{
     id: string;
     fullName: string;
+    ownerType?: "personal" | "organization";
     private?: boolean;
   }> = [];
   for (let page = 1; ; page += 1) {
@@ -2623,6 +2645,7 @@ export async function loadGitHubTokenRepositories(
       repositories.push({
         id: githubId(row.id)!,
         fullName: row.full_name,
+        ...(gitHubRepositoryOwnerType(row) ? { ownerType: gitHubRepositoryOwnerType(row) } : {}),
         ...(typeof row.private === "boolean" ? { private: row.private } : {}),
       });
     }
@@ -2649,6 +2672,7 @@ export async function loadGitHubGrantMetadata(
     id: string;
     fullName: string;
     installationId: string;
+    ownerType?: "personal" | "organization";
     private?: boolean;
   }>;
   installationUrl: string;
@@ -2730,7 +2754,7 @@ export async function loadGitHubGrantMetadata(
   const managementUrls = new Set<string>();
   const repositories = new Map<
     string,
-    { id: string; fullName: string; installationId: string; private?: boolean }
+    { id: string; fullName: string; installationId: string; ownerType?: "personal" | "organization"; private?: boolean }
   >();
   for (const installation of installations) {
     const installationId = githubId(installation.id);
@@ -2780,6 +2804,7 @@ export async function loadGitHubGrantMetadata(
         id,
         fullName,
         installationId,
+        ...(gitHubRepositoryOwnerType(repository) ? { ownerType: gitHubRepositoryOwnerType(repository) } : {}),
         ...(typeof repository.private === "boolean"
           ? { private: repository.private }
           : {}),
@@ -2873,19 +2898,6 @@ function recordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function descriptorHash(
-  tool: McpToolDescriptor,
-  riskLevel: ToolRiskLevel,
-): string {
-  return stableHash({
-    name: tool.name,
-    title: tool.title ?? null,
-    description: tool.description ?? null,
-    inputSchema: tool.inputSchema ?? {},
-    annotations: tool.annotations ?? {},
-    riskLevel,
-  });
-}
 
 /**
  * Did this error come from the OAuth endpoint gate (PAP-17099)? Such a refusal
@@ -2915,6 +2927,7 @@ function healthFailureHttpStatus(failure: {
   if (failure.code === "oauth_challenge") return 422;
   if (failure.code === "oauth_refresh_missing") return 422;
   if (failure.code === "oauth_reauthorization_required") return 422;
+  if (failure.code === "oauth_insufficient_scope") return 422;
   if (failure.code === "slack_mcp_access_disabled") return 422;
   if (failure.code === "user_authorization_required") return 422;
   if (failure.code === "composio_broker_retired") return 422;
@@ -3694,7 +3707,7 @@ export function toolAccessService(
   function shouldQuarantineNewEntries(
     connection: typeof toolConnections.$inferSelect,
   ): boolean {
-    return asRecord(connection.config).quarantineNewEntries === true;
+    return isDaytonaConnection(connection) || asRecord(connection.config).quarantineNewEntries === true;
   }
 
   function isAttentionHealthStatus(
@@ -5904,21 +5917,7 @@ export function toolAccessService(
     companyId: string,
     input: CreateToolProfileEntryForProfile,
   ) {
-    if (input.selectorType === "application" && !input.applicationId) {
-      throw badRequest("Application profile entries require applicationId");
-    }
-    if (input.selectorType === "connection" && !input.connectionId) {
-      throw badRequest("Connection profile entries require connectionId");
-    }
-    if (input.selectorType === "catalog_entry" && !input.catalogEntryId) {
-      throw badRequest("Catalog-entry profile entries require catalogEntryId");
-    }
-    if (input.selectorType === "tool_name" && !input.toolName) {
-      throw badRequest("Tool-name profile entries require toolName");
-    }
-    if (input.selectorType === "risk_level" && !input.riskLevel) {
-      throw badRequest("Risk-level profile entries require riskLevel");
-    }
+    assertProfileEntryShape(input);
     if (input.applicationId)
       await assertApplication(companyId, input.applicationId);
     if (input.connectionId)
@@ -5949,7 +5948,38 @@ export function toolAccessService(
       previous: typeof connectionGrants.$inferSelect | null;
       current: typeof connectionGrants.$inferSelect;
     }) => void,
+    /**
+     * Scope provenance from the authorization that just completed, for the callers that have
+     * one. The default organization grant is created before OAuth has issued any credentials,
+     * so without this the grants API reads back a shared identity whose scope has no source
+     * and no over-grant warning — while the connection record carries both.
+     *
+     * Deliberately scope fields only. The shared grant takes its credential lifecycle from the
+     * connection, and writing `accessTokenExpiresAt` here would make an expired connection
+     * look fresh to the refresh-due check and skip the reconnect prompt.
+     */
+    oauthProvenance?: {
+      scopes: string[];
+      scopeSource: "provider" | "requested_fallback";
+      unrequestedScopes: string[];
+      requestedScopes: string[];
+    },
   ) {
+    const providerTenantWithOauth = (
+      current: (typeof connectionGrants.$inferSelect)["providerTenant"],
+    ) =>
+      oauthProvenance
+        ? {
+            ...(current ?? {}),
+            oauth: {
+              ...(current?.oauth ?? {}),
+              scopes: oauthProvenance.scopes,
+              scopeSource: oauthProvenance.scopeSource,
+              unrequestedScopes: oauthProvenance.unrequestedScopes,
+              requestedScopes: oauthProvenance.requestedScopes,
+            },
+          }
+        : current;
     const [existing] = await dbClient
       .select()
       .from(connectionGrants)
@@ -5976,6 +6006,9 @@ export function toolAccessService(
           credentialSecretRefs: isRailwayConnection(connection)
             ? [...connection.credentialSecretRefs, ...existing.credentialSecretRefs.filter((ref) => ref.configPath === RAILWAY_SSH_SECRET_PATH && !connection.credentialSecretRefs.some((candidate) => candidate.configPath === ref.configPath))]
             : connection.credentialSecretRefs,
+          ...(oauthProvenance
+            ? { providerTenant: providerTenantWithOauth(existing.providerTenant) }
+            : {}),
           status: "active",
           revokedAt: null,
           revokedByAgentId: null,
@@ -5996,6 +6029,9 @@ export function toolAccessService(
         connectionId: connection.id,
         kind: "organization",
         credentialSecretRefs: connection.credentialSecretRefs,
+        ...(oauthProvenance
+          ? { providerTenant: providerTenantWithOauth(null) }
+          : {}),
         status: "active",
         isDefault: true,
       })
@@ -6235,9 +6271,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     if (entries.length === 0) return;
     await db.insert(toolProfileEntries).values(
       entries.map((entry) => ({
@@ -6260,9 +6294,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     await db
       .delete(toolProfileEntries)
       .where(
@@ -6436,6 +6468,21 @@ export function toolAccessService(
     companyId?: string,
     actor?: ActorInfo,
   ): Promise<ToolConnectionRemovalResult> {
+    const connection = await getConnectionRow(connectionId, companyId);
+    const [endpoint] = await db.select().from(chatEndpoints).where(and(eq(chatEndpoints.connectionId, connection.id), eq(chatEndpoints.companyId, connection.companyId), eq(chatEndpoints.provider, "slack")));
+    if (!endpoint) return removeConnectionUnlocked(connectionId, companyId, actor);
+    return chatCredentialMutationLease(db)(endpoint, async lease => {
+      await db.transaction(async tx => {
+        await lease.assertOwned(tx);
+        await tx.update(chatEndpoints).set({ status: "archived", updatedAt: new Date() }).where(eq(chatEndpoints.id, endpoint.id));
+        await tx.update(toolConnections).set({ status: "archived", enabled: false, updatedAt: new Date() }).where(eq(toolConnections.id, connection.id));
+      });
+      await removeSlackRegistration(db, endpoint.id, lease);
+      return removeConnectionUnlocked(connectionId, companyId, actor);
+    });
+  }
+
+  async function removeConnectionUnlocked(connectionId: string, companyId?: string, actor?: ActorInfo): Promise<ToolConnectionRemovalResult> {
     const connection = await getConnectionRow(connectionId, companyId);
     forgetMcpHttpSessions(connection.id);
     const now = new Date();
@@ -7119,13 +7166,26 @@ export function toolAccessService(
     // PAP-17098 closed for the OAuth endpoints.
     let listRequestId = "paperclip-catalog-refresh";
     let sessionHeaders = headers;
-    const sendRemote = (init: RequestInit) => requestRemoteHttpEndpoint(new URL(endpoint), init);
+    const sendRemote = (init: RequestInit) => withMcpConnectionFailure(() => requestRemoteHttpEndpoint(new URL(endpoint), init));
     const sendToolsList = (requestHeaders: Record<string, string>, cursor?: string) => {
       sessionHeaders = requestHeaders;
       return sendRemote({ method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
         body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params: cursor ? { cursor } : {} }) });
     };
-    let usedInitializedSession = connection.config.mcpSessionRequired === true;
+    const connectionConfig = asRecord(connection.config);
+    const sourceTemplateKey = typeof connectionConfig?.sourceTemplateKey === "string"
+      ? connectionConfig.sourceTemplateKey
+      : null;
+    const connectionMethodKey = typeof connectionConfig?.connectionMethodKey === "string"
+      ? connectionConfig.connectionMethodKey
+      : null;
+    const curatedMethodRequiresMcpSession = Boolean(
+      sourceTemplateKey && connectionMethodKey &&
+      getConnectableAppDefinition(sourceTemplateKey)?.methods.some((method) =>
+        method.key === connectionMethodKey && method.defaults?.mcpSessionRequired === true
+      ),
+    );
+    let usedInitializedSession = connectionConfig?.mcpSessionRequired === true || curatedMethodRequiresMcpSession;
     let response: Response;
     if (usedInitializedSession) {
       try {
@@ -7170,7 +7230,7 @@ export function toolAccessService(
     }
     if (
       usedInitializedSession &&
-      connection.config.mcpSessionRequired !== true
+      connectionConfig?.mcpSessionRequired !== true
     ) {
       const nextConfig = { ...connection.config, mcpSessionRequired: true };
       await db
@@ -7322,14 +7382,12 @@ export function toolAccessService(
           oauthSupported: Boolean(endpoints),
         });
       }
-      throw new HttpError(502, `Remote app returned HTTP ${response.status}`, {
-        status: response.status,
-      });
+      throw mcpDiscoveryHttpFailure(response, `Remote app returned HTTP ${response.status}`);
     }
     const descriptors: McpToolDescriptor[] = [];
     const seenCursors = new Set<string>();
     for (let page = 0; ; page += 1) {
-      const payload = await readMcpHttpResponse(response, listRequestId);
+      const payload = await withMcpConnectionFailure(() => readMcpHttpResponse(response, listRequestId));
       const record = asRecord(payload);
       if (record.error) throw new HttpError(502, "Remote MCP tool discovery failed", { code: "mcp_catalog_error" });
       const result = asRecord(record.result);
@@ -7341,7 +7399,7 @@ export function toolAccessService(
       seenCursors.add(cursor);
       listRequestId = `paperclip-catalog-refresh-${page + 1}`;
       response = await sendToolsList(sessionHeaders, cursor);
-      if (!response.ok) throw new HttpError(502, "Remote MCP catalog page could not be read", { status: response.status });
+      if (!response.ok) throw mcpDiscoveryHttpFailure(response, "Remote MCP catalog page could not be read");
     }
     if (!isRailwayConnection(connection)) return descriptors;
     if (descriptors.some((tool) => normalizeRailwayToolName(tool.name).startsWith(RAILWAY_TOOL_PREFIX))) {
@@ -7460,6 +7518,11 @@ export function toolAccessService(
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
+    if (isDaytonaConnection(connection)) {
+      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
+      await daytonaClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), asRecord(connection.config.methodConfig).organizationId).probe();
+      return DAYTONA_TOOLS;
+    }
     if (isBrowserUseConnection(connection)) {
       const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
       await browserUseClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), connection.id).probe();
@@ -7615,7 +7678,7 @@ export function toolAccessService(
           });
         for (const grant of grantsToCheck)
           await refreshManagedGitHubGrantAccess(connection, grant, actor);
-      } else if (isBrowserUseConnection(connection)) {
+      } else if (isBrowserUseConnection(connection) || isDaytonaConnection(connection)) {
         await discoverTools(connection, undefined, actor);
       } else if (isAgentMailConnection(connection)) {
         await validateAgentMailConnection(connection);
@@ -7649,6 +7712,8 @@ export function toolAccessService(
         config.sourceTemplateKey === "github" &&
           oauth.connectorProfile === "github.code"
           ? "GitHub account, installation, and repository access are available."
+          : isDaytonaConnection(connection)
+            ? "Daytona API access is connected."
           : isBrowserUseConnection(connection)
             ? "Browser Use API key is connected."
           : isAgentMailConnection(connection)
@@ -7692,13 +7757,13 @@ export function toolAccessService(
         actor,
         details: { status: failure.status, transport: connection.transport },
       });
-      throw new HttpError(healthFailureHttpStatus(failure), failure.message, {
+      throw retainMcpConnectionFailure(error, new HttpError(healthFailureHttpStatus(failure), failure.message, {
         code: failure.code,
         connection: toConnection(updated),
         runtimeSlot,
         setupUrl: connectionSetupUrl(connection),
         reconnectUrl: connectionReconnectUrl(connection),
-      });
+      }));
     }
   }
 
@@ -7745,11 +7810,11 @@ export function toolAccessService(
         details: { status: failure.status },
         actor,
       });
-      throw new HttpError(healthFailureHttpStatus(failure), failure.message, {
+      throw retainMcpConnectionFailure(error, new HttpError(healthFailureHttpStatus(failure), failure.message, {
         code: failure.code,
         setupUrl: connectionSetupUrl(connection),
         reconnectUrl: connectionReconnectUrl(connection),
-      });
+      }));
     }
 
     const existingRows = await db
@@ -7759,11 +7824,13 @@ export function toolAccessService(
     const existingByName = new Map(
       existingRows.map((entry) => [entry.toolName, entry]),
     );
-    if (isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
+    const nativeDaytona = isDaytonaConnection(connection);
+    if (nativeDaytona || isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
       const discoveredNames = new Set(descriptors.map((descriptor) => descriptor.name));
-      const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== "disabled").map((entry) => entry.id);
+      const removedStatus = nativeDaytona ? "removed" : "disabled";
+      const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== removedStatus).map((entry) => entry.id);
       if (removedIds.length) await db.update(toolCatalogEntries)
-        .set({ status: "disabled", quarantineReason: "mcp_tool_removed", updatedAt: refreshedAt })
+        .set({ status: removedStatus, quarantineReason: nativeDaytona ? "provider_tool_removed" : "mcp_tool_removed", updatedAt: refreshedAt })
         .where(and(eq(toolCatalogEntries.companyId, connection.companyId), eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, removedIds)));
     }
     // Retired native actions are absent from discovery, but old catalog rows
@@ -7800,11 +7867,14 @@ export function toolAccessService(
       isGoogleWorkspaceConnectorProfileId(googleProfileValue)
         ? googleProfileValue
         : null;
+    const preserveReviewedCatalog =
+      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection)) &&
+      existingRows.length > 0;
     const quarantineOnRefresh =
-      (!refreshOptions.enableAllByDefault || (isRailwayEndpoint(connection.config.url) && existingRows.length > 0)) &&
+      (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
       (connection.status === "active" ||
-        (isRailwayEndpoint(connection.config.url) && existingRows.length > 0) ||
+        preserveReviewedCatalog ||
         sourceTemplateKey === "posthog" ||
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
@@ -7820,7 +7890,7 @@ export function toolAccessService(
         quarantineOnRefresh &&
         (!existing || changed) &&
         existing?.status !== "disabled" &&
-        (!safeDefault || riskLevel !== "read");
+        (!safeDefault || riskLevel !== "read" || nativeDaytona);
       const providerPermanentlyBlocked = Boolean(
         googleProfile &&
         !isGoogleWorkspaceToolAllowed(googleProfile, descriptor),
@@ -7900,12 +7970,14 @@ export function toolAccessService(
       }
     }
 
-    const normalizedConfig = isRailwayEndpoint(connection.config.url)
+    const preserveQuarantine =
+      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
+    const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.config, quarantineNewEntries: false }
       : connection.config;
-    const normalizedTransportConfig = isRailwayEndpoint(connection.config.url)
+    const normalizedTransportConfig = preserveQuarantine
       ? { ...connection.transportConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.transportConfig, quarantineNewEntries: false }
@@ -9012,6 +9084,74 @@ export function toolAccessService(
     return [];
   }
 
+  /**
+   * Decide what a token grant actually carries, keeping the provider's assertion separate from
+   * our own request.
+   *
+   * RFC 6749 §5.1 permits a provider to omit `scope` only when the grant is identical to the
+   * request, so reading the request as the grant is the specified fallback. A provider that
+   * over-grants *and* omits `scope` breaks that contract, and recording the request unmarked
+   * turns what we asked for into a confident-looking record of what we got. `scopeSource` keeps
+   * the two readable apart so nothing downstream can mistake an inference for an assertion.
+   *
+   * `unrequestedScopes` is only meaningful when we asked for something specific; with no
+   * requested scopes there is no baseline to compare against, so it stays empty rather than
+   * flagging every scope on connections that keep their scopes in provider-side app config.
+   *
+   * `previous` is the provenance already recorded for this grant. A refresh response that omits
+   * `scope` asserts nothing at all — least of all that a permission was taken away — so the
+   * earlier record is carried forward verbatim instead of being overwritten with a clean-looking
+   * inference. Only a fresh provider assertion replaces a recorded over-grant.
+   */
+  function resolveGrantedOauthScopes(input: {
+    tokenScope: unknown;
+    requestedScopes: unknown;
+    previous?: {
+      scopes?: unknown;
+      scopeSource?: unknown;
+      unrequestedScopes?: unknown;
+    };
+  }): {
+    scopes: string[];
+    scopeSource: "provider" | "requested_fallback";
+    unrequestedScopes: string[];
+  } {
+    const requested = normalizeOauthScopes(input.requestedScopes);
+    const asserted =
+      input.tokenScope === undefined || input.tokenScope === null
+        ? []
+        : normalizeOauthScopes(input.tokenScope);
+    if (asserted.length === 0) {
+      const previousScopes = normalizeOauthScopes(input.previous?.scopes);
+      const previousUnrequested = normalizeOauthScopes(
+        input.previous?.unrequestedScopes,
+      );
+      if (previousScopes.length > 0) {
+        return {
+          scopes: previousScopes,
+          scopeSource:
+            input.previous?.scopeSource === "provider"
+              ? "provider"
+              : "requested_fallback",
+          unrequestedScopes: previousUnrequested,
+        };
+      }
+      return {
+        scopes: requested,
+        scopeSource: "requested_fallback",
+        unrequestedScopes: previousUnrequested,
+      };
+    }
+    return {
+      scopes: asserted,
+      scopeSource: "provider",
+      unrequestedScopes:
+        requested.length === 0
+          ? []
+          : asserted.filter((scope) => !requested.includes(scope)),
+    };
+  }
+
   function isSmokeLabOAuthUrl(value: string | null | undefined) {
     if (!value) return false;
     try {
@@ -9862,8 +10002,15 @@ export function toolAccessService(
     );
 
     const host = new URL(input.redirectUri).host;
+    const clientNameHost = host
+      .replace(/[^A-Za-z0-9-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
     const requestedMetadata = {
-      client_name: `Paperclip (${host})`,
+      // Some DCR servers restrict client_name to alphanumeric characters,
+      // hyphens and spaces. Keep the deployment host recognizable without
+      // sending punctuation such as dots, colons or parentheses.
+      client_name: `Paperclip ${clientNameHost}`,
       redirect_uris: [input.redirectUri],
       grant_types: [
         "authorization_code",
@@ -10335,7 +10482,14 @@ export function toolAccessService(
         source: "preconfigured" as const,
       };
     }
-    const metadataDocumentUrl = input.endpoints
+    const method = input.galleryEntry
+      ? connectionMethodForConnection(input.galleryEntry, input.connection)
+      : null;
+    const dcrRequired = method?.oauthClientRegistration === "dcr";
+    // A reviewed provider compatibility choice may require DCR even when the
+    // server also advertises CIMD. Do not resolve/adopt a metadata URL for that
+    // method; the default for every other method remains CIMD-first.
+    const metadataDocumentUrl = !dcrRequired && input.endpoints
       .clientIdMetadataDocumentSupported
       ? await resolveOAuthClientIdMetadataDocumentUrl(
           input.redirectUri,
@@ -10394,6 +10548,12 @@ export function toolAccessService(
         },
       );
     }
+    if (dcrRequired && !input.endpoints.registrationUrl) {
+      throw unprocessable(
+        "This provider requires dynamic client registration, but its authorization server did not advertise a registration endpoint.",
+        { code: "oauth_dcr_not_supported" },
+      );
+    }
 
     const key = `${input.connection.id}:${input.redirectUri}`;
     return singleFlight(oauthRegistrationFlights, key, async () => {
@@ -10435,8 +10595,9 @@ export function toolAccessService(
           source: storedOAuthClientRegistrationSource(bound),
         };
       }
-      // 3. Client ID Metadata Documents: no registration call at all, so prefer
-      //    them over DCR when the authorization server advertises support.
+      // 3. By default, Client ID Metadata Documents need no registration call,
+      //    so prefer them over DCR when the authorization server advertises
+      //    support. Curated DCR opt-ins leave metadataDocumentUrl null above.
       if (metadataDocumentUrl) {
         const adopted = await adoptClientIdMetadataDocument({
           connection: latest,
@@ -10540,7 +10701,7 @@ export function toolAccessService(
     });
     const headers: Record<string, string> = {
       "content-type": "application/x-www-form-urlencoded",
-      // GitHub answers with a form-encoded body unless JSON is requested.
+      // Some providers otherwise return a legacy form-encoded token response.
       accept: "application/json",
     };
     if (tokenEndpointAuthMethod === "client_secret_basic") {
@@ -11770,6 +11931,27 @@ export function toolAccessService(
         const expiresAt = token.expiresIn
           ? new Date(Date.now() + token.expiresIn * 1000).toISOString()
           : null;
+        // A refresh carries no fresh authorization request, so the baseline stays what
+        // Paperclip asked for when *this* grant was authorized. Judging the response against
+        // the grant's own scopes instead would let an over-grant that the provider re-asserts
+        // on every refresh read back as clean, because the widened grant would have become
+        // its own baseline. The connection-level list is only a fallback for grants created
+        // before the per-grant baseline existed — it is whichever callback ran last, so on a
+        // connection two users authorized with different scopes it is the wrong baseline for
+        // at least one of them.
+        const refreshed = resolveGrantedOauthScopes({
+          tokenScope: token.scope,
+          requestedScopes:
+            grantOauth.requestedScopes ??
+            oauth.scopes ??
+            oauth.scope ??
+            grantOauth.scopes,
+          previous: {
+            scopes: grantOauth.scopes,
+            scopeSource: grantOauth.scopeSource,
+            unrequestedScopes: grantOauth.unrequestedScopes,
+          },
+        });
         const providerTenant = {
           ...(grant.providerTenant ?? {}),
           oauth: {
@@ -11779,9 +11961,9 @@ export function toolAccessService(
                 ? grantOauth.strategy
                 : "direct_oauth",
             accessTokenExpiresAt: expiresAt ?? undefined,
-            scopes: normalizeOauthScopes(
-              token.scope ?? grantOauth.scopes ?? oauth.scopes ?? oauth.scope,
-            ),
+            scopes: refreshed.scopes,
+            scopeSource: refreshed.scopeSource,
+            unrequestedScopes: refreshed.unrequestedScopes,
             tokenType: token.tokenType,
             refreshedAt: now().toISOString(),
           },
@@ -11832,6 +12014,11 @@ export function toolAccessService(
               oauth: {
                 expiresAt,
                 scope: token.scope ?? latestOauth.scope ?? null,
+                // Carry the same provenance the grant just recorded. Without it a connection
+                // read reverts to a bare scope with no source and no over-grant warning after
+                // the first ordinary refresh, while the grant read still has both.
+                scopeSource: refreshed.scopeSource,
+                unrequestedScopes: refreshed.unrequestedScopes,
                 tokenType: token.tokenType,
               },
             },
@@ -12726,16 +12913,32 @@ export function toolAccessService(
           sourceTemplateKey: galleryEntry.slug,
           connectionMethodKey: method?.key,
           methodConfig: normalizedMethodConfig?.values ?? {},
+          ...(method?.defaults?.mcpSessionRequired === true
+            ? { mcpSessionRequired: true }
+            : {}),
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: galleryEntry.slug === "railway",
+          quarantineNewEntries: ["railway", "enterpret", "daytona"].includes(galleryEntry.slug),
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
             mcpPreserveAccess: Boolean(retainedConnection && (retainedConnection.status === "active" || asRecord(retainedConnection.config).mcpPreserveAccess === true)),
           } : {}),
           ...(galleryEntry.slug === "posthog" ? { safeDefault: true } : {}),
+          // Telem.AI attributes each search to the Paperclip company, agent,
+          // run and issue, so its catalog connection forwards those context
+          // headers by default (the gateway still drops empty values). A
+          // reconnect keeps the policy the operator saved on the connection.
+          ...(galleryEntry.slug === "telem"
+            ? {
+                headerPolicy: asRecord(retainedConnection?.config).headerPolicy ?? {
+                  metadata: {
+                    forward: ["company_id", "issue_id", "agent_id", "run_id", "project_id", "correlation_id"],
+                  },
+                },
+              }
+            : {}),
         }
       : { ...baseConfig, quarantineNewEntries: false, unverifiedServer: true };
     if (method && isPaperclipCloudConnectorStrategy(method.oauthStrategy)) {
@@ -13057,7 +13260,7 @@ export function toolAccessService(
                 applicationKey: `app-gallery:${galleryEntry?.slug ?? "link"}:${randomUUID()}`,
                 name: applicationName,
                 description: safeApplicationDescription,
-                type: transport === "rest_api" && galleryEntry?.slug === "browser-use-cloud" ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+                type: transport === "rest_api" && ["browser-use-cloud", "daytona"].includes(galleryEntry?.slug ?? "") ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
                 status: "draft",
                 metadata: galleryEntry
                   ? {
@@ -15266,7 +15469,13 @@ export function toolAccessService(
         : suggestedAgentIds.length > 0
           ? { agentIds: suggestedAgentIds }
           : "all_agents";
-    const remoteMcpAccess = isRemoteMcpConnectorMethod(input.connection.config.sourceTemplateKey, input.connection.config.connectionMethodKey);
+    // An explicitly saved empty Access selection means no agents. A missing
+    // selection must still use managed OAuth's subject/recommended defaults.
+    const remoteMcpAccess = isRemoteMcpConnectorMethod(
+      input.connection.config.sourceTemplateKey,
+      input.connection.config.connectionMethodKey,
+    ) || (input.connection.transport === "mcp_remote"
+      && input.connection.config.mcpAgentAccessConfigured === true);
     const access: FinishToolApp["access"] = deferTaskAccess
       ? { agentIds: [] }
       : installs.length === 0
@@ -16218,6 +16427,10 @@ export function toolAccessService(
             nextCredentialSecretRefs.push(existingRefreshRef);
         }
 
+        const grantedScopes = resolveGrantedOauthScopes({
+          tokenScope: token.scope,
+          requestedScopes: authorizedScopes,
+        });
         const grantValues = {
           providerTenant: {
             ...(existingUserGrant?.providerTenant ?? {}),
@@ -16225,9 +16438,13 @@ export function toolAccessService(
               ...asRecord(asRecord(existingUserGrant?.providerTenant).oauth),
               strategy: "direct_oauth",
               accessTokenExpiresAt: expiresAt ?? undefined,
-              scopes: normalizeOauthScopes(
-                token.scope ?? authorizedScopes,
-              ),
+              scopes: grantedScopes.scopes,
+              scopeSource: grantedScopes.scopeSource,
+              unrequestedScopes: grantedScopes.unrequestedScopes,
+              // Per-grant, because two users can authorize the same connection with
+              // different scopes. The connection-level list is whichever callback ran last,
+              // so it is the wrong baseline for anyone else's refresh.
+              requestedScopes: authorizedScopes,
               tokenType: token.tokenType,
               refreshedAt: connectedAt.toISOString(),
             },
@@ -16285,6 +16502,8 @@ export function toolAccessService(
             oauth: {
               expiresAt,
               scope: token.scope,
+              scopeSource: grantedScopes.scopeSource,
+              unrequestedScopes: grantedScopes.unrequestedScopes,
               tokenType: token.tokenType,
             },
           },
@@ -16520,6 +16739,10 @@ export function toolAccessService(
         if (existingRefreshRef)
           nextCredentialSecretRefs.push(existingRefreshRef);
       }
+      const organizationGrantedScopes = resolveGrantedOauthScopes({
+        tokenScope: token.scope,
+        requestedScopes: authorizedScopes,
+      });
       const nextConfig = {
         ...connection.config,
         oauth: {
@@ -16545,7 +16768,13 @@ export function toolAccessService(
         },
         providerMetadata: {
           ...asRecord(connection.config.providerMetadata),
-          oauth: { expiresAt, scope: token.scope, tokenType: token.tokenType },
+          oauth: {
+            expiresAt,
+            scope: token.scope,
+            scopeSource: organizationGrantedScopes.scopeSource,
+            unrequestedScopes: organizationGrantedScopes.unrequestedScopes,
+            tokenType: token.tokenType,
+          },
         },
       };
       const [updatedConnection] = await tx
@@ -16583,7 +16812,12 @@ export function toolAccessService(
       // Synchronize it after every successful callback/rotation so all real tool
       // execution paths receive the credentials that setup and catalog discovery
       // just proved.
-      await ensureDefaultOrganizationGrant(connection, tx);
+      await ensureDefaultOrganizationGrant(connection, tx, undefined, {
+        scopes: organizationGrantedScopes.scopes,
+        scopeSource: organizationGrantedScopes.scopeSource,
+        unrequestedScopes: organizationGrantedScopes.unrequestedScopes,
+        requestedScopes: authorizedScopes,
+      });
       await syncCredentialBindings(connection, [], tx);
     });
     emitConnectionUpdated(
@@ -17997,7 +18231,7 @@ export function toolAccessService(
             companyId,
             applicationKey: normalizeKey(input.applicationName ?? input.name),
             name: input.applicationName ?? input.name,
-            type: isBrowserUseConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+            type: isBrowserUseConnection({ transport, config }) || isDaytonaConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
             status: "active",
             metadata: {},
           })
@@ -18730,12 +18964,26 @@ export function toolAccessService(
           );
         }
       }
+      const markMcpAccessConfigured = connection.transport === "mcp_remote"
+        && connection.config.mcpAgentAccessConfigured !== true;
       const accessExtensions: Array<{
         targetType: "company" | "agent";
         targetId: string;
         profileId: string;
       }> = [];
       await db.transaction(async (tx) => {
+        if (markMcpAccessConfigured) {
+          // Preserve an explicit zero-agent selection through OAuth. Merge the
+          // marker in SQL so concurrent credential/config changes are retained.
+          await tx.update(toolConnections).set({
+            config: sql`${toolConnections.config} || '{"mcpAgentAccessConfigured":true}'::jsonb`,
+            transportConfig: sql`${toolConnections.transportConfig} || '{"mcpAgentAccessConfigured":true}'::jsonb`,
+            updatedAt: now(),
+          }).where(and(
+            eq(toolConnections.companyId, connection.companyId),
+            eq(toolConnections.id, connection.id),
+          ));
+        }
         const existing = await tx
           .select()
           .from(toolConnectionInstalls)
@@ -18844,7 +19092,7 @@ export function toolAccessService(
               });
           }
         }
-        if (removeIds.length > 0 || additions.length > 0) {
+        if (markMcpAccessConfigured || removeIds.length > 0 || additions.length > 0) {
           const binding = actorBinding(actor);
           await tx.insert(toolAccessAuditEvents).values({
             companyId: connection.companyId,
@@ -18855,6 +19103,7 @@ export function toolAccessService(
             outcome: "success",
             reasonCode: "installs_changed",
             details: {
+              ...(markMcpAccessConfigured ? { mcpAgentAccessConfigured: true } : {}),
               added: additions.map((install) => ({
                 targetType: install.targetType,
                 targetId: install.targetId,
@@ -18918,7 +19167,7 @@ export function toolAccessService(
         ...(input.credentialRefs ?? existing.credentialRefs),
         ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
       ]);
-      const [row] = await db
+      const write = (database: Db) => database
         .update(toolConnections)
         .set({
           name: input.name ?? existing.name,
@@ -18937,7 +19186,17 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connectionId))
         .returning();
-      await syncCredentialBindings(row);
+      const [row] = existing.transport === "chat_sdk"
+        ? await db.transaction(async tx => {
+            await notifyChatEndpointWork(tx, existing.id);
+            const rows = await write(tx as unknown as Db);
+            // Credential resolution must never observe the binding rebuild's
+            // delete/insert gap after a configuration wake.
+            await syncCredentialBindings(rows[0]!, [], tx);
+            return rows;
+          })
+        : await write(db);
+      if (existing.transport !== "chat_sdk") await syncCredentialBindings(row);
       await ensureRuntimeSlot(row);
       emitConnectionUpdated(row, existing, "api");
       return toConnection(row);
@@ -18994,6 +19253,7 @@ export function toolAccessService(
     listCatalog: async (
       connectionId: string,
       companyId?: string,
+      actor?: ActorInfo,
     ): Promise<ToolCatalogEntry[]> => {
       const connection = await getConnectionRow(connectionId, companyId);
       let rows = await db
@@ -19001,17 +19261,29 @@ export function toolAccessService(
         .from(toolCatalogEntries)
         .where(eq(toolCatalogEntries.connectionId, connection.id))
         .orderBy(desc(toolCatalogEntries.updatedAt));
-      const cacheExpired =
+      // Native provider catalogs change with the deployed code. Upgrade saved
+      // Daytona connections too; their first small catalog must not survive
+      // merely because REST discovery has no remote MCP cache timer.
+      const nativeDaytona = isDaytonaConnection(connection);
+      const rowsByName = new Map(rows.map((row) => [row.toolName, row]));
+      const daytonaCatalogChanged = nativeDaytona && connection.status === "active" && (
+        rows.some((row) => row.status !== "removed" && !isDaytonaToolName(row.toolName))
+        || DAYTONA_TOOLS.some((tool) => {
+          const existing = rowsByName.get(tool.name);
+          return !existing || existing.versionHash !== descriptorHash(tool, daytonaRisk(tool.name));
+        })
+      );
+      const cacheExpired = daytonaCatalogChanged || (
         connection.transport === "mcp_remote" &&
         connection.status !== "archived" &&
         (rows.length === 0 ||
           !connection.lastCatalogRefreshAt ||
           connection.lastCatalogRefreshAt.getTime() <=
-            now().getTime() - catalogCacheTtlMs);
+            now().getTime() - catalogCacheTtlMs));
       if (cacheExpired) {
         try {
           await singleFlight(catalogRefreshFlights, connection.id, () =>
-            refreshCatalog(connection.id, {
+            refreshCatalog(connection.id, nativeDaytona && actor ? actor : {
               actorType: "system",
               actorId: "tool_catalog_cache",
             }),
@@ -19028,7 +19300,11 @@ export function toolAccessService(
           if (rows.length === 0) throw error;
         }
       }
-      return rows.map((row) => toCatalogEntryForConnection(row, connection));
+      // Even failed discovery must not keep retired native tools visible.
+      // Their database rows remain available to historical invocation records.
+      return rows
+        .filter((row) => !nativeDaytona || (row.status !== "removed" && isDaytonaToolName(row.toolName)))
+        .map((row) => toCatalogEntryForConnection(row, connection));
     },
 
     /** Recent tool-call events for one connection — drives App detail · Recent activity. */
@@ -19465,9 +19741,7 @@ export function toolAccessService(
       companyId: string,
       input: CreateToolProfileWithEntries,
     ): Promise<ToolProfileWithDetails> => {
-      for (const entry of input.entries ?? []) {
-        await assertProfileEntryInput(companyId, entry);
-      }
+      await assertProfileEntryInputs(db, companyId, input.entries ?? []);
       const [row] = await db
         .insert(toolProfiles)
         .values({
@@ -19496,9 +19770,7 @@ export function toolAccessService(
     ): Promise<ToolProfileWithDetails> => {
       const existing = await getProfileRow(profileId);
       if (input.entries) {
-        for (const entry of input.entries) {
-          await assertProfileEntryInput(existing.companyId, entry);
-        }
+        await assertProfileEntryInputs(db, existing.companyId, input.entries);
       }
       await db
         .update(toolProfiles)
@@ -20043,6 +20315,7 @@ export function toolAccessService(
         input.connectionId,
         input.companyId,
       );
+      if (isDaytonaConnection(connection)) throw forbidden("Daytona credentials stay in the governed tool gateway and cannot be exported.");
       if (isBrowserUseConnection(connection)) throw forbidden("Browser Use credentials stay in the governed tool gateway and cannot be exported.");
       if (connection.connectionPurpose === "ai") throw unprocessable("AI credentials are available only through the runtime resolver");
       const application = await getConnectionApplication(connection);

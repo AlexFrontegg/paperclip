@@ -65,6 +65,7 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
         instructions: "Stay inside the test workspace.".to_owned(),
         approval_policy: "never".to_owned(),
         externally_sandboxed: false,
+        read_only: false,
         include_skill_instructions: None,
         conversation_mode: None,
     }
@@ -5561,11 +5562,20 @@ fn receipt_limit_synthesizes_interrupted_after_an_accepted_terminal_deadline() {
             .expect("read bounded receipt-limit state"),
     )
     .expect("parse bounded receipt-limit state");
-    assert_eq!(persisted["lifecycle"], "provider_exited");
+    assert_eq!(persisted["lifecycle"], "closed");
     assert!(persisted["activeProviderTurnId"].is_null());
     assert_eq!(persisted["receiptLimitInterruptPending"], false);
     assert_eq!(persisted["receiptLimitInterruptAttempts"], 0);
     assert!(persisted["receiptLimitInterruptDeadlineUnixMs"].is_null());
+
+    let resume_calls = call_count(&directory, "thread/resume");
+    poll_and_ack(&mut recovered).expect("closed fallback stays pollable");
+    let mut reconnected = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    poll_and_ack(&mut reconnected).expect("closed fallback stays pollable after reconnect");
+    assert_eq!(call_count(&directory, "thread/resume"), resume_calls);
+    reconnected
+        .shutdown()
+        .expect("closed reconnect has no provider to stop");
 
     recovered
         .shutdown()

@@ -28,6 +28,7 @@ import { logger } from "./logger.js";
 import { captureRunIdentity } from "../services/run-identity.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { beginIdleTrackedWork } from "../services/task-admission.js";
 
 export {
   isTransientDbConnectionError,
@@ -165,6 +166,18 @@ async function auditAgentJwtRunHeaderMismatch(
   input: { companyId: string; agentId: string; claimRunId: string; headerRunId: string; method: string; url: string },
 ) {
   try {
+    // The claimed run id is untrusted input from a rejected token. activity_log
+    // .run_id is a real FK to heartbeat_runs, so writing it unconditionally
+    // makes the insert fail — and the catch swallows it — exactly when the
+    // claim is bogus. Keep the claim in entityId/details and populate the FK
+    // column only when the row actually exists.
+    const claimedRunExists = isUuidLike(input.claimRunId)
+      ? await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, input.claimRunId))
+          .then((rows) => rows.length > 0)
+      : false;
     await db.insert(activityLog).values({
       companyId: input.companyId,
       actorType: "agent",
@@ -173,7 +186,7 @@ async function auditAgentJwtRunHeaderMismatch(
       entityType: "heartbeat_run",
       entityId: input.claimRunId,
       ...(isUuidLike(input.agentId) ? { agentId: input.agentId } : {}),
-      ...(isUuidLike(input.claimRunId) ? { runId: input.claimRunId } : {}),
+      ...(claimedRunExists ? { runId: input.claimRunId } : {}),
       details: {
         claimRunId: input.claimRunId,
         headerRunId: input.headerRunId,
@@ -226,7 +239,7 @@ const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
-  return async (req, _res, next) => {
+  const authenticate: RequestHandler = async (req, _res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -500,6 +513,22 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     };
 
     next();
+  };
+  return async (req, res, next) => {
+    // Health and task-drain requests bypass tenant admission, but resolving
+    // their actor can still write users, companies, memberships and key usage.
+    // Finish all authentication before entering the next handler: the report
+    // must count concurrent authentication, without counting its own auth.
+    const finish = beginIdleTrackedWork();
+    let continueRequest: (() => void) | undefined;
+    try {
+      await authenticate(req, res, (error?: unknown) => {
+        continueRequest = () => next(error);
+      });
+    } finally {
+      finish();
+    }
+    continueRequest?.();
   };
 }
 
