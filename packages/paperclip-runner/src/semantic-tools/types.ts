@@ -19,6 +19,7 @@ export type CapabilitySemanticOperationId =
   | "search_api"
   | "call_api"
   | "set_task_title"
+  | "set_task_monitor"
   | "get_task_context"
   | "get_task_history"
   | "list_documents"
@@ -48,6 +49,10 @@ export type CapabilitySemanticOperationId =
   | "set_dependencies"
   | "create_skill"
   | "update_skill"
+  | "get_workspace"
+  | "list_workspaces"
+  | "select_workspace"
+  | "prepare_repository"
   | "create_project"
   | "list_project_repositories"
   | "list_projects"
@@ -56,6 +61,8 @@ export type CapabilitySemanticOperationId =
   | "decide_approval"
   | "comment_on_approval"
   | "schedule_wake"
+  | "submit_complaint"
+  | "submit_suggestion"
   | "generic_api_request";
 
 export interface CapabilityJsonSchema {
