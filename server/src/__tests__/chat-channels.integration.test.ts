@@ -2726,6 +2726,143 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const { task } = await openPullRequest(f, 96, { id: 92, login: "viewer" });
       expect(task.sourceTrust).toBeNull();
     });
+    it("keeps bot-only GitHub access when a linked member outside the selected list comments as a reviewed author", async () => {
+      const f = await reviewBotFixture();
+      const now = new Date();
+      await db.insert(authUsers).values({ id: "teammate-user", name: "Teammate", email: `teammate-${f.companyId}@example.com`, emailVerified: true, createdAt: now, updatedAt: now });
+      await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: "teammate-user", status: "active", membershipRole: "operator" });
+      const [principal] = await db.insert(chatExternalPrincipals).values({
+        companyId: f.companyId, provider: "github", providerAccountId: f.endpoint.providerAccountId!, externalId: "94",
+        kind: "user", displayName: "Teammate", handle: "teammate", isBot: false,
+      }).returning();
+      await db.insert(chatIdentityLinks).values({ companyId: f.companyId, endpointId: f.endpoint.id, principalId: principal.id, paperclipUserId: "teammate-user", status: "linked", confirmedAt: now });
+      const initial = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(f.endpoint.id, {
+        expectedRevision: initial.revision,
+        configuration: {
+          ...initial.configuration,
+          memberAccess: "selected",
+          people: [{ kind: "member", githubUserId: "42", login: "octocat", userId: "owner-user", automaticReviews: true }],
+          reviewedAuthors: [{ githubUserId: "94", login: "teammate" }],
+        },
+      }, "owner-user");
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:122", name: "paperclipai/paperclip" }).thread,
+        message: makeMessage({ id: "122001", text: "@bot is this finding still valid?", mentioned: true, userId: "94", userName: "teammate" }),
+        trigger: "mention",
+      });
+      await expect.poll(async () => (await f.service.listConversations(f.endpoint.id)).length, { timeout: 10000 }).toBe(1);
+      const deliveries = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id));
+      const delivery = deliveries.find((row) => row.providerEventId.endsWith(":122001"));
+      // The commenter's own membership must not unlock personal GitHub credentials.
+      expect(delivery?.normalizedEvent.githubAuthority).toMatchObject({ guest: true, responsibleUserId: "owner-user" });
+    });
+    it("lets a reviewed author talk to the bot in pull request conversations until removed", async () => {
+      const f = await reviewBotFixture();
+      await f.service.update(f.endpoint.id, { allowUnlinkedPeople: false }, "owner-user");
+      const saved = await addReviewedAuthor(f, "91", "teammate");
+      // The responsible member's personal GitHub grant must never reach a run a reviewed author started.
+      const applicationId = randomUUID();
+      const githubConnectionId = randomUUID();
+      await db.insert(toolApplications).values({ id: applicationId, companyId: f.companyId, name: applicationId, type: "mcp_http" });
+      await db.insert(toolConnections).values({
+        id: githubConnectionId, companyId: f.companyId, applicationId, name: "GitHub", uid: githubConnectionId,
+        transport: "mcp_remote", status: "active", enabled: true, credentialPolicy: "per_user", config: { sourceTemplateKey: "github" },
+      });
+      await db.insert(toolConnectionInstalls).values({ companyId: f.companyId, connectionId: githubConnectionId, targetType: "agent", targetId: f.assignedAgentId });
+      await db.insert(connectionGrants).values({
+        companyId: f.companyId, connectionId: githubConnectionId, kind: "user", subjectUserId: "owner-user", status: "active",
+        credentialSecretRefs: [{ secretId: randomUUID(), configPath: "oauth.access_token", versionSelector: "latest" }],
+        providerTenant: { github: { userId: "5", login: "owner", installationCount: 1, repositoryCount: 1, repositorySelection: "selected", installationIds: ["1"], installationOwnerLogins: ["owner"] } },
+      });
+      const send = (threadId: string, messageId: string, text: string) =>
+        deliverMessage({
+          callbacks: f.callbacks,
+          endpointId: f.endpoint.id,
+          provider: "github",
+          thread: makeThread({ channelId: "paperclipai/paperclip", id: threadId, name: "paperclipai/paperclip" }).thread,
+          message: makeMessage({ id: messageId, text, mentioned: true, userId: "91", userName: "teammate" }),
+          trigger: "mention",
+        });
+      const deliveryFor = async (messageId: string) =>
+        (await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id)))
+          .find((delivery) => delivery.providerEventId.endsWith(`:${messageId}`));
+
+      await send("github:paperclipai/paperclip:issue:120", "120001", "@bot please triage this issue");
+      await expect.poll(async () => (await deliveryFor("120001"))?.state, { timeout: 10000 }).toBe("filtered");
+      expect(await f.service.listConversations(f.endpoint.id)).toEqual([]);
+
+      await send("github:paperclipai/paperclip:121", "121001", "@bot why is this finding a bug?");
+      await expect.poll(async () => (await f.service.listConversations(f.endpoint.id)).length, { timeout: 10000 }).toBe(1);
+      const [conversation] = await f.service.listConversations(f.endpoint.id);
+      const [task] = await db.select().from(issues).where(eq(issues.id, conversation!.issueId!));
+      expect(task.responsibleUserId).toBe("owner-user");
+      expect(task.sourceTrust).toBeNull();
+      expect((await deliveryFor("121001"))?.normalizedEvent.githubAuthority).toMatchObject({ guest: true, responsibleUserId: "owner-user" });
+      // The reply must actually wake the agent, not only reach the task.
+      const replyDeliveryId = (await deliveryFor("121001"))!.id;
+      await expect.poll(async () => (await db.select().from(chatActions).where(and(
+        eq(chatActions.endpointId, f.endpoint.id),
+        eq(chatActions.kind, "inbound_wakeup"),
+        eq(chatActions.deliveryId, replyDeliveryId),
+      )))[0]?.status, { timeout: 10000 }).toBe("processed");
+      expect(f.wakeup).toHaveBeenCalled();
+
+      const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
+      // A member's later comment can merge into the same run; the run must stay bot-only.
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:121", name: "paperclipai/paperclip" }).thread,
+        message: makeMessage({ id: "121003", text: "@bot please also check the tests", mentioned: true, userId: "42", userName: "octocat" }),
+        trigger: "mention",
+      });
+      await expect.poll(async () => (await deliveryFor("121003"))?.state, { timeout: 10000 }).toBe("processed");
+      const memberLink = (await db.select().from(chatMessageLinks).where(eq(chatMessageLinks.endpointId, f.endpoint.id)))
+        .find((link) => link.providerMessageId === "121003")!;
+      const runFor = async (wakeCommentIds: string[]) => {
+        const [mergedRun] = await db.insert(heartbeatRuns).values({
+          companyId: f.companyId,
+          agentId: f.assignedAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId: task.id, wakeCommentIds, wakeCommentId: wakeCommentIds.at(-1) },
+        }).returning();
+        return githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: mergedRun.id, issueId: task.id });
+      };
+      expect(await runFor([comment.id, memberLink.commentId!])).not.toBeNull();
+      expect(await runFor([memberLink.commentId!])).toBeNull();
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: task.id, wakeCommentId: comment.id },
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }))
+        .toMatchObject({ reason: "No managed GitHub identity is available for this run" });
+      const readMetadataError = () => githubChatReviewService(db, f.providerFetch).execute({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        issueId: task.id,
+        runId: run.id,
+      }, "read_pull_request", { section: "metadata" }).then(() => "", (error: Error) => error.message);
+      expect(await readMetadataError()).not.toContain("no longer authorized");
+
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: saved.revision, configuration: { ...saved.configuration, reviewedAuthors: [] } },
+        "owner-user",
+      );
+      expect(await readMetadataError()).toContain("The initiating GitHub person is no longer authorized");
+      await send("github:paperclipai/paperclip:121", "121002", "@bot one more question");
+      await expect.poll(async () => (await deliveryFor("121002"))?.state, { timeout: 10000 }).toBe("filtered");
+    });
     it("supersedes a late review projection after its check already rejected the old head", async () => {
       const f = await reviewBotFixture();
       const deliveryId = randomUUID();

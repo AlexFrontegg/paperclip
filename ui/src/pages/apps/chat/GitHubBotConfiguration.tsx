@@ -643,7 +643,7 @@ export function GitHubAccessEditor({
           <p className="text-sm">
             {kind === "guest"
               ? "Allow one GitHub account to mention the bot with restricted guest permissions. A sponsor is required."
-              : "Review every pull request from one GitHub account automatically. The account needs no Paperclip access and cannot mention or control the bot."}
+              : "Review every pull request from one GitHub account automatically, and let it mention or reply to the bot in pull requests. The account needs no Paperclip access and cannot use the bot in issues."}
           </p>
           <div className="space-y-2">
             <Label htmlFor="github-guest-login">GitHub username</Label>
@@ -733,11 +733,13 @@ export function GitHubAccessEditor({
         <h3 className="text-sm font-medium">Reviewed authors</h3>
         <p className="text-xs text-muted-foreground">
           Pull requests from these GitHub accounts get automatic reviews under
-          the responsible user, without the guest sandbox. Add only people you
-          trust, because their pull request content drives the review. Reviews
-          never use a person&apos;s or the server&apos;s GitHub credentials,
-          and tools stay limited to this bot&apos;s connection. Removing an
-          account stops new reviews and bot tool calls right away.
+          the responsible user, without the guest sandbox. These accounts can
+          also mention or reply to the bot in any pull request, but not in
+          issues. Add only people you trust, because their pull requests and
+          comments drive the agent. This work never uses a person&apos;s or the
+          server&apos;s GitHub credentials, and tools stay limited to this
+          bot&apos;s connection. Removing an account stops new reviews, replies
+          and bot tool calls right away.
         </p>
         {reviewedAuthors.length === 0 && (
           <p className="text-sm text-muted-foreground">No reviewed authors.</p>

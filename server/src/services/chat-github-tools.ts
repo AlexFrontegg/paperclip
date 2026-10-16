@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { githubReviewAssessmentSchema } from "@paperclipai/shared";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import {
   chatDeliveries,
   chatMessageLinks,
@@ -373,7 +373,11 @@ export async function githubGuestBotConnectionForSession(
 ): Promise<string | null> {
   if (!session.runId || !session.agentId || !session.issueId) return null;
   const [run] = await db
-    .select({ wakeCommentId: runContextSnapshotString("wakeCommentId") })
+    .select({
+      wakeCommentId: runContextSnapshotString("wakeCommentId"),
+      // Read only the ids; the full snapshot can carry task text.
+      wakeCommentIds: sql<unknown>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds') = 'array' then ${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds' end`,
+    })
     .from(heartbeatRuns)
     .where(
       and(
@@ -382,43 +386,52 @@ export async function githubGuestBotConnectionForSession(
         eq(heartbeatRuns.id, session.runId),
       ),
     );
-  const sources = await db
-    .select({
-      event: chatDeliveries.normalizedEvent,
-      connectionId: chatEndpoints.connectionId,
-      commentId: chatMessageLinks.commentId,
-    })
-    .from(chatMessageLinks)
-    .innerJoin(
-      chatDeliveries,
-      eq(chatDeliveries.id, chatMessageLinks.deliveryId),
-    )
-    .innerJoin(
-      chatConversations,
-      eq(chatConversations.id, chatMessageLinks.conversationId),
-    )
-    .innerJoin(
-      chatEndpoints,
-      eq(chatEndpoints.id, chatConversations.endpointId),
-    )
-    .where(
-      and(
-        eq(chatMessageLinks.companyId, session.companyId),
-        eq(chatMessageLinks.direction, "inbound"),
-        eq(chatConversations.issueId, session.issueId),
-        eq(chatEndpoints.assignedAgentId, session.agentId),
-        eq(chatEndpoints.provider, "github"),
+  const sponsoredFlag = sql`${chatDeliveries.normalizedEvent}->'githubAuthority'->>'guest' = 'true'`;
+  const firstSource = (condition: SQL) =>
+    db
+      .select({
+        sponsored: sql<boolean>`coalesce(${sponsoredFlag}, false)`,
+        connectionId: chatEndpoints.connectionId,
+      })
+      .from(chatMessageLinks)
+      .innerJoin(
+        chatDeliveries,
+        eq(chatDeliveries.id, chatMessageLinks.deliveryId),
+      )
+      .innerJoin(
+        chatConversations,
+        eq(chatConversations.id, chatMessageLinks.conversationId),
+      )
+      .innerJoin(
+        chatEndpoints,
+        eq(chatEndpoints.id, chatConversations.endpointId),
+      )
+      .where(
+        and(
+          eq(chatMessageLinks.companyId, session.companyId),
+          eq(chatMessageLinks.direction, "inbound"),
+          eq(chatConversations.issueId, session.issueId!),
+          eq(chatEndpoints.assignedAgentId, session.agentId!),
+          eq(chatEndpoints.provider, "github"),
+          condition,
+        ),
+      )
+      .limit(1);
+  const wakeCommentIds = [
+    ...new Set(
+      [...(Array.isArray(run?.wakeCommentIds) ? run.wakeCommentIds : []), run?.wakeCommentId].filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
       ),
-    );
-  const sponsored = (source: (typeof sources)[number]) =>
-    (source.event.githubAuthority as { guest?: boolean } | undefined)
-      ?.guest === true;
-  const wakeCommentId = run?.wakeCommentId;
-  const wakeSource =
-    typeof wakeCommentId === "string"
-      ? sources.find((source) => source.commentId === wakeCommentId)
-      : undefined;
-  if (wakeSource) return sponsored(wakeSource) ? wakeSource.connectionId : null;
+    ),
+  ];
+  if (wakeCommentIds.length > 0) {
+    // A run that merged several GitHub requests is bot-only when any of them is.
+    const [sponsoredWake] = await firstSource(and(inArray(chatMessageLinks.commentId, wakeCommentIds), sponsoredFlag)!);
+    if (sponsoredWake) return sponsoredWake.connectionId;
+    const [wakeSource] = await firstSource(inArray(chatMessageLinks.commentId, wakeCommentIds));
+    if (wakeSource) return null;
+  }
   // A run without its own GitHub request inherits any sponsored request on this task.
-  return sources.find(sponsored)?.connectionId ?? null;
+  const [sponsoredSource] = await firstSource(sponsoredFlag);
+  return sponsoredSource?.connectionId ?? null;
 }

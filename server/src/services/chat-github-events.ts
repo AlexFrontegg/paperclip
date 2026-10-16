@@ -17,6 +17,7 @@ import {
 } from "@paperclipai/shared";
 import {
   effectiveGitHubReviewPolicy,
+  githubReviewedAuthorCommentDecision,
   githubReviewSchedulingDecision,
 } from "./chat-github-review-policy.js";
 
@@ -176,6 +177,86 @@ export async function githubAutomaticAdmission(
       context.repositoryId,
     ),
   };
+}
+
+const GITHUB_CONVERSATION_PATTERN =
+  /^github:([^:]+):(?:(issue):)?([1-9][0-9]*)(?::rc:([1-9][0-9]*))?$/;
+
+export async function githubReviewedAuthorCommentAdmission(
+  db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
+  endpoint: typeof chatEndpoints.$inferSelect,
+  principalId: string,
+  externalThreadId: string,
+) {
+  if (endpoint.provider !== "github") return null;
+  const [saved] = await db
+    .select()
+    .from(chatGitHubConfigurations)
+    .where(
+      and(
+        eq(chatGitHubConfigurations.companyId, endpoint.companyId),
+        eq(chatGitHubConfigurations.endpointId, endpoint.id),
+      ),
+    );
+  const [principal] = await db
+    .select()
+    .from(chatExternalPrincipals)
+    .where(
+      and(
+        eq(chatExternalPrincipals.companyId, endpoint.companyId),
+        eq(chatExternalPrincipals.id, principalId),
+        eq(chatExternalPrincipals.provider, "github"),
+      ),
+    );
+  if (!saved || !principal) return null;
+  const conversation = GITHUB_CONVERSATION_PATTERN.exec(externalThreadId);
+  const [resource] = conversation
+    ? await db
+        .select()
+        .from(chatEndpointResources)
+        .where(
+          and(
+            eq(chatEndpointResources.companyId, endpoint.companyId),
+            eq(chatEndpointResources.endpointId, endpoint.id),
+            eq(
+              chatEndpointResources.providerResourceId,
+              conversation[1]!.toLowerCase(),
+            ),
+          ),
+        )
+    : [];
+  const [link] = await db
+    .select({ status: chatIdentityLinks.status })
+    .from(chatIdentityLinks)
+    .where(
+      and(
+        eq(chatIdentityLinks.endpointId, endpoint.id),
+        eq(chatIdentityLinks.principalId, principal.id),
+      ),
+    );
+  const members = await db
+    .select()
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.companyId, endpoint.companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.status, "active"),
+      ),
+    );
+  return githubReviewedAuthorCommentDecision({
+    configuration: saved.configuration,
+    commenterGithubUserId: principal.externalId,
+    pullRequestConversation: !!conversation && !conversation[2],
+    repositoryEnabled:
+      !!resource?.enabled && resource.availability === "available",
+    identityRevoked: link?.status === "revoked",
+    activeMemberUserIds: new Set(
+      members
+        .filter((member) => member.membershipRole !== "viewer")
+        .map((member) => member.principalId),
+    ),
+  });
 }
 
 export async function githubPreviousAssessment(
