@@ -357,7 +357,11 @@ export async function githubGuestBotConnectionForSession(
 ): Promise<string | null> {
   if (!session.runId || !session.agentId || !session.issueId) return null;
   const [run] = await db
-    .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    .select({
+      wakeCommentId: runContextSnapshotString("wakeCommentId"),
+      // Read only the ids; the full snapshot can carry task text.
+      wakeCommentIds: sql<unknown>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds') = 'array' then ${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds' end`,
+    })
     .from(heartbeatRuns)
     .where(
       and(
@@ -397,10 +401,9 @@ export async function githubGuestBotConnectionForSession(
         ),
       )
       .limit(1);
-  const context = (run?.contextSnapshot ?? {}) as Record<string, unknown>;
   const wakeCommentIds = [
     ...new Set(
-      [...(Array.isArray(context.wakeCommentIds) ? context.wakeCommentIds : []), context.wakeCommentId].filter(
+      [...(Array.isArray(run?.wakeCommentIds) ? run.wakeCommentIds : []), run?.wakeCommentId].filter(
         (id): id is string => typeof id === "string" && id.length > 0,
       ),
     ),
