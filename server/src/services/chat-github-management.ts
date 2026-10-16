@@ -534,7 +534,7 @@ export function githubChatManagementService(db: Db, fetchImpl = fetch) {
           ),
         );
       const requiredTools = GITHUB_BOT_TOOLS.filter(
-        (tool) => tool.name !== "formal_review",
+        (tool) => tool.name !== "formal_review" && tool.name !== "resolve_finding",
       );
       const denied: string[] = requiredTools
         .filter(

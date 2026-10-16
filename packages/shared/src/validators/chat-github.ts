@@ -40,6 +40,7 @@ export const githubReviewPolicySchema = z
     publishInline: z.boolean(),
     allowApprove: z.boolean(),
     allowRequestChanges: z.boolean(),
+    resolveFixedFindings: z.boolean().optional(),
     ratingThreshold: z.union([
       z.literal(1),
       z.literal(2),

@@ -29,6 +29,7 @@ export interface GitHubReviewPolicy {
   publishInline: boolean;
   allowApprove: boolean;
   allowRequestChanges: boolean;
+  resolveFixedFindings?: boolean;
   ratingThreshold: 1 | 2 | 3 | 4 | 5 | null;
 }
 
@@ -188,6 +189,7 @@ export function defaultGitHubReviewPolicy(): GitHubReviewPolicy {
     publishInline: true,
     allowApprove: false,
     allowRequestChanges: false,
+    resolveFixedFindings: false,
     ratingThreshold: 5,
   };
 }

@@ -30,7 +30,7 @@ import {
   type GitHubReviewEventContext,
   type GitHubReviewPolicy,
 } from "@paperclipai/shared";
-import { HttpError, conflict, forbidden, notFound } from "../errors.js";
+import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import {
   githubBotRepositoryToken,
   githubBotRequest,
@@ -120,6 +120,36 @@ const formalSchema = commentSchema
     reviewedCommit: githubCommitSchema,
   })
   .strict();
+const resolveSchema = z
+  .object({
+    commentId: z.string().regex(/^[1-9][0-9]{0,18}$/),
+    reviewedCommit: githubCommitSchema,
+    body: z.string().trim().min(1).max(2000),
+    idempotencyKey: z.string().min(1).max(160),
+  })
+  .strict();
+const REVIEW_THREADS_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId author{__typename login}}}}}}}}";
+const RESOLVE_THREAD_MUTATION =
+  "mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
+type ReviewThreadPage = {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        nodes: Array<{
+          id: string;
+          isResolved: boolean;
+          comments: {
+            nodes: Array<{ databaseId: number; author: { __typename: string; login: string } | null }>;
+          };
+        }>;
+      };
+    } | null;
+  } | null;
+};
+const withoutBotSuffix = (login: string) =>
+  login.replace(/\[bot\]$/i, "").toLowerCase();
 
 export function githubChatReviewService(db: Db, fetchImpl = fetch) {
   async function scope(session: Session, publishing = false) {
@@ -325,7 +355,50 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
         options?: Parameters<typeof githubBotRequest>[3],
       ) =>
         githubBotRequest<T>(requestFetch, token, `${prefix}${path}`, options),
+      graphql: async <T>(query: string, variables: Record<string, unknown>) => {
+        const response = await githubBotRequest<{ data?: T; errors?: unknown[] }>(
+          requestFetch,
+          token,
+          "/graphql",
+          { method: "POST", body: { query, variables } },
+        );
+        if (!response.data || response.errors?.length)
+          throw unprocessable(
+            "GitHub rejected this operation. Check the App installation and repository permissions.",
+            { code: "github_bot_operation_failed" },
+          );
+        return response.data;
+      },
     };
+  }
+  /** Only a thread whose first comment this bot posted on this PR can be resolved. */
+  async function ownFindingThread(
+    source: Awaited<ReturnType<typeof scope>>,
+    api: Awaited<ReturnType<typeof client>>,
+    commentId: string,
+  ) {
+    const [owner, name] = source.repository.split("/");
+    const botLogin = source.endpoint.botUsername;
+    let after: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const data: ReviewThreadPage = await api.graphql<ReviewThreadPage>(
+        REVIEW_THREADS_QUERY,
+        { owner, name, number: source.number, after },
+      );
+      const threads = data.repository?.pullRequest?.reviewThreads;
+      const thread = threads?.nodes.find(
+        (node) => String(node.comments.nodes[0]?.databaseId) === commentId,
+      );
+      const author = thread?.comments.nodes[0]?.author;
+      // GitHub drops "[bot]" from App logins in GraphQL, so the account type must match too.
+      if (thread && author?.__typename === "Bot" && botLogin && withoutBotSuffix(author.login) === withoutBotSuffix(botLogin))
+        return thread;
+      if (thread || !threads?.pageInfo.hasNextPage) break;
+      after = threads.pageInfo.endCursor;
+    }
+    throw forbidden(
+      "Only this bot's own finding threads on this pull request can be resolved",
+    );
   }
   async function reviewForHead(
     source: Awaited<ReturnType<typeof scope>>,
@@ -847,7 +920,29 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
       await processPublication(actionId);
       return receipt(actionId);
     }
+    if (name === "resolve_finding") {
+      const parsed = resolveSchema.parse(input);
+      assertResolvePermission(source.policy);
+      if (parsed.reviewedCommit !== pull.head.sha)
+        throw conflict("The PR head changed. Check the fix at the new head first.");
+      await ownFindingThread(source, api, parsed.commentId);
+      const actionId = await stage(
+        source,
+        "resolve_finding",
+        parsed,
+        parsed.idempotencyKey,
+        invocationId,
+        name,
+        input,
+      );
+      await processPublication(actionId);
+      return receipt(actionId);
+    }
     throw notFound("Unknown GitHub bot tool");
+  }
+  function assertResolvePermission(policy: GitHubReviewPolicy) {
+    if (!policy.resolveFixedFindings)
+      throw forbidden("Resolving fixed findings is disabled for this bot");
   }
   function assertFormalPermission(
     policy: GitHubReviewPolicy,
@@ -1042,6 +1137,8 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
                 currentSource.policy,
                 action.payload.event as "APPROVE" | "REQUEST_CHANGES",
               );
+            if (action.payload.operation === "resolve_finding")
+              assertResolvePermission(currentSource.policy);
             const [newer] = await db
               .select({ id: chatGitHubReviews.id })
               .from(chatGitHubReviews)
@@ -1110,6 +1207,36 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
                 },
               ));
             receipt = { id: String(posted.id), url: posted.html_url };
+          } else if (operation === "resolve_finding") {
+            const parsed = resolveSchema.parse({
+              commentId: action.payload.commentId,
+              reviewedCommit: action.payload.reviewedCommit,
+              body: action.payload.body,
+              idempotencyKey: action.payload.idempotencyKey,
+            });
+            await currentHead(parsed.reviewedCommit);
+            const thread = await ownFindingThread(source, api, parsed.commentId);
+            const prior = await findByMarker(
+              `/pulls/${source.number}/comments`,
+              publicationMarker,
+            );
+            if (!prior) await currentHead(parsed.reviewedCommit);
+            const posted =
+              prior ??
+              (await api.request<{ id: number; html_url: string }>(
+                `/pulls/${source.number}/comments/${parsed.commentId}/replies`,
+                {
+                  method: "POST",
+                  body: {
+                    body: `${projectSafeChatPublicationText(parsed.body)}\n\n${publicationMarker}`,
+                  },
+                },
+              ));
+            if (!thread.isResolved) {
+              await currentHead(parsed.reviewedCommit);
+              await api.graphql(RESOLVE_THREAD_MUTATION, { threadId: thread.id });
+            }
+            receipt = { id: String(posted.id), url: posted.html_url, resolved: true };
           } else if (operation === "assessment") {
             const [review] = await db
               .select()

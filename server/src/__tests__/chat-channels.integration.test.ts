@@ -2805,6 +2805,119 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       })]);
       expect(await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.endpointId, f.endpoint.id))).toHaveLength(0);
     });
+    it("resolves only the bot's own finding threads, and only when enabled", async () => {
+      const f = await reviewBotFixture();
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:93", name: "Review PR" }).thread,
+        trigger: "mention",
+        message: makeMessage({ id: "recheck-request", text: "Please re-check your findings", userId: "42", userName: "octocat", mentioned: true }),
+      });
+      const [link] = await db.select().from(chatMessageLinks).where(and(eq(chatMessageLinks.endpointId, f.endpoint.id), eq(chatMessageLinks.direction, "inbound")));
+      const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.id, link.conversationId));
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: conversation.issueId, wakeCommentId: link.commentId },
+      }).returning();
+      const session = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: conversation.issueId, runId: run.id };
+      const head = "b".repeat(40);
+      const botLogin = f.endpoint.botUsername!;
+      const thread = (id: string, databaseId: number, author: { __typename: string; login: string }, isResolved = false) =>
+        ({ id, isResolved, comments: { nodes: [{ databaseId, author }] } });
+      const bot = { __typename: "Bot", login: botLogin.replace(/\[bot\]$/, "") };
+      const threads = [
+        thread("PRRT_bot", 501, bot),
+        thread("PRRT_person", 502, { __typename: "User", login: "octocat" }),
+        thread("PRRT_impostor", 505, { __typename: "User", login: bot.login }),
+        thread("PRRT_done", 503, bot, true),
+        thread("PRRT_retry", 504, bot),
+      ];
+      const writes: Array<{ url: string; body: { query?: string; variables?: Record<string, unknown>; body?: string } }> = [];
+      const replies: Array<{ id: number; body: string; html_url: string; user: { login: string } }> = [];
+      let failNextResolution = false;
+      f.setSupplementalProviderFetch(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/graphql")) {
+          const body = JSON.parse(String(init?.body));
+          if (!String(body.query).startsWith("mutation"))
+            return Response.json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: threads } } } } });
+          writes.push({ url, body });
+          if (failNextResolution) {
+            failNextResolution = false;
+            return new Response("unavailable", { status: 502 });
+          }
+          threads.find((candidate) => candidate.id === body.variables.threadId)!.isResolved = true;
+          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+        }
+        if (!url.includes("/repos/paperclipai/paperclip/")) return undefined;
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          writes.push({ url, body });
+          const reply = { id: 900 + writes.length, body: String(body.body), html_url: `https://github.com/test/reply/${writes.length}`, user: { login: botLogin } };
+          replies.push(reply);
+          return Response.json(reply);
+        }
+        if (url.includes("/pulls/93/comments?")) return Response.json(replies);
+        if (url.endsWith("/pulls/93"))
+          return Response.json({
+            number: 93, title: "Fix", body: "", state: "open", draft: false,
+            head: { sha: head }, base: { sha: "a".repeat(40), ref: "master" },
+            user: { id: 42, login: "octocat", type: "User" }, labels: [],
+          });
+        return Response.json([]);
+      });
+      const service = githubChatReviewService(db, f.providerFetch);
+      const resolve = (commentId: string, idempotencyKey: string, reviewedCommit = head) =>
+        service.execute(session, "resolve_finding", { commentId, reviewedCommit, body: "Fixed: the guard now runs first.", idempotencyKey });
+      const writesTo = (suffix: string) => writes.filter((write) => write.url.endsWith(suffix));
+
+      await expect(resolve("501", "switched-off")).rejects.toThrow("disabled");
+      const config = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: config.revision, configuration: { ...config.configuration, defaults: { ...config.configuration.defaults, resolveFixedFindings: true } } },
+        "owner-user",
+      );
+      await expect(resolve("502", "persons-thread")).rejects.toThrow("own finding threads");
+      // A person whose login equals the App slug is not the bot.
+      await expect(resolve("505", "impostor-thread")).rejects.toThrow("own finding threads");
+      await expect(resolve("501", "stale-head", "c".repeat(40))).rejects.toThrow("head changed");
+      expect(writes).toHaveLength(0);
+
+      await resolve("501", "fixed");
+      expect(writes.map((write) => write.url)).toEqual([
+        "https://api.github.com/repos/paperclipai/paperclip/pulls/93/comments/501/replies",
+        "https://api.github.com/graphql",
+      ]);
+      expect(writes[0]!.body.body).toContain("Fixed: the guard now runs first.");
+      expect(writes[1]!.body.variables).toEqual({ threadId: "PRRT_bot" });
+
+      // An already resolved thread gets the reply but no second resolution.
+      await resolve("503", "already-resolved");
+      expect(writesTo("/comments/503/replies")).toHaveLength(1);
+      expect(writesTo("/graphql").map((write) => write.body.variables)).toEqual([{ threadId: "PRRT_bot" }]);
+
+      // A failed resolution is retried without posting the reply again.
+      failNextResolution = true;
+      const failed = await resolve("504", "retry-after-failure");
+      expect(failed.status).toBe("failed");
+      await db.update(chatActions)
+        .set({ result: sql`${chatActions.result} || ${JSON.stringify({ retryAt: new Date(0).toISOString() })}::jsonb` })
+        .where(eq(chatActions.id, failed.actionId));
+      await service.processPending();
+      expect(writesTo("/comments/504/replies")).toHaveLength(1);
+      expect(writesTo("/graphql").map((write) => write.body.variables)).toEqual([
+        { threadId: "PRRT_bot" }, { threadId: "PRRT_retry" }, { threadId: "PRRT_retry" },
+      ]);
+      expect(Object.fromEntries(threads.map((candidate) => [candidate.id, candidate.isResolved]))).toEqual({
+        PRRT_bot: true, PRRT_person: false, PRRT_impostor: false, PRRT_done: true, PRRT_retry: true,
+      });
+    });
     it("uses task-bound bot tools and deterministic checks, then denies revoked people", async () => {
       const publicOrigin = vi.spyOn(cloudRuntimeIdentity, "runtimePublicOrigin").mockReturnValue("https://current-vanity.example");
       onTestFinished(() => publicOrigin.mockRestore());
@@ -2861,7 +2974,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         issueId: conversation.issueId,
         runId: run.id,
       };
-      expect(await githubBotToolsForSession(db, session)).toHaveLength(6);
+      expect(await githubBotToolsForSession(db, session)).toHaveLength(7);
       expect(
         await githubBotToolsForSession(db, { ...session, issueId: randomUUID() }),
       ).toHaveLength(0);

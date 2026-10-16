@@ -295,6 +295,12 @@ export function GitHubPolicyEditor({
           checked={policy.allowRequestChanges}
           onChange={(value) => set("allowRequestChanges", value)}
         />
+        <GitHubToggle
+          label="Resolve fixed findings"
+          description="The agent may reply in and resolve only its own inline threads, after it checks the fix at the current head."
+          checked={policy.resolveFixedFindings ?? false}
+          onChange={(value) => set("resolveFixedFindings", value)}
+        />
       </div>
       <div className="space-y-2">
         <Label htmlFor="github-rating">Paperclip Review check</Label>
