@@ -54,5 +54,5 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 1. Branch from `deploy` and merge the upstream tag.
 2. For the GitHub bot files, take `ports/github-bot`'s version (rebase that branch on the tag first).
 3. For the fallback, keep upstream's code and re-apply the hook points above.
-4. Type-check `server` and `ui`, and compare with upstream's own errors at the tag.
+4. Type-check `server` and `ui`, and compare with upstream's own errors at the tag. The server type check skips `src/__tests__`, so a broken test merge shows up only when the test runs.
 5. Run every proving test file above in full, not filtered by test name.
