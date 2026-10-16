@@ -129,7 +129,7 @@ const resolveSchema = z
   })
   .strict();
 const REVIEW_THREADS_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}";
+  "query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId author{__typename login}}}}}}}}";
 const RESOLVE_THREAD_MUTATION =
   "mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
 type ReviewThreadPage = {
@@ -141,7 +141,7 @@ type ReviewThreadPage = {
           id: string;
           isResolved: boolean;
           comments: {
-            nodes: Array<{ databaseId: number; author: { login: string } | null }>;
+            nodes: Array<{ databaseId: number; author: { __typename: string; login: string } | null }>;
           };
         }>;
       };
@@ -389,8 +389,9 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
       const thread = threads?.nodes.find(
         (node) => String(node.comments.nodes[0]?.databaseId) === commentId,
       );
-      const author = thread?.comments.nodes[0]?.author?.login;
-      if (thread && author && botLogin && withoutBotSuffix(author) === withoutBotSuffix(botLogin))
+      const author = thread?.comments.nodes[0]?.author;
+      // GitHub drops "[bot]" from App logins in GraphQL, so the account type must match too.
+      if (thread && author?.__typename === "Bot" && botLogin && withoutBotSuffix(author.login) === withoutBotSuffix(botLogin))
         return thread;
       if (thread || !threads?.pageInfo.hasNextPage) break;
       after = threads.pageInfo.endCursor;
@@ -1219,6 +1220,7 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
               `/pulls/${source.number}/comments`,
               publicationMarker,
             );
+            if (!prior) await currentHead(parsed.reviewedCommit);
             const posted =
               prior ??
               (await api.request<{ id: number; html_url: string }>(
@@ -1230,8 +1232,10 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
                   },
                 },
               ));
-            if (!thread.isResolved)
+            if (!thread.isResolved) {
+              await currentHead(parsed.reviewedCommit);
               await api.graphql(RESOLVE_THREAD_MUTATION, { threadId: thread.id });
+            }
             receipt = { id: String(posted.id), url: posted.html_url, resolved: true };
           } else if (operation === "assessment") {
             const [review] = await db
