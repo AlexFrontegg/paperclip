@@ -117,6 +117,22 @@ export const GITHUB_BOT_TOOLS = [
       ["event", "reviewedCommit", "body", "idempotencyKey"],
     ),
   },
+  {
+    name: "resolve_finding",
+    title: "Resolve a fixed finding",
+    description:
+      "Reply in and resolve one of this bot's own inline finding threads on this task's PR, after you verified the fix at the current head. commentId is the thread's first comment, posted by this bot. Never use it for threads started by people or other bots, or for partial fixes. Must be enabled in the bot's publication policy.",
+    risk: "write",
+    schema: objectSchema(
+      {
+        commentId: { type: "string", pattern: "^[1-9][0-9]{0,18}$" },
+        reviewedCommit: { type: "string", pattern: "^[a-fA-F0-9]{40}$" },
+        body: { ...text, maxLength: 2000 },
+        idempotencyKey: { ...text, maxLength: 160 },
+      },
+      ["commentId", "reviewedCommit", "body", "idempotencyKey"],
+    ),
+  },
 ] as const;
 
 /** Called only by explicit bot-tool configuration, within its audited transaction. */

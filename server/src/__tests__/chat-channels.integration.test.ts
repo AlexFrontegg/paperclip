@@ -2805,6 +2805,79 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       })]);
       expect(await db.select().from(chatGitHubReviews).where(eq(chatGitHubReviews.endpointId, f.endpoint.id))).toHaveLength(0);
     });
+    it("resolves only the bot's own finding threads, and only when enabled", async () => {
+      const f = await reviewBotFixture();
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:93", name: "Review PR" }).thread,
+        trigger: "mention",
+        message: makeMessage({ id: "recheck-request", text: "Please re-check your findings", userId: "42", userName: "octocat", mentioned: true }),
+      });
+      const [link] = await db.select().from(chatMessageLinks).where(and(eq(chatMessageLinks.endpointId, f.endpoint.id), eq(chatMessageLinks.direction, "inbound")));
+      const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.id, link.conversationId));
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: conversation.issueId, wakeCommentId: link.commentId },
+      }).returning();
+      const session = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: conversation.issueId, runId: run.id };
+      const head = "b".repeat(40);
+      const threads = [
+        { id: "PRRT_bot", isResolved: false, comments: { nodes: [{ databaseId: 501, author: { login: f.endpoint.botUsername!.replace(/\[bot\]$/, "") } }] } },
+        { id: "PRRT_person", isResolved: false, comments: { nodes: [{ databaseId: 502, author: { login: "octocat" } }] } },
+      ];
+      const writes: Array<{ url: string; body: { query?: string; variables?: Record<string, unknown>; body?: string } }> = [];
+      f.setSupplementalProviderFetch(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/graphql")) {
+          const body = JSON.parse(String(init?.body));
+          if (!String(body.query).startsWith("mutation"))
+            return Response.json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: threads } } } } });
+          writes.push({ url, body });
+          threads.find((thread) => thread.id === body.variables.threadId)!.isResolved = true;
+          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+        }
+        if (!url.includes("/repos/paperclipai/paperclip/")) return undefined;
+        if (init?.method === "POST") {
+          writes.push({ url, body: JSON.parse(String(init.body)) });
+          return Response.json({ id: 900 + writes.length, html_url: `https://github.com/test/reply/${writes.length}` });
+        }
+        if (url.endsWith("/pulls/93"))
+          return Response.json({
+            number: 93, title: "Fix", body: "", state: "open", draft: false,
+            head: { sha: head }, base: { sha: "a".repeat(40), ref: "master" },
+            user: { id: 42, login: "octocat", type: "User" }, labels: [],
+          });
+        return Response.json([]);
+      });
+      const service = githubChatReviewService(db, f.providerFetch);
+      const resolve = (commentId: string, idempotencyKey: string, reviewedCommit = head) =>
+        service.execute(session, "resolve_finding", { commentId, reviewedCommit, body: "Fixed: the guard now runs first.", idempotencyKey });
+
+      await expect(resolve("501", "switched-off")).rejects.toThrow("disabled");
+      const config = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: config.revision, configuration: { ...config.configuration, defaults: { ...config.configuration.defaults, resolveFixedFindings: true } } },
+        "owner-user",
+      );
+      await expect(resolve("502", "persons-thread")).rejects.toThrow("own finding threads");
+      await expect(resolve("501", "stale-head", "c".repeat(40))).rejects.toThrow("head changed");
+      expect(writes).toHaveLength(0);
+
+      await resolve("501", "fixed");
+      expect(writes.map((write) => write.url)).toEqual([
+        "https://api.github.com/repos/paperclipai/paperclip/pulls/93/comments/501/replies",
+        "https://api.github.com/graphql",
+      ]);
+      expect(writes[0]!.body.body).toContain("Fixed: the guard now runs first.");
+      expect(writes[1]!.body.variables).toEqual({ threadId: "PRRT_bot" });
+      expect(threads.map((thread) => thread.isResolved)).toEqual([true, false]);
+    });
     it("uses task-bound bot tools and deterministic checks, then denies revoked people", async () => {
       const publicOrigin = vi.spyOn(cloudRuntimeIdentity, "runtimePublicOrigin").mockReturnValue("https://current-vanity.example");
       onTestFinished(() => publicOrigin.mockRestore());
@@ -2861,7 +2934,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         issueId: conversation.issueId,
         runId: run.id,
       };
-      expect(await githubBotToolsForSession(db, session)).toHaveLength(6);
+      expect(await githubBotToolsForSession(db, session)).toHaveLength(7);
       expect(
         await githubBotToolsForSession(db, { ...session, issueId: randomUUID() }),
       ).toHaveLength(0);
