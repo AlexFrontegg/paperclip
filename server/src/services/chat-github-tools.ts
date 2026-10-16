@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { githubReviewAssessmentSchema } from "@paperclipai/shared";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   chatDeliveries,
   chatMessageLinks,
@@ -366,43 +366,43 @@ export async function githubGuestBotConnectionForSession(
         eq(heartbeatRuns.id, session.runId),
       ),
     );
-  const sources = await db
-    .select({
-      event: chatDeliveries.normalizedEvent,
-      connectionId: chatEndpoints.connectionId,
-      commentId: chatMessageLinks.commentId,
-    })
-    .from(chatMessageLinks)
-    .innerJoin(
-      chatDeliveries,
-      eq(chatDeliveries.id, chatMessageLinks.deliveryId),
-    )
-    .innerJoin(
-      chatConversations,
-      eq(chatConversations.id, chatMessageLinks.conversationId),
-    )
-    .innerJoin(
-      chatEndpoints,
-      eq(chatEndpoints.id, chatConversations.endpointId),
-    )
-    .where(
-      and(
-        eq(chatMessageLinks.companyId, session.companyId),
-        eq(chatMessageLinks.direction, "inbound"),
-        eq(chatConversations.issueId, session.issueId),
-        eq(chatEndpoints.assignedAgentId, session.agentId),
-        eq(chatEndpoints.provider, "github"),
-      ),
-    );
-  const sponsored = (source: (typeof sources)[number]) =>
-    (source.event.githubAuthority as { guest?: boolean } | undefined)
-      ?.guest === true;
+  const sponsoredFlag = sql`${chatDeliveries.normalizedEvent}->'githubAuthority'->>'guest' = 'true'`;
+  const firstSource = (condition: SQL) =>
+    db
+      .select({
+        sponsored: sql<boolean>`coalesce(${sponsoredFlag}, false)`,
+        connectionId: chatEndpoints.connectionId,
+      })
+      .from(chatMessageLinks)
+      .innerJoin(
+        chatDeliveries,
+        eq(chatDeliveries.id, chatMessageLinks.deliveryId),
+      )
+      .innerJoin(
+        chatConversations,
+        eq(chatConversations.id, chatMessageLinks.conversationId),
+      )
+      .innerJoin(
+        chatEndpoints,
+        eq(chatEndpoints.id, chatConversations.endpointId),
+      )
+      .where(
+        and(
+          eq(chatMessageLinks.companyId, session.companyId),
+          eq(chatMessageLinks.direction, "inbound"),
+          eq(chatConversations.issueId, session.issueId!),
+          eq(chatEndpoints.assignedAgentId, session.agentId!),
+          eq(chatEndpoints.provider, "github"),
+          condition,
+        ),
+      )
+      .limit(1);
   const wakeCommentId = run?.wakeCommentId;
-  const wakeSource =
-    typeof wakeCommentId === "string"
-      ? sources.find((source) => source.commentId === wakeCommentId)
-      : undefined;
-  if (wakeSource) return sponsored(wakeSource) ? wakeSource.connectionId : null;
+  if (typeof wakeCommentId === "string") {
+    const [wakeSource] = await firstSource(eq(chatMessageLinks.commentId, wakeCommentId));
+    if (wakeSource) return wakeSource.sponsored ? wakeSource.connectionId : null;
+  }
   // A run without its own GitHub request inherits any sponsored request on this task.
-  return sources.find(sponsored)?.connectionId ?? null;
+  const [sponsoredSource] = await firstSource(sponsoredFlag);
+  return sponsoredSource?.connectionId ?? null;
 }

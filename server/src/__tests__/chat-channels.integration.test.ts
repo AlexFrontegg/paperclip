@@ -2726,6 +2726,40 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const { task } = await openPullRequest(f, 96, { id: 92, login: "viewer" });
       expect(task.sourceTrust).toBeNull();
     });
+    it("keeps bot-only GitHub access when a linked member outside the selected list comments as a reviewed author", async () => {
+      const f = await reviewBotFixture();
+      const now = new Date();
+      await db.insert(authUsers).values({ id: "teammate-user", name: "Teammate", email: `teammate-${f.companyId}@example.com`, emailVerified: true, createdAt: now, updatedAt: now });
+      await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: "teammate-user", status: "active", membershipRole: "operator" });
+      const [principal] = await db.insert(chatExternalPrincipals).values({
+        companyId: f.companyId, provider: "github", providerAccountId: f.endpoint.providerAccountId!, externalId: "94",
+        kind: "user", displayName: "Teammate", handle: "teammate", isBot: false,
+      }).returning();
+      await db.insert(chatIdentityLinks).values({ companyId: f.companyId, endpointId: f.endpoint.id, principalId: principal.id, paperclipUserId: "teammate-user", status: "linked", confirmedAt: now });
+      const initial = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(f.endpoint.id, {
+        expectedRevision: initial.revision,
+        configuration: {
+          ...initial.configuration,
+          memberAccess: "selected",
+          people: [{ kind: "member", githubUserId: "42", login: "octocat", userId: "owner-user", automaticReviews: true }],
+          reviewedAuthors: [{ githubUserId: "94", login: "teammate" }],
+        },
+      }, "owner-user");
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:122", name: "paperclipai/paperclip" }).thread,
+        message: makeMessage({ id: "122001", text: "@bot is this finding still valid?", mentioned: true, userId: "94", userName: "teammate" }),
+        trigger: "mention",
+      });
+      await expect.poll(async () => (await f.service.listConversations(f.endpoint.id)).length, { timeout: 10000 }).toBe(1);
+      const deliveries = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id));
+      const delivery = deliveries.find((row) => row.providerEventId.endsWith(":122001"));
+      // The commenter's own membership must not unlock personal GitHub credentials.
+      expect(delivery?.normalizedEvent.githubAuthority).toMatchObject({ guest: true, responsibleUserId: "owner-user" });
+    });
     it("lets a reviewed author talk to the bot in pull request conversations until removed", async () => {
       const f = await reviewBotFixture();
       await f.service.update(f.endpoint.id, { allowUnlinkedPeople: false }, "owner-user");

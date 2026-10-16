@@ -10362,13 +10362,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     linkedDenied: boolean;
     userId: string | null;
     sponsorUserId?: string | null;
+    reviewedAuthor?: boolean;
   }> {
     const githubAccess = await githubChatPrincipalAccess(tx, endpoint, principalId);
     if (githubAccess) {
       if (githubAccess.allowed || !githubConversationId) return githubAccess;
       const commentAdmission = await githubReviewedAuthorCommentAdmission(tx, endpoint, principalId, githubConversationId);
       return commentAdmission?.allowed
-        ? { ...githubAccess, allowed: true, linkedDenied: false, userId: commentAdmission.responsibleUserId ?? null }
+        ? { ...githubAccess, allowed: true, linkedDenied: false, userId: commentAdmission.responsibleUserId ?? null, reviewedAuthor: true }
         : githubAccess;
     }
     // Link confirmation already uses this transaction-scoped identity key.
@@ -16417,7 +16418,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         const automaticAdmission = githubAutomatic ? await githubAutomaticAdmission(tx, currentEndpoint, githubAutomatic.context) : null;
         if (githubAutomatic && !automaticAdmission?.allowed) currentPrincipalAuthorization.allowed = false;
         if (automaticAdmission?.allowed) currentPrincipalAuthorization.userId = automaticAdmission.responsibleUserId ?? null;
-        const reviewedAuthorReview = automaticAdmission?.allowed === true && automaticAdmission.reviewedAuthor === true;
+        // A reviewed author's review or comment keeps bot-only GitHub access, even with a linked identity.
+        const reviewedAuthorReview = (automaticAdmission?.allowed === true && automaticAdmission.reviewedAuthor === true) ||
+          currentPrincipalAuthorization.reviewedAuthor === true;
         if (reviewedAuthorReview) Object.assign(currentPrincipalAuthorization, { allowed: true, linkedDenied: false });
         const endpointStillAllowed =
           currentEndpoint.status === "verifying" ||
