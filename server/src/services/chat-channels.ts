@@ -16277,9 +16277,11 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                     {
                       type: "key_value",
                       label: "Authority",
-                      value: taskUserId
-                        ? "Linked Paperclip user"
-                        : "Sponsored external guest (restricted)",
+                      value: reviewedAuthorReview
+                        ? "GitHub reviewed author (bot-only GitHub access)"
+                        : taskUserId
+                          ? "Linked Paperclip user"
+                          : "Sponsored external guest (restricted)",
                     },
                   ],
                 },

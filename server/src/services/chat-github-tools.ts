@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { githubReviewAssessmentSchema } from "@paperclipai/shared";
-import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import {
   chatDeliveries,
   chatMessageLinks,
@@ -357,7 +357,7 @@ export async function githubGuestBotConnectionForSession(
 ): Promise<string | null> {
   if (!session.runId || !session.agentId || !session.issueId) return null;
   const [run] = await db
-    .select({ wakeCommentId: runContextSnapshotString("wakeCommentId") })
+    .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
     .from(heartbeatRuns)
     .where(
       and(
@@ -397,10 +397,20 @@ export async function githubGuestBotConnectionForSession(
         ),
       )
       .limit(1);
-  const wakeCommentId = run?.wakeCommentId;
-  if (typeof wakeCommentId === "string") {
-    const [wakeSource] = await firstSource(eq(chatMessageLinks.commentId, wakeCommentId));
-    if (wakeSource) return wakeSource.sponsored ? wakeSource.connectionId : null;
+  const context = (run?.contextSnapshot ?? {}) as Record<string, unknown>;
+  const wakeCommentIds = [
+    ...new Set(
+      [...(Array.isArray(context.wakeCommentIds) ? context.wakeCommentIds : []), context.wakeCommentId].filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
+      ),
+    ),
+  ];
+  if (wakeCommentIds.length > 0) {
+    // A run that merged several GitHub requests is bot-only when any of them is.
+    const [sponsoredWake] = await firstSource(and(inArray(chatMessageLinks.commentId, wakeCommentIds), sponsoredFlag)!);
+    if (sponsoredWake) return sponsoredWake.connectionId;
+    const [wakeSource] = await firstSource(inArray(chatMessageLinks.commentId, wakeCommentIds));
+    if (wakeSource) return null;
   }
   // A run without its own GitHub request inherits any sponsored request on this task.
   const [sponsoredSource] = await firstSource(sponsoredFlag);

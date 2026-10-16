@@ -19,7 +19,9 @@ import {
   companyMemberships,
   chatDeliveries,
   chatMessageLinks,
+  chatGitHubConfigurations,
 } from "@paperclipai/db";
+import { defaultGitHubReviewPolicy } from "@paperclipai/shared";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
@@ -602,5 +604,126 @@ describe.each(["slack", "discord"] as const)("reviewed %s execution binding", (p
         .set({ contextSnapshot: context })
         .where(eq(heartbeatRuns.id, runId));
     }
+  });
+});
+
+describe("reviewed GitHub execution binding for a reviewed author", () => {
+  let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+  let db: ReturnType<typeof createDb>;
+  const companyId = randomUUID(),
+    agentId = randomUUID(),
+    issueId = randomUUID(),
+    runId = randomUUID(),
+    endpointId = randomUUID(),
+    resourceId = randomUUID(),
+    conversationId = randomUUID(),
+    principalId = randomUUID(),
+    commentId = randomUUID(),
+    deliveryId = randomUUID();
+  const ownerUserId = "github-responsible-user";
+  const context = {
+    issueId,
+    source: "chat:github",
+    wakeReason: "External chat message received",
+    wakeCommentIds: [commentId],
+    commentId,
+  };
+  const configuration = (reviewedAuthors: Array<{ githubUserId: string; login: string }>) => ({
+    version: 1 as const,
+    toolsEnabled: true,
+    responsibleUserId: ownerUserId,
+    memberAccess: "all_linked" as const,
+    people: [],
+    defaults: defaultGitHubReviewPolicy(),
+    repositories: {},
+    reviewedAuthors,
+  });
+  const attest = () =>
+    attestReviewedExternalChatRun({ db, companyId, agentId, issueId, runId, contextSnapshot: context });
+
+  beforeAll(async () => {
+    temporary = await startEmbeddedPostgresTestDatabase("reviewed-github-binding-");
+    db = createDb(temporary.connectionString);
+    await db.insert(companies).values({ id: companyId, name: "Reviewed GitHub", issuePrefix: "RGB", issueCounter: 1 });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Review bot runner", adapterType: "paperclip_runner",
+      adapterConfig: { provider: "codex" }, status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "PR #91 review", issueNumber: 1, identifier: "RGB-1",
+      status: "in_review", workMode: "standard", assigneeAgentId: agentId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: issueId,
+      invocationSource: "assignment", triggerDetail: "system", contextSnapshot: context,
+    });
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+    const applicationId = randomUUID(),
+      connectionId = randomUUID();
+    await db.insert(toolApplications).values({
+      id: applicationId, companyId, applicationKey: `chat:github:${endpointId}`, name: "GitHub", type: "chat", status: "active",
+    });
+    await db.insert(toolConnections).values({
+      id: connectionId, companyId, applicationId, name: "GitHub", uid: `chat-github-${endpointId}`,
+      connectionPurpose: "channel", transport: "chat_sdk", status: "active", enabled: true,
+    });
+    await db.insert(chatEndpoints).values({
+      id: endpointId, companyId, connectionId, provider: "github", publicId: randomUUID(), assignedAgentId: agentId,
+      status: "active", providerAccountId: "github-app", allowUnlinkedPeople: false,
+    });
+    await db.insert(chatEndpointResources).values({
+      id: resourceId, companyId, endpointId, type: "channel", providerResourceId: "paperclipai/paperclip",
+      label: "paperclipai/paperclip", availability: "available", enabled: true, metadata: { providerRepositoryId: "97531" },
+    });
+    await db.insert(chatConversations).values({
+      id: conversationId, companyId, endpointId, resourceId, issueId, externalConversationId: "paperclipai/paperclip",
+      externalThreadId: "github:paperclipai/paperclip:91", externalLabel: "PR #91", state: "active",
+    });
+    await db.insert(chatExternalPrincipals).values({
+      id: principalId, companyId, provider: "github", providerAccountId: "github-app", externalId: "91", kind: "user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: ownerUserId, status: "active", membershipRole: "member",
+    });
+    await db.insert(chatGitHubConfigurations).values({
+      endpointId, companyId, updatedByUserId: ownerUserId,
+      configuration: configuration([{ githubUserId: "91", login: "teammate" }]),
+    });
+    await db.insert(issueComments).values({
+      id: commentId, companyId, issueId, authorType: "user", authorUserId: ownerUserId,
+      body: "This finding is on purpose; please re-check.",
+    });
+    await db.insert(chatDeliveries).values({
+      id: deliveryId, companyId, endpointId, conversationId, principalId, providerEventId: "github-reply",
+      deduplicationKey: "github-reply", eventKind: "message", normalizedEvent: {}, state: "processed", attempts: 1,
+      processedAt: new Date(),
+    });
+    await db.insert(chatMessageLinks).values({
+      companyId, endpointId, conversationId, deliveryId, commentId, providerMessageId: "github-reply", direction: "inbound",
+    });
+  }, 30_000);
+  afterAll(async () => {
+    await temporary?.cleanup();
+  });
+
+  it("attests an unlinked reviewed author's pull request reply until the author is removed", async () => {
+    await expect(attest()).resolves.toBe(true);
+    await db
+      .update(chatConversations)
+      .set({ externalThreadId: "github:paperclipai/paperclip:issue:91" })
+      .where(eq(chatConversations.id, conversationId));
+    try {
+      await expect(attest()).resolves.toBe(false);
+    } finally {
+      await db
+        .update(chatConversations)
+        .set({ externalThreadId: "github:paperclipai/paperclip:91" })
+        .where(eq(chatConversations.id, conversationId));
+    }
+    await db
+      .update(chatGitHubConfigurations)
+      .set({ configuration: configuration([]) })
+      .where(eq(chatGitHubConfigurations.endpointId, endpointId));
+    await expect(attest()).resolves.toBe(false);
   });
 });

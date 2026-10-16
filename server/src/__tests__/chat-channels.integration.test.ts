@@ -2802,8 +2802,40 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(task.responsibleUserId).toBe("owner-user");
       expect(task.sourceTrust).toBeNull();
       expect((await deliveryFor("121001"))?.normalizedEvent.githubAuthority).toMatchObject({ guest: true, responsibleUserId: "owner-user" });
+      // The reply must actually wake the agent, not only reach the task.
+      const replyDeliveryId = (await deliveryFor("121001"))!.id;
+      await expect.poll(async () => (await db.select().from(chatActions).where(and(
+        eq(chatActions.endpointId, f.endpoint.id),
+        eq(chatActions.kind, "inbound_wakeup"),
+        eq(chatActions.deliveryId, replyDeliveryId),
+      )))[0]?.status, { timeout: 10000 }).toBe("processed");
+      expect(f.wakeup).toHaveBeenCalled();
 
       const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
+      // A member's later comment can merge into the same run; the run must stay bot-only.
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:121", name: "paperclipai/paperclip" }).thread,
+        message: makeMessage({ id: "121003", text: "@bot please also check the tests", mentioned: true, userId: "42", userName: "octocat" }),
+        trigger: "mention",
+      });
+      await expect.poll(async () => (await deliveryFor("121003"))?.state, { timeout: 10000 }).toBe("processed");
+      const memberLink = (await db.select().from(chatMessageLinks).where(eq(chatMessageLinks.endpointId, f.endpoint.id)))
+        .find((link) => link.providerMessageId === "121003")!;
+      const runFor = async (wakeCommentIds: string[]) => {
+        const [mergedRun] = await db.insert(heartbeatRuns).values({
+          companyId: f.companyId,
+          agentId: f.assignedAgentId,
+          invocationSource: "assignment",
+          status: "running",
+          contextSnapshot: { issueId: task.id, wakeCommentIds, wakeCommentId: wakeCommentIds.at(-1) },
+        }).returning();
+        return githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: mergedRun.id, issueId: task.id });
+      };
+      expect(await runFor([comment.id, memberLink.commentId!])).not.toBeNull();
+      expect(await runFor([memberLink.commentId!])).toBeNull();
       const [run] = await db.insert(heartbeatRuns).values({
         companyId: f.companyId,
         agentId: f.assignedAgentId,
