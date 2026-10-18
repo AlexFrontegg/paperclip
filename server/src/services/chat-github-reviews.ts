@@ -159,6 +159,9 @@ type ReviewThreadPage = {
 const withoutBotSuffix = (login: string) =>
   login.replace(/\[bot\]$/i, "").toLowerCase();
 
+/** Bot tools that save a publication first, so a retry reports its current receipt. */
+export const GITHUB_PUBLICATION_TOOL_NAMES: readonly string[] = ["comment", "update_comment", "submit_review", "resolve_finding"];
+
 export function githubChatReviewService(db: Db, fetchImpl = fetch) {
   async function scope(session: Session, publishing = false) {
     if (!session.agentId || !session.issueId || !session.runId)
@@ -663,7 +666,7 @@ export function githubChatReviewService(db: Db, fetchImpl = fetch) {
   ) {
     const deadline = Date.now() + GITHUB_INLINE_RETRY_WINDOW_MS;
     const source = await scope(session);
-    if (invocationId && ["comment", "update_comment", "submit_review"].includes(name)) {
+    if (invocationId && GITHUB_PUBLICATION_TOOL_NAMES.includes(name)) {
       const [existing] = await db.select().from(chatActions).where(and(
         eq(chatActions.companyId, session.companyId), eq(chatActions.endpointId, source.endpoint.id),
         eq(chatActions.conversationId, source.conversation.id), eq(chatActions.kind, "github_review_publication"),

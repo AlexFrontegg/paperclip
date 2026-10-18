@@ -5725,6 +5725,77 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         PRRT_bot: true, PRRT_person: false, PRRT_impostor: false, PRRT_done: true, PRRT_retry: true,
       });
     });
+    it("reports a resolved finding when the agent retries after a delayed resolution", async () => {
+      const f = await reviewBotFixture();
+      await deliverMessage({
+        callbacks: f.callbacks,
+        endpointId: f.endpoint.id,
+        provider: "github",
+        thread: makeThread({ channelId: "paperclipai/paperclip", id: "github:paperclipai/paperclip:94", name: "Review PR" }).thread,
+        trigger: "mention",
+        message: makeMessage({ id: "recheck-later", text: "Please re-check your findings", userId: "42", userName: "octocat", mentioned: true }),
+      });
+      const [link] = await db.select().from(chatMessageLinks).where(and(eq(chatMessageLinks.endpointId, f.endpoint.id), eq(chatMessageLinks.direction, "inbound")));
+      const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.id, link.conversationId));
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: conversation.issueId, wakeCommentId: link.commentId },
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: conversation.issueId!,
+        responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      const config = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: config.revision, configuration: { ...config.configuration, defaults: { ...config.configuration.defaults, resolveFixedFindings: true } } },
+        "owner-user",
+      );
+      const head = "b".repeat(40);
+      const bot = { __typename: "Bot", login: f.endpoint.botUsername!.replace(/\[bot\]$/, "") };
+      const findingThread = { id: "PRRT_later", isResolved: false, comments: { nodes: [{ databaseId: 601, author: bot }] } };
+      let unavailable = true;
+      f.setSupplementalProviderFetch(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/graphql")) {
+          const body = JSON.parse(String(init?.body));
+          if (!String(body.query).startsWith("mutation"))
+            return Response.json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [findingThread] } } } } });
+          if (unavailable) return new Response("Unavailable", { status: 503, headers: { "retry-after": "120" } });
+          findingThread.isResolved = true;
+          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+        }
+        if (!url.includes("/repos/paperclipai/paperclip/")) return undefined;
+        if (init?.method === "POST")
+          return Response.json({ id: 990, body: "Fixed", html_url: "https://github.com/test/reply/990", user: { login: f.endpoint.botUsername } });
+        if (url.endsWith("/pulls/94"))
+          return Response.json({
+            number: 94, title: "Fix", body: "", state: "open", draft: false,
+            head: { sha: head }, base: { sha: "a".repeat(40), ref: "master" },
+            user: { id: 42, login: "octocat", type: "User" }, labels: [],
+          });
+        return Response.json([]);
+      });
+      vi.stubGlobal("fetch", f.providerFetch);
+      onTestFinished(() => { vi.unstubAllGlobals(); });
+      const { createToolGatewayService } = await import("../services/tool-gateway.js");
+      const gateway = createToolGatewayService(db, { toolActionSigningSecret: "github-resolve-retry-test-secret" });
+      const gatewaySession = await gateway.createSession({ companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id });
+      const session = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: conversation.issueId, runId: run.id };
+      const tool = (await githubBotToolsForSession(db, session)).find((candidate) => candidate.upstreamToolName === "resolve_finding")!;
+      const parameters = { commentId: "601", reviewedCommit: head, body: "Fixed: the guard now runs first.", idempotencyKey: "resolve-later" };
+      const first = await gateway.executeTool({ sessionToken: gatewaySession.token, tool: tool.name, parameters });
+      expect(JSON.stringify(first)).toContain("retryable");
+      unavailable = false;
+      const [action] = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, f.endpoint.id), eq(chatActions.kind, "github_review_publication")));
+      await db.update(chatActions).set({ result: { ...action.result, retryAt: new Date(0).toISOString() } }).where(eq(chatActions.id, action.id));
+      await githubChatReviewService(db, f.providerFetch).processPending();
+      expect(findingThread.isResolved).toBe(true);
+      // The retry reads the current receipt instead of the first, failed answer.
+      expect(await gateway.executeTool({ sessionToken: gatewaySession.token, tool: tool.name, parameters }))
+        .toMatchObject({ invocationId: first.invocationId, result: { data: { status: "processed", receipt: { resolved: true } } } });
+    }, 25_000);
     it("uses task-bound bot tools and deterministic checks, then denies revoked people", async () => {
       const publicOrigin = vi.spyOn(cloudRuntimeIdentity, "runtimePublicOrigin").mockReturnValue("https://current-vanity.example");
       onTestFinished(() => publicOrigin.mockRestore());

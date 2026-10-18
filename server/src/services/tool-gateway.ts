@@ -14,7 +14,7 @@ import { SLACK_TOOLS } from "@paperclipai/shared";
 import { slackToolsForSession } from "./connectors/slack-catalog.js";
 import { executeSlackTool } from "./connectors/slack.js";
 import { githubGuestBotConnectionForSession, githubBotToolsForSession } from "./chat-github-tools.js";
-import { githubChatReviewService } from "./chat-github-reviews.js";
+import { GITHUB_PUBLICATION_TOOL_NAMES, githubChatReviewService } from "./chat-github-reviews.js";
 import { runIdentityContexts } from "@paperclipai/db";
 import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent-tools.js";
 import { captureRunIdentity } from "./run-identity.js";
@@ -10196,7 +10196,7 @@ export function createToolGatewayService(
         });
         if (replay?.matched) {
           let replayResult: unknown = replay.result;
-          if (tool.providerType === "paperclip_github_chat" && ["comment", "update_comment", "submit_review"].includes(tool.upstreamToolName ?? "")) {
+          if (tool.providerType === "paperclip_github_chat" && GITHUB_PUBLICATION_TOOL_NAMES.includes(tool.upstreamToolName ?? "")) {
             const access = await policyService.decide(policyInputForTool({ session, tool, parameters: effectiveParameters, consumeRateLimit: false }));
             if (!access.allowed && access.decision !== "require_approval")
               throw new ToolGatewayHttpError(policyErrorStatus(access), access.explanation, access.reasonCode);
@@ -10598,7 +10598,7 @@ export function createToolGatewayService(
           : false;
         const gitHubPublicationReplay = recorded.replayed &&
           tool.providerType === "paperclip_github_chat" &&
-          ["comment", "update_comment", "submit_review"].includes(tool.upstreamToolName ?? "") &&
+          GITHUB_PUBLICATION_TOOL_NAMES.includes(tool.upstreamToolName ?? "") &&
           recorded.invocation.approvalState === "not_required";
         const gitHubReplayPolicyAllowed = accessDecision.allowed;
         const gitHubReplayBindingMatches =
