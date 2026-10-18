@@ -18,10 +18,11 @@ import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
 import { githubGuestBotConnectionForSession } from "./chat-github-tools.js";
+import { githubBotReadOnlyToken } from "./chat-github-client.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
-  source?: "personal" | "dedicated";
+  source?: "personal" | "dedicated" | "bot";
   login?: string;
   reason?: string;
   connectionId?: string;
@@ -112,6 +113,7 @@ export async function resolveGitHubOperationCredentials(
     agentId: string;
     runId: string;
   },
+  fetchImpl: typeof fetch = fetch,
 ) {
   const { run, context } = await captureRunIdentity(db, input);
   if (!context) throw forbidden("This run predates managed GitHub credentials");
@@ -143,10 +145,10 @@ export async function resolveGitHubOperationCredentials(
       typeof run.contextSnapshot?.issueId === "string"
         ? run.contextSnapshot.issueId
         : null;
-    // A run started for a guest or reviewed author may use only the agent's own account.
-    const botScoped = Boolean(
-      await githubGuestBotConnectionForSession(db, { ...input, issueId }),
-    );
+    // A run started for a guest or reviewed author may use only the agent's own account,
+    // otherwise the bot App's read-only token.
+    const botConnectionId = await githubGuestBotConnectionForSession(db, { ...input, issueId });
+    const botScoped = Boolean(botConnectionId);
     const resolved = await resolveManagedGitHubCredential(
       db,
       secretService(db),
@@ -172,6 +174,15 @@ export async function resolveGitHubOperationCredentials(
         authenticationMode: "managed",
       };
       env = buildGitAuthInvocation(resolved.credential).env;
+    } else if (botConnectionId) {
+      const token = await githubBotReadOnlyToken(db, input.companyId, botConnectionId, input.agentId, fetchImpl);
+      summary = {
+        status: "available",
+        source: "bot",
+        connectionId: botConnectionId,
+        authenticationMode: "managed",
+      };
+      env = buildGitAuthInvocation({ token, source: "managed_connection", secretName: null }).env;
     } else {
       summary = {
         status: resolved.configured ? "unavailable" : "absent",
