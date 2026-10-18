@@ -89,8 +89,7 @@
       "purpose": "tool",
       "oauthClientSecretRequired": true,
       "grantKinds": [
-        "user",
-        "agent"
+        "user"
       ],
       "ownershipModes": [
         "customer"
