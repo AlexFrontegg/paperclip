@@ -54,7 +54,7 @@ export interface GitHubChatConfiguration {
   responsibleUserId: string;
   memberAccess: "all_linked" | "selected";
   people: GitHubAllowedPerson[];
-  /** Their pull requests get automatic reviews; they cannot invoke or control the bot. */
+  /** Their pull requests get automatic reviews; they may mention or reply to the bot in pull requests, but not in issues or governed actions. */
   reviewedAuthors?: GitHubReviewedAuthor[];
   defaults: GitHubReviewPolicy;
   /** Keys are stable GitHub repository IDs; labels never grant access. */
