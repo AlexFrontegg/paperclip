@@ -2680,6 +2680,14 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(tokenRequests).toEqual([{
         permissions: { contents: "read", metadata: "read", issues: "read", pull_requests: "read", checks: "read" },
       }]);
+      // A refused bot token must fail closed: "absent" would let git fall back to the server's token.
+      f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/access_tokens")
+        ? new Response("", { status: 403 })
+        : undefined);
+      const refused = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }, f.providerFetch);
+      expect(refused).toMatchObject({ status: "unavailable" });
+      expect(refused.env).toEqual({});
+      f.setSupplementalProviderFetch(null);
       // A later run without its own GitHub request, such as a timer wake, stays limited to the bot.
       const [timerRun] = await db.insert(heartbeatRuns).values({
         companyId: f.companyId,
