@@ -121,6 +121,28 @@ describe("AiAccountHealthBar", () => {
     expect(pill()).toBeNull();
   });
 
+  it("shows a hidden account again when it breaks again after recovering", async () => {
+    await mount(brokenClaude);
+    flushSync(() => hideButton()!.click());
+    await remount({ connections: [] });
+    expect(localStorage.getItem(storageKey)).toBeNull();
+    await remount(brokenClaude);
+    expect(bar()).not.toBeNull();
+    expect(pill()).toBeNull();
+  });
+
+  it("reports a failed check unobtrusively and retries it", async () => {
+    healthApi.health.mockRejectedValueOnce(new Error("Network down"));
+    await mount(brokenClaude);
+    const failure = container.querySelector("[data-testid='ai-account-health-error']");
+    expect(failure?.textContent).toContain("Could not check AI account sign-ins.");
+    expect(bar()).toBeNull();
+    flushSync(() => failure!.querySelector("button")!.click());
+    await settle();
+    expect(container.querySelector("[data-testid='ai-account-health-error']")).toBeNull();
+    expect(bar()).not.toBeNull();
+  });
+
   it("comes back 24 hours after it was hidden", async () => {
     await mount(brokenClaude);
     flushSync(() => hideButton()!.click());

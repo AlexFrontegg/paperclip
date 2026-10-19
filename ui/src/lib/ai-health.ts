@@ -50,6 +50,18 @@ export function readAiHealthDismissal(companyId: string, signature: string, now 
   }
 }
 
+/** Forgets a dismissal of a broken set that is no longer the current one, so a later break shows again. */
+export function clearStaleAiHealthDismissal(companyId: string, signature: string): void {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(dismissalKey(companyId)) ?? "null");
+    if (typeof stored !== "object" || stored === null) return;
+    if ((stored as { signature?: unknown }).signature === signature) return;
+  } catch {
+    return;
+  }
+  writeAiHealthDismissal(companyId, null);
+}
+
 export function writeAiHealthDismissal(companyId: string, signature: string | null, now = Date.now()): void {
   try {
     if (signature) localStorage.setItem(dismissalKey(companyId), JSON.stringify({ signature, dismissedAt: now }));

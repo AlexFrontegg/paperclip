@@ -4,8 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { brandChipBadge } from "@/lib/status-colors";
 import { cn } from "@/lib/utils";
-import { useAiHealthDismissal, useCompanyAiHealth } from "../hooks/useCompanyAiHealth";
-import { aiConnectionHref, connectionProblem, plural, summarizeAiHealth, type AiHealthProblems } from "../lib/ai-health";
+import { useAiAccountHealth } from "../hooks/useAiAccountHealth";
+import { aiConnectionHref, connectionProblem, plural, type AiHealthProblems } from "../lib/ai-health";
 
 function barMessage({ brokenConnections, affectedAgentCount }: AiHealthProblems): string {
   const agentsLine = brokenConnections.length === 1
@@ -21,9 +21,22 @@ function barMessage({ brokenConnections, affectedAgentCount }: AiHealthProblems)
 
 /** Company-wide warning shown on every board page while an AI account that agents use is broken. */
 export function AiAccountHealthBar() {
-  const { data } = useCompanyAiHealth();
-  const problems = summarizeAiHealth(data);
-  const { dismissed, dismiss } = useAiHealthDismissal(problems.signature);
+  const { problems, checkFailed, retrying, retry, dismissed, dismiss } = useAiAccountHealth();
+  if (checkFailed) {
+    return (
+      <div
+        role="status"
+        data-testid="ai-account-health-error"
+        className="flex items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground"
+      >
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">Could not check AI account sign-ins.</span>
+        <Button size="xs" variant="ghost" onClick={retry} disabled={retrying}>
+          {retrying ? "Retrying..." : "Retry"}
+        </Button>
+      </div>
+    );
+  }
   if (!problems.signature || dismissed) return null;
   const [onlyConnection] = problems.brokenConnections.length === 1 ? problems.brokenConnections : [];
   const fixHref = onlyConnection ? aiConnectionHref(onlyConnection.id) : "/apps";
@@ -59,9 +72,7 @@ export function AiAccountHealthBar() {
 
 /** Reminder in the top bar while the warning is hidden; it reopens the warning. */
 export function AiAccountHealthPill() {
-  const { data } = useCompanyAiHealth();
-  const problems = summarizeAiHealth(data);
-  const { dismissed, reopen } = useAiHealthDismissal(problems.signature);
+  const { problems, dismissed, reopen } = useAiAccountHealth();
   if (!problems.signature || !dismissed) return null;
   return (
     <button type="button" onClick={reopen} title="Show the AI account warning" data-testid="ai-account-health-pill">
