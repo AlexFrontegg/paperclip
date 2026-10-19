@@ -9,6 +9,8 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  CHAT_PROVIDERS,
+  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
   ISSUE_STATUSES,
   type IssueStatus,
   type IssueTreeControlMode,
@@ -77,11 +79,13 @@ export const ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS: ReadonlySet<string> = 
   "issue_commented",
   "issue_reopened_via_comment",
   "issue_comment_mentioned",
+  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
 ] as const);
 const ISSUE_TREE_CONTROL_INTERACTION_WAKE_SOURCES: Readonly<Record<string, ReadonlySet<string>>> = {
   issue_commented: new Set(["issue.comment"]),
   issue_reopened_via_comment: new Set(["issue.comment.reopen"]),
   issue_comment_mentioned: new Set(["comment.mention"]),
+  [EXTERNAL_CHAT_MESSAGE_WAKE_REASON]: new Set(CHAT_PROVIDERS.map((provider) => `chat:${provider}`)),
 };
 
 type VerifiedInteractionActor = {
@@ -141,7 +145,8 @@ async function hasVerifiedInteractionWakeRequest(
   const predicates = [
     eq(agentWakeupRequests.companyId, input.companyId),
     sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
-    sql`${agentWakeupRequests.payload} ->> 'commentId' = ${input.commentId}`,
+    // Chat wakes record their comment as wakeCommentId.
+    sql`(${agentWakeupRequests.payload} ->> 'commentId' = ${input.commentId} or ${agentWakeupRequests.payload} ->> 'wakeCommentId' = ${input.commentId})`,
   ];
   if (input.agentId) predicates.push(eq(agentWakeupRequests.agentId, input.agentId));
   if (input.runId && input.wakeupRequestId) {

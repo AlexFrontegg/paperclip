@@ -10,6 +10,9 @@ export const CHAT_PROVIDERS = [
 ] as const;
 export type ChatProvider = (typeof CHAT_PROVIDERS)[number];
 
+/** Wake reason for an admitted message in a connected chat conversation. */
+export const EXTERNAL_CHAT_MESSAGE_WAKE_REASON = "External chat message received";
+
 export const CHAT_ENDPOINT_STATUSES = [
   "draft",
   "verifying",
