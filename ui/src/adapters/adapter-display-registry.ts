@@ -136,6 +136,12 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     icon: Bot,
     experimental: true,
   },
+  muse: {
+    label: "Muse — Personal agent",
+    description: "Your personal Muse at muse.ai",
+    icon: Bot,
+    experimental: true,
+  },
   cursor_cloud: {
     label: "Cursor Cloud",
     description: "Managed remote Cursor agent",
@@ -211,7 +217,7 @@ export function getAdapterDisplay(type: string): AdapterDisplayInfo {
 
 export function agentDisplayAdapterType(agent: { adapterType: string; adapterConfig: Record<string, unknown> }): string {
   if (agent.adapterType !== "paperclip_runner") return agent.adapterType;
-  if (agent.adapterConfig.provider === "openai_dot" || agent.adapterConfig.provider === "grok_bot") {
+  if (agent.adapterConfig.provider === "openai_dot" || agent.adapterConfig.provider === "grok_bot" || agent.adapterConfig.provider === "muse") {
     return agent.adapterConfig.provider;
   }
   return agentHarnessType(agent.adapterType, agent.adapterConfig) === "codex_local" ? "codex_local" : agent.adapterType;

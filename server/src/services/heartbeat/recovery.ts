@@ -1,5 +1,7 @@
+import { createHeartbeatAgentStatus } from "./agent-status.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
-import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
+import { preserveCancelledNativeWorkspaces } from "../native-runtime/native-failed-workspace-recovery.js";
+import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { CHAT_COMPLETION_WAKE_REASON } from "../chat-completion-delivery.js";
 import {
   hasStopOnlyCleanup,
@@ -914,6 +916,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       environmentRuntime,
       onWorkspaceSettled: settleRecoveredNativeWorkspace,
     });
+    await preserveCancelledNativeWorkspaces(db);
     scheduleRetainedNativeSessionCleanup();
     const intent = await readHotRestartIntent().catch((error) => {
       logger.warn(
@@ -1491,6 +1494,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
     let recovered = 0;
     for (const { lease } of rows) {
+      if (await nativeWorkspaceExportPendingForLease(db, lease)) {
+        await deferOrphanedActiveLease(lease.id);
+        continue;
+      }
       if (!(await allowLegacyShutdownWorkspaceCleanup(db, lease))) {
         await deferOrphanedActiveLease(lease.id);
         continue;
@@ -1613,6 +1620,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     let capped = 0;
     for (const row of rows) {
       if (pendingCleanupAttemptsInFlight.has(row.id)) continue;
+      if (!hasStopOnlyCleanup(row) && await nativeWorkspaceExportPendingForLease(db, row)) {
+        await deferPendingCleanupLease(row.id);
+        continue;
+      }
       if (!(await allowLegacyShutdownWorkspaceCleanup(db, row))) {
         await deferPendingCleanupLease(row.id);
         continue;
@@ -1913,6 +1924,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
   }
 
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
+    await preserveCancelledNativeWorkspaces(db);
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
     // Recovery never launches a provider or infers stopped ownership from
@@ -2498,6 +2510,12 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         "pending_cleanup lease sweep failed",
       );
     }
+
+    await createHeartbeatAgentStatus(db).reconcileStrandedAgentStatuses(() => new Set([
+      ...activeRunExecutions, ...runningProcesses.keys(), ...adapterExecutionControls.keys(),
+    ])).catch(() => {
+      logger.error({ errorKind: "agent_status_reconciliation_failed" }, "stranded agent status repair failed");
+    });
 
     return { reaped: reaped.length, runIds: reaped };
   }

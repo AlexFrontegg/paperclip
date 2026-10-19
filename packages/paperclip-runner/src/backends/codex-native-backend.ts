@@ -1,3 +1,4 @@
+import { describeRunnerdMuseDriver } from "../drivers/muse/runnerd-muse-driver.js";
 import { createCodexTaskEnvelope } from "../contracts/codex.js";
 import { ACPX_CAPABILITY_PROFILES } from "../drivers/acpx/capability-profiles.js";
 import { NATIVE_EXECUTION_INPUT_SCHEMA_V7, NATIVE_EXECUTION_INPUT_SCHEMA } from "../contracts/native-execution.js";
@@ -208,9 +209,10 @@ function createTransportBackedNativeSessionBackend(
 export function describeRunnerdNativeSessionBackend(
   input: NativeExecutionInput,
 ): Promise<NativeSessionBackendDescriptor> {
-  if (input.schema === "paperclip.native-execution-input.v6") {
+  if (input.schema === "paperclip.native-execution-input.v6" || input.schema === "paperclip.native-execution-input.v8") {
     // External bots use the shared Rust bridge and retain their provider identity.
-    const descriptor = describeRunnerdExternalBotDriver(input.provider.kind);
+    const descriptor = input.schema === "paperclip.native-execution-input.v8"
+      ? describeRunnerdMuseDriver() : describeRunnerdExternalBotDriver(input.provider.kind);
     return Promise.resolve({
       kind: "runner",
       name: descriptor.kind,

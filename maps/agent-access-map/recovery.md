@@ -113,10 +113,12 @@ supports source-only file repair. Board runtime management and recovery-resoluti
 authority are required. The request identifies the exact source action/run and
 records recovered-file evidence; the server verifies the original stop receipt.
 It preserves the current task status and does not wake or replay the agent. The
-task form fails closed without permission or source bindings. Agent Chat retains
-the file diagnosis while this hold exists. The
+task notice does not expose a file-certification form. The API still fails closed
+without permission or source bindings. Agent Chat retains the file diagnosis
+while this hold exists and suppresses the warning only for a verified durable
+recovery path. The
 [repair route regressions](../../server/src/__tests__/workspace-restore-repair-route.test.ts)
-and [file form](../../ui/src/components/WorkspaceFileRecovery.test.tsx) cover the
+and [task notice](../../ui/src/components/ExecutionBlockerNotice.test.tsx) cover the
 local contract; they do not independently recover files or qualify a live provider.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L9478) at
@@ -176,6 +178,7 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `POST /api/issues/{id}/recovery-actions/retry-workspace-export`.
+- `POST /api/issues/{id}/recovery-actions/reconstruct-workspace`.
 - `POST /api/issues/{id}/recovery-actions/resume-workspace-finalization`.
 - `POST /api/issues/{id}/recovery-actions/resolve` for retained-source file repair.
 - `POST /api/execution-workspaces/{id}/reconcile-branch`.
@@ -184,6 +187,13 @@ Agent access: `restricted` — Board/runtime management APIs; agent reads diagno
 performs permitted workspace work.
 
 Policy: Export retry and branch reconciliation require board runtime management.
+Reconstruction also requires board runtime management. It verifies exact source
+destruction and same-task attachment hashes, records lost work and external action
+outcomes, and admits one fresh continuation through normal execution gates. The
+old failed export remains failed. A retained or uncertain source cannot use it.
+An intervening native run-only cancellation requires its own acknowledged Stop,
+confirmed stopped leases, board file repair and `not_performed` action outcome.
+The reconstruction records and rechecks that exact proof; other later runs stay denied.
 Retained legacy file-only repair requires the board, exact stopped-source receipts,
 and recovered-file evidence. It can record repair for a successful legacy turn
 without changing its result or authorizing replay. Queued and running sources

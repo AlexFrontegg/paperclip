@@ -377,7 +377,7 @@ function assertProviderSessionIdentity(
   stage: "session.open" | "session.recover",
 ): void {
   const ids = session.ids();
-  const external = provider === "openai_dot_mcp" || provider === "grok_bot_mcp";
+  const external = provider === "openai_dot_mcp" || provider === "grok_bot_mcp" || provider === "muse_external";
   if (
     typeof ids.driverSessionId !== "string" ||
     ids.driverSessionId.trim().length === 0 ||
@@ -775,6 +775,7 @@ class HarnessNativeSession implements NativeSession {
   }
 
   resolveRuntimeRequest(input: {
+    commandId?: string;
     requestId: string;
     turnId: string;
     resolution: Parameters<

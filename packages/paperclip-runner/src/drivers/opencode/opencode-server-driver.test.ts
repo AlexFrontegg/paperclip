@@ -1,5 +1,6 @@
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -17,7 +18,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getCACertificates } from "node:tls";
 import { join, resolve } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   NATIVE_RUNTIME_ASSET_SCHEMA,
@@ -36,7 +37,14 @@ import {
 } from "./opencode-server-driver.js";
 
 const roots: string[] = [];
-const fixture = resolve("test/fixtures/fake-opencode-server.mjs");
+let fixtureRoot: string | undefined;
+let fixture: string;
+
+beforeAll(async () => {
+  fixtureRoot = await mkdtemp(join(tmpdir(), "paperclip-opencode-fixture-"));
+  fixture = join(fixtureRoot, "fake-opencode-server.mjs");
+  await copyFile(resolve("test/fixtures/fake-opencode-server.mjs"), fixture);
+});
 
 const TURN_TERMINAL_EVENT_TYPES = new Set([
   "turn.completed",
@@ -128,7 +136,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await chmod(fixture, 0o644);
+  if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 
 describe("OpenCodeServerDriver", () => {
@@ -2110,6 +2118,41 @@ describe("OpenCodeServerDriver", () => {
     expect(evidence).toBeDefined();
     expect(JSON.parse(await readFile(join(root, evidence!), "utf8"))).toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining('"human_response"') }] } });
     await session.close({ reason: "test" });
+  });
+
+  it.each([true, false])("resolves an omitted continuation through the real OpenCode MCP boundary only with a saved monitor: %s", async eligible => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-monitor-"));
+    const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-monitor-workspace-"));
+    roots.push(root, workspace);
+    const continuation = { kind: "monitor", summary: "Wait for the saved task monitor.", idempotencyKey: "task-monitor:saved" };
+    const reads: string[] = [];
+    const accepted: unknown[] = [];
+    const driver = new OpenCodeServerDriver({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731", runtimeDirectory: root, command: fixture,
+      environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+      dynamicToolHandler: async call => {
+        reads.push(call.tool);
+        return { run: { id: "monitor-default" }, activeTask: { executionRunId: "monitor-default" },
+          completionContinuation: eligible ? continuation : null };
+      },
+      completionFeedback: async result => { accepted.push(result); return "Accepted monitor wait."; },
+    });
+    const session = await driver.openSession({ runId: "monitor-default", normalizedSessionId: "monitor-default", workingDirectory: workspace });
+    try {
+      await session.startTurn({ message: { role: "user", text: "monitor-default" } });
+      const events = await collectTurnEvents(session.events());
+      expect(reads).toEqual(["get_task_context"]);
+      if (eligible) {
+        expect(accepted).toMatchObject([{ reportedWorkDisposition: "yielded", continuation }]);
+        expect(events.filter(event => event.eventType === "run.result.proposed")).toHaveLength(1);
+        expect((await session.snapshot()).semanticResult?.result).toMatchObject({ continuation });
+      } else {
+        expect(accepted).toEqual([]);
+        expect(events.filter(event => event.eventType === "run.result.proposed")).toEqual([]);
+        expect((await session.snapshot()).semanticResult).toBeNull();
+      }
+    } finally { await session.close({ reason: "monitor default test complete" }); }
   });
 
   it("normalizes a structured block result", async () => {

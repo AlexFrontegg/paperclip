@@ -3,7 +3,7 @@ import { measureRunPhase } from "./execution-preparation-timing.js";
 import { assertTaskWorkspaceAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-source-access.js";
 import { verifiedRecordedIsolatedRemoteSource, withIsolatedRepositorySourceLock } from "./isolated-remote-workspace-source.js";
 import { expireReconstructableGitWorkspace, hasPendingGitExpiration } from "./git-workspace-expiration.js";
-import { readGitCacheRestoration, restoreGitCacheBase, GitCacheRestorationFailure } from "./git-workspace-restoration.js";
+import { readGitCacheRestoration, restoreGitCacheBase, recoverGitCacheExpirationLocks, GitCacheRestorationFailure } from "./git-workspace-restoration.js";
 import { parseObject } from "../adapters/utils.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { CONTROLLER_PROVISION_COPY_ONLY, workspaceRequiresCopyOnlyProvisioning } from "./workspace-host-provision.js";
@@ -3808,6 +3808,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             return { ok: false, code: "not_reopenable", message: "Execution workspace source changed during reopen" };
           }
         }
+        try { await recoverGitCacheExpirationLocks(row); }
+        catch { return { ok: false, code: "rebuild_failed", message: new GitCacheRestorationFailure().message }; }
         const verifyCopyIdentity = capturedSource && authorizedTarget ? async (sourceCwd: string, targetCwd: string) => {
           if (!capturedSource!.roots.includes(await fs.realpath(sourceCwd))
             || await canonicalRepositoryRoot(targetCwd) !== authorizedTarget) {
@@ -3863,6 +3865,27 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           const realized = await ensurePersistedExecutionWorkspaceAvailable({
             db: tx as unknown as Db,
             resolveGitAuth: gitAuth,
+            persistContentsRestoredAt: async at => {
+              const currentRecipe = nextMetadata.gitCacheRestoration;
+              const updated = await db.update(executionWorkspaces).set({
+                metadata: sql`jsonb_set(${executionWorkspaces.metadata}, '{gitCacheRestoration,contentsRestoredAt}', ${JSON.stringify(at)}::jsonb)`,
+              }).where(and(eq(executionWorkspaces.id, row.id), eq(executionWorkspaces.companyId, row.companyId),
+                sql`${executionWorkspaces.metadata}->'gitCacheRestoration' = ${JSON.stringify(currentRecipe)}::jsonb`))
+                .returning({ id: executionWorkspaces.id });
+              if (updated.length !== 1) throw new GitCacheRestorationFailure();
+              nextMetadata.gitCacheRestoration = { ...currentRecipe as Record<string, unknown>, contentsRestoredAt: at };
+            },
+            prepareRestoredLocalSource: async sourceCwd => {
+              const captured = await assertIsolatedWorkspaceSourceReadAccess(tx as unknown as Db, {
+                companyId: row.companyId, sourceCwd, actor: input.authorizationActor, copyKind: "repository",
+              });
+              const recheck = () => retainIsolatedWorkspaceSourceAccess(tx as unknown as Db, {
+                companyId: row.companyId, sourceCwd, targetCwd: row.cwd!, actor: input.authorizationActor,
+                captured, issueId: issue.id, copyKind: "repository",
+              });
+              await recheck();
+              return recheck;
+            },
             skipHostProvision: trust.kind === "low_trust_review" || copyOnlyProvisioning,
             beforeSourceCopy: verifyCopyIdentity,
             afterSourceCopy: verifyCopyIdentity,
@@ -3969,7 +3992,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // Keep the refresh guard after reopening so normal preparation cannot
         // advance the saved checkout to upstream HEAD. Its intact branch may now
         // receive newer task commits; the next expiration records a fresh recipe.
-        if (recipe) nextMetadata.gitCacheRestoration = { ...recipe, restoredAt: now().toISOString() };
+        if (recipe) nextMetadata.gitCacheRestoration = { ...nextMetadata.gitCacheRestoration as Record<string, unknown>, restoredAt: now().toISOString() };
         const activeMetadata = setMetadataReopenPendingConsumption(nextMetadata, now());
         await measureRunPhase("workspace.notification", () => notifyTerminalWorkspaceWork(tx, `workspace:${row.id}`));
         const activeRow = await tx

@@ -15,6 +15,20 @@ const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const candidate = (): AcpxReleaseProfile => ({ ...QUALIFIED_ACPX_PROFILES.pi });
 
+async function withPiTestPlatform<T>(arch: "x64" | "arm64", run: () => Promise<T>): Promise<T> {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const archDescriptor = Object.getOwnPropertyDescriptor(process, "arch");
+  if (!platformDescriptor || !archDescriptor) throw new Error("Missing process platform descriptors");
+  try {
+    Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+    Object.defineProperty(process, "arch", { ...archDescriptor, value: arch });
+    return await run();
+  } finally {
+    try { Object.defineProperty(process, "platform", platformDescriptor); }
+    finally { Object.defineProperty(process, "arch", archDescriptor); }
+  }
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-installation-test-")); roots.push(root);
   await writeFile(join(root, "package.json"), JSON.stringify({ name: "@paperclipai/paperclip-runner" }));
@@ -150,7 +164,7 @@ describe("Pi installation factory", () => {
       expect(() => assertPiInstallationProfile({ ...candidate(), ...changed })).toThrow("trusted declaration");
     }
   });
-  it("never takes closure authority from installed metadata", async () => {
+  it("never takes closure authority from installed metadata", () => withPiTestPlatform("x64", async () => {
     const { assets } = await fixture();
     await writeFile(join(assets, "pi-distribution.json"), JSON.stringify({
       schema: "paperclip.pi-distribution.v1", runtimeRoot: "runtime", nativeClosureSha256: "0".repeat(64),
@@ -158,7 +172,11 @@ describe("Pi installation factory", () => {
       pins: { nodeVersion: "24.21.0", wrapper: "0.0.33", runtime: "1.0.0", sdk: "0.26.0", zod: "3.25.76" },
     }));
     await expect(verifyPiInstallation(candidate())).rejects.toThrow("trusted target pin");
-  });
+  }));
+  it("rejects an unsupported linux-arm64 target", () => withPiTestPlatform("arm64", async () => {
+    expect(Object.hasOwn(PI_DISTRIBUTION_CLOSURE_SHA256, "linux-arm64")).toBe(false);
+    await expect(verifyPiInstallation(candidate())).rejects.toThrow(/^Pi distribution target is unsupported$/);
+  }));
   it.runIf(process.env.PAPERCLIP_TEST_PI_DISTRIBUTION_ROOT)("launches the actual closed Pi snapshot with bound subprocess paths", async () => {
     const { root, assets } = await fixture();
     await cp(process.env.PAPERCLIP_TEST_PI_DISTRIBUTION_ROOT!, assets, { recursive: true });
@@ -203,10 +221,10 @@ describe("Pi installation factory", () => {
     }
   }, 90_000);
 
-  it("refuses symlinked target assets and metadata", async () => {
+  it("refuses symlinked target assets and metadata", () => withPiTestPlatform("x64", async () => {
     const { root, assets } = await fixture();
     await rm(assets, { recursive: true });
     await symlink(root, assets);
     await expect(verifyPiInstallation(candidate())).rejects.toThrow("fixed asset directory");
-  });
+  }));
 });

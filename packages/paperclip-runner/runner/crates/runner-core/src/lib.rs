@@ -16,6 +16,7 @@ mod configured_environment;
 mod credential_observer;
 pub mod dot_provider_backend;
 pub mod durable;
+pub mod external_provider_backend;
 pub mod fake_harness;
 mod generated_acpx_profiles;
 pub mod generated_acpx_sidecar_contract;

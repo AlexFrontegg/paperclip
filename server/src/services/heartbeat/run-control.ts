@@ -5,6 +5,9 @@ import {
   type WakeupOptions,
 } from "./run-preparation.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
+import { hasRequiredWorkspaceRecovery, nativeRunHasNoWorkspaceAccess } from "../workspace-restore-recovery-state.js";
+import { preserveNativeFailedWorkspace } from "../native-runtime/native-failed-workspace-recovery.js";
+import { readNativeWorkspaceSyncReference } from "../native-runtime/native-workspace-sync.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import {
   nativeRetryCancellationCommitCondition,
@@ -290,10 +293,24 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // Recovery can finish workspace copy-back outside the executor's finally.
     // Successful copy-back does not earn warm retention for a failed turn.
     const status = leaseOwnerRun?.status ?? input.status;
-    const providerResourceDisposition = providerResourceDispositionForTerminalRun(
+    let providerResourceDisposition = providerResourceDispositionForTerminalRun(
       input.providerResourceDisposition,
       status,
     );
+    if (leaseOwnerRun?.runtimeMode === "native" && status === "cancelled"
+      && readNativeWorkspaceSyncReference(leaseOwnerRun.runnerProfileJson?.nativeWorkspaceSync)?.state === "prepared"
+      && !nativeRunHasNoWorkspaceAccess(leaseOwnerRun)) {
+      try {
+        const preserved = await preserveNativeFailedWorkspace(db, leaseOwnerRun, { allowPreterminal: true });
+        if (!preserved || !hasRequiredWorkspaceRecovery(preserved.resultJson)) return;
+      } catch {
+        // Keep the active source eligible for the bounded retention sweep.
+        // Teardown must not release it after retention lost a lock or DB write.
+        logger.warn({ runId: input.runId }, "Deferred cancelled workspace teardown until file retention is recorded");
+        return;
+      }
+      providerResourceDisposition = "stop_and_retain";
+    }
     if (providerResourceDisposition === "destroy") {
       const closeResult = await (
         options.closeWarmNativeSessionsForRun ??
@@ -689,7 +706,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
 
   async function releaseIssueExecutionAndPromote(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
-    options: { suppressImmediateRecovery?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] } = {},
+    options: { suppressImmediateRecovery?: boolean; resumeStrandedQueue?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] } = {},
   ) {
     // A fallback retry waiting for this run's cleanup takes the task over from the run.
     if (deferredUsageLimitFallbackRetries.has(run.id)) return;
@@ -702,6 +719,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         // A durable authentication card owns recovery. This covers the review path,
         // while continuation classification blocks periodic generic retries.
         suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source),
+        ...(options.resumeStrandedQueue ? { resumeStrandedQueue: true } : {}),
       });
       if (options.deferredPostCommitEffects) {
         options.deferredPostCommitEffects.push(...postCommitEffects);

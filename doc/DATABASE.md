@@ -43,6 +43,30 @@ launch context does not travel with each policy or parent-report check. JSON
 types, task-key precedence, and company and agent identity checks are preserved.
 Each decision still reads current data; this is not an authorization cache.
 
+Repository-root checks load retained run, agent and task identities in batches
+of at most 500 IDs. They keep each run's task binding, responsible user and saved
+policy separate, even when several runs use the same agent. Project settings and
+saved policies for batched read authorization are also loaded once per operation.
+The next admission or publication reloads these records and permission grants.
+The queries exclude run results and unused launch context.
+
+The initial agent JWT run lookup reads only the cancellation state and
+conversation flag from saved run JSON. It does not transfer the full context or
+result. Run status, responsible-user identity, company and agent boundaries,
+and the cancellation response remain unchanged. Later identity refreshes keep
+their existing transaction and data reads.
+
+To measure authentication query responses on disposable synthetic data:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-agent-authentication.ts --baseline-ref=06689c1b3410000bcd65ff40cb469e600209c4db
+```
+
+This compares the current query with the original query in that revision. It
+checks the complete authentication decision and reports returned JSON bytes,
+local query timings, and execution plans. It does not measure request latency
+or fleet-wide savings.
+
 To compare the real summary and full history queries with an earlier revision:
 
 ```sh
@@ -277,6 +301,18 @@ completed lookups and the separate liveness backfill are not replayed. Projectio
 callers that use a transaction retain single-attempt reads. The opt-in is only
 for a pooled database handle outside a transaction.
 
+## Tool profile reads
+
+Tool profile list, detail, and new-tool review queries select only the catalog
+identity, selector, and review fields that they use. They do not load tool input
+or output schemas, annotations, or provider metadata. Application and connection
+lookups for these paths read only IDs and display names. Profile entries,
+bindings, counts, review descriptions, and company filters retain their existing
+behavior. The full catalog and tool execution paths still read their schemas.
+Attention counts use the same catalog projection and read only invocation IDs
+and connection IDs to associate pending requests. Summary queries also omit
+review titles and descriptions; the separate review query still returns them.
+
 ## Execution identity row locks
 
 Identity initialization, credential acquisition, and steering reconciliation lock
@@ -374,6 +410,14 @@ restart with stale provider variables on an isolated warm application first.
 Rollback by setting the marker to `0` and restarting. No schema changes are
 required. This mechanism does not sleep claimed workspaces or replace a durable
 scheduler for their background work.
+
+## Feedback history and idle sleep
+
+Automatic idle checks treat private, unshared feedback as saved data. A sent
+feedback export is history only when its completion timestamp exists and its
+failure reason is clear. Pending, failed, unknown, and inconsistent exports
+still keep the instance awake. These checks do not delete history or change
+feedback sharing and retry behavior.
 
 ## Resource membership tables
 
@@ -963,3 +1007,10 @@ session-compatible database connection; do not enable it through a transaction
 pooler. Reconnection scans the durable journal. Existing process-local work
 signals continue to serve other delivery queues. See
 [the plugin contract](plugins/AGENT_RUNTIME_SYNC.md).
+
+Migration 0354 extends this stream to standing connection assignments. Statement
+triggers compare the fields returned by the assignment snapshot and coalesce
+company invalidation within the mutation transaction. Agent runtime journaling
+uses ordered `FOR NO KEY UPDATE` locks, which remain compatible with foreign-key
+references while excluding runtime readers' `FOR SHARE` locks. Connector feature
+switches use the same journal; process-start overlays receive a delivery baseline.

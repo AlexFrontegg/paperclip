@@ -19,6 +19,8 @@ import { createIssueReadTiming } from "../services/issue-read-timing.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { resumeNativeWorkspaceAfterOwnerStop } from "../services/native-runtime/native-workspace-owner-recovery.js";
 import { retryNativeWorkspaceExport } from "../services/native-runtime/native-workspace-export-retry.js";
+import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
+import { reconstructWorkspaceSchema } from "@paperclipai/shared";
 import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
@@ -9501,11 +9503,11 @@ export function issueRoutes(
     });
     const retainedHolds = await db.select().from(issueRecoveryActions).where(and(
       eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
-      or(
+      or(unreconciledNativeExportPredicate(), and(
+        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`, or(
         sql`${issueRecoveryActions.evidence}->'workspaceRestoreRecovery'->>'schema' = ${LEGACY_WORKSPACE_RECOVERY_SCHEMA}`,
         inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-      ),
+      ))),
     )).orderBy(desc(issueRecoveryActions.createdAt));
     res.json({
       active,
@@ -9534,6 +9536,17 @@ export function issueRoutes(
     const receipt = await retryNativeWorkspaceExport({ db, companyId: issue.companyId, issueId: issue.id,
       actionId: req.body.actionId, runId: req.body.runId, repairNote: req.body.repairNote,
       actorId: getActorInfo(req).actorId, environmentRuntime });
+    res.status(202).json(receipt);
+  });
+
+  router.post("/issues/:id/recovery-actions/reconstruct-workspace", validate(reconstructWorkspaceSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await access.decide({ actor: req.actor, action: "runtime:manage", resource: { type: "company", companyId: issue.companyId } });
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const receipt = await reconstructNativeWorkspace({ db, companyId: issue.companyId, issueId: issue.id,
+      actorId: getActorInfo(req).actorId, request: req.body });
     res.status(202).json(receipt);
   });
 

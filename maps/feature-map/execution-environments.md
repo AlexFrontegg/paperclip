@@ -77,6 +77,12 @@ execution. Remote-driver probes and a real bounded run need their own evidence.
 
 Automated: [execution target](../../server/src/__tests__/environment-execution-target.test.ts) and [custom images](../../server/src/__tests__/environment-custom-images-service.test.ts) cover contracts; [SSH live test](../../server/src/__tests__/environment-live-ssh.test.ts) requires its own external setup.
 
+The [environment runtime regression](../../server/src/__tests__/environment-runtime.test.ts)
+also covers sandbox reuse after a start longer than one minute. Acquisition
+uses the configured or provider-declared startup budget for resume and shares
+one deadline across retries. Failure preserves the recorded sandbox. This
+controlled timing check does not establish live provider acceptance.
+
 Manual: Run a bounded command in the intended target, inspect its output and workspace, and verify execution did not silently fall back to the server host. For custom-image changes, build/probe the disposable image before assigning it. Inspect cleanup and shutdown after the run.
 
 ## Gotchas

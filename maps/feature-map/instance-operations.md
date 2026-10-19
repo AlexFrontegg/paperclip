@@ -44,6 +44,16 @@ It remains reachable during an idle drain. Use `/api/health` for explicit databa
 readiness, signed bootstrap, and authorized diagnostics; liveness does not
 establish database health or claim a workspace.
 
+Automated: [static UI idle completion](../../server/src/__tests__/static-ui-idle.test.ts)
+covers real aborted file streams, disconnects before file lookup, nested routers,
+and unfinished parent/fallback writes. Mounted Express applications retain their
+conservative hold. It does not qualify provider cleanup or a hosted sleep/wake cycle.
+
+Manual: On an otherwise idle disposable instance, close a static UI download
+served by the admitted application before it finishes. Repeat with a disconnect
+before headers arrive. Confirm that neither leaves a permanent request hold. An
+unfinished application write must still prevent sleep after its client leaves.
+
 ### `settings-backup`
 
 Automated: [experimental settings](../../ui/src/pages/InstanceExperimentalSettings.test.tsx) and [database backup routes](../../server/src/__tests__/instance-database-backups-routes.test.ts) cover their UI/API contracts.

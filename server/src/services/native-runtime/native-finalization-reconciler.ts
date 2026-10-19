@@ -634,20 +634,11 @@ type NativeReconciliationOptions = {
 
 type NativeReconciliationPassTiming = ReturnType<typeof createNativeReconciliationPassTiming>;
 
-// A committed finalization whose run ended this long ago, with no undelivered
-// decision effect, is settled: its result is projected and its effects are
-// delivered, so an unscoped pass has nothing to finish. Re-reading every such
-// row on every pass cost dozens of sequential queries per row, and startup
-// runs the pass twice before readiness. Recent rows stay in every pass, so the
-// crash-window repairs still run promptly.
 export const NATIVE_SETTLED_COMMITTED_GRACE_MS = 60 * 60 * 1000;
-// Settled rows still get the presentation and evidence upkeep, a few per pass
-// in a rotating order, so a late repair is delayed, never skipped.
 export const NATIVE_SETTLED_COMMITTED_UPKEEP_PER_PASS = 10;
 const NATIVE_SETTLED_RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"];
 let settledCommittedUpkeepCursor: string | null = null;
 
-/** Test hook: restart the settled-row upkeep rotation from the beginning. */
 export function resetSettledCommittedUpkeepForTests() {
   settledCommittedUpkeepCursor = null;
 }
@@ -668,7 +659,6 @@ function settledCommittedFinalization(now: Date): SQL {
   )!;
 }
 
-/** The next settled committed runs in the upkeep rotation, wrapping at the end. */
 async function nextSettledCommittedUpkeep(db: Db, now: Date): Promise<string[]> {
   const page = (after: string | null) => db
     .select({ runId: heartbeatRuns.id })
@@ -732,8 +722,6 @@ async function reconcileNativeFinalizationsPass(
   }
   timing.phase("candidate_scan");
   const now = new Date();
-  // An unscoped pass skips settled committed rows, except the few in this
-  // pass's upkeep rotation. A scoped pass reconciles exactly the given runs.
   const unscoped = !(runIds && runIds.length > 0);
   const upkeepRunIds = unscoped ? await nextSettledCommittedUpkeep(db, now) : [];
   const rows = await db

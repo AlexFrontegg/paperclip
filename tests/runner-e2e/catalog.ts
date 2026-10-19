@@ -1107,6 +1107,31 @@ export const extendedHarnessFileTask: RunnerTaskFixture = {
 
 export const runnerSuites: readonly RunnerSuiteFixture[] = [
   {
+    id: "codie-latency-diagnostic",
+    label: "Native Codex latency diagnostic",
+    description: "One real Daytona turn on the staging-selected model. API-key auth and a fresh fixture do not reproduce the staging subscription, data or Slack delivery.",
+    groups: ["native"],
+    manualOnly: true,
+    profiles: [(() => {
+      const profile = nativeProfile({
+        id: "runner-codex-61-diagnostic", label: "Native Codex 6.1 diagnostic",
+        provider: "codex", model: "gpt-6.1-sol", credential: "OPENAI_API_KEY",
+        supportedEnvironments: ["daytona"],
+        modelQualification: { source: "candidate_runner_profile", qualificationId: "explicit-model-latency-diagnostic" },
+      });
+      return { ...profile, buildAgent(input: AgentFixtureBuildInput) {
+        const agent = profile.buildAgent(input);
+        return { ...agent, budgetMonthlyCents: 1000,
+          adapterConfig: { ...(agent.adapterConfig as Record<string, unknown>), lifecycleMode: "warm", idleTimeoutMs: 300_000 } };
+      } };
+    })()],
+    environments: [daytonaWarmEnvironment],
+    tasks: runnerTasks.filter(task => task.id === "message-marker")
+      .map(task => ({ ...task, automaticRetryPolicy: "single_attempt" as const })),
+    expectedMatrixSize: 1,
+    definitionMetadata: { diagnostic: true, modelSource: "observed-staging-run", providerAuth: "api_key", stagingAuth: "subscription", companyData: "fresh-fixture", slackDelivery: false, maximumAutomaticRetries: 0 },
+  },
+  {
     id: TASK_WORKSPACES_SUITE, label: "Task workspaces without projects", manualOnly: true,
     description: "Three browser-driven admissions prove deferred repository preparation, stable projectless task files and nested Git persistence across a controller restart.",
     groups: [], profiles: runnerProfiles.filter(profile => ["legacy-opencode", "runner-opencode"].includes(profile.id)).map(taskWorkspaceProfile),

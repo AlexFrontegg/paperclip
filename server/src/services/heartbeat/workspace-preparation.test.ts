@@ -19,6 +19,8 @@ import { workspaceOperationService } from "../workspace-operations.js";
 import { nativeWorkspaceSyncInternals, prepareNativeWorkspaceSync } from "../native-runtime/native-workspace-sync.js";
 import { createHeartbeatWorkspaceResolver, prepareProjectRepositoryWorkspaces, resolveExecutionWorkspaceReuseRequestForIssue } from "./workspaces.js";
 import { prepareHeartbeatWorkspace, type HeartbeatWorkspacePreparationInput } from "./workspace-preparation.js";
+import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
+import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import * as managedRepositoryCheckout from "../managed-repository-checkout.js";
 import { isolatedRemoteSourcePath } from "../isolated-remote-workspace-source.js";
 import { cleanupExecutionWorkspaceArtifacts } from "../workspace-runtime.js";
@@ -104,6 +106,47 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     const [run] = await db.insert(heartbeatRuns).values({ companyId: input.run.companyId, agentId: input.agent.id, issueId: input.task.issueId, scopeKind: "issue", status: "running", runtimeMode: "legacy" }).returning();
     input.run = run;
   }
+
+  it.each(["muse", "openai_dot", "grok_bot"] as const)("uses private %s controller storage without rebinding task files or preparing repositories", async provider => {
+    const { input, issue } = await fixture();
+    input.agent.adapterType = "paperclip_runner";
+    input.config.mergedConfig = { provider, cwd: "/task/source/must-not-be-read", workspaceStrategy: { type: "git_worktree" } };
+    input.reuse.isDotRun = true;
+    const resolve = vi.spyOn(input.services, "resolveWorkspaceForRun").mockRejectedValue(new Error("Task files must not be adopted"));
+    const bind = vi.spyOn(input.services.executionWorkspacesSvc, "bindTaskWorkspace").mockRejectedValue(new Error("Task binding must not change"));
+    const repos = vi.spyOn(input.services.executionWorkspacesSvc, "prepareTaskRepositoriesForAdmission").mockRejectedValue(new Error("Repositories must not be prepared"));
+    try {
+      const result = await prepareHeartbeatWorkspace(db, input);
+      expect(result.executionWorkspace.cwd).toContain(provider === "muse" ? "muse-controllers" : "dot-controllers");
+      expect(result.persistedExecutionWorkspace).toBeNull();
+      expect(result.projectRepositoryPaths).toEqual([]);
+      expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();
+      expect(resolve).not.toHaveBeenCalled();
+      expect(bind).not.toHaveBeenCalled();
+      expect(repos).not.toHaveBeenCalled();
+      const binding = { companyId: input.agent.companyId, agentId: input.agent.id, bindingId: input.run.id,
+        bindingGeneration: 1, acceptByUnixMs: Date.now() + 60_000, expiresAtUnixMs: Date.now() + 600_000 };
+      const admitted = buildNativeExecutionInput({ companyId: input.agent.companyId, agentId: input.agent.id,
+        runId: input.run.id, provider, ...(provider === "muse" ? { museBinding: binding } : { dotBinding: binding }),
+        issue: { id: issue.id, identifier: null, title: issue.title, description: null, workMode: "standard" },
+        taskPrompt: "Preserve the admitted controller", normalizedSessionId: input.run.id,
+        workspace: { id: input.run.id, cwd: result.executionWorkspace.cwd, repoUrl: null, repoRef: null, branchName: null },
+        completionContract: { id: input.run.id, sha256: `sha256:${"a".repeat(64)}`, schemaVersion: "paperclip.run-result.v1",
+          contract: { revision: "1", objective: "Preserve the controller", criteria: [{ id: "objective", requirement: "Preserve the original checkpoint path" }] } },
+        runtimeContext: nativeRuntimeContextFixture(),
+      });
+      input.reuse.persistedNativeExecutionInput = admitted;
+      input.run.runtimeMode = "native";
+      input.run.runnerProfileJson = { nativeExecutionInput: admitted };
+      input.config.mergedConfig = { provider: "codex" };
+      const recovered = await prepareHeartbeatWorkspace(db, input);
+      expect(recovered.executionWorkspace.cwd).toBe(result.executionWorkspace.cwd);
+      expect(recovered.persistedExecutionWorkspace).toBeNull();
+      expect(bind).not.toHaveBeenCalled();
+      expect(repos).not.toHaveBeenCalled();
+
+    } finally { resolve.mockRestore(); bind.mockRestore(); repos.mockRestore(); }
+  });
 
   it("persists the workspace and issue binding before acquiring its environment", async () => {
     const { input, source, issue, envOrchestrator } = await fixture();

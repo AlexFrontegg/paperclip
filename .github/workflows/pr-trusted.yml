@@ -1065,6 +1065,15 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # The production image starts the server from this bundle with plain
+      # node (Dockerfile CMD), so prove it boots before the image is built:
+      # bundle the `pnpm build` output, start it against a throwaway embedded
+      # instance, and wait for /api/health to report ok.
+      - name: Boot the production runtime bundle
+        run: |
+          pnpm --filter @paperclipai/server build:runtime
+          scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs
+
       # This verification only needs `pnpm build` output (the verifier stages
       # the public packages' dist and reuses ui/dist itself), yet it ran at the
       # end of Canary Dry Run, serially after the ~210-295s release.sh dry run.

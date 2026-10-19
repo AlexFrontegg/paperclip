@@ -573,6 +573,17 @@ export const retryWorkspaceExportSchema = z.object({
   repairNote: z.string().trim().min(20).max(12000),
 }).strict();
 
+export const reconstructWorkspaceSchema = z.object({
+  actionId: z.string().guid(),
+  runId: z.string().guid(),
+  expectedStatusVersion: z.number().int().nonnegative(),
+  attachmentIds: z.array(z.string().guid()).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
+  missingWork: z.string().trim().min(20).max(12000),
+  actionOutcome: z.enum(["completed", "not_performed", "mixed"]),
+  outcomeEvidence: z.string().trim().min(20).max(12000),
+  acknowledgeLostWork: z.literal(true),
+}).strict();
+
 export const resolveIssueRecoveryActionSchema = z
   .object({
     workspaceBaseRef: z.object({

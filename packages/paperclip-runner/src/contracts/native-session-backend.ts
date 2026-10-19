@@ -216,6 +216,7 @@ export interface NativeSession {
     signal: AbortSignal;
   }): NativeSessionCancellation;
   resolveRuntimeRequest?(input: {
+    commandId?: string;
     requestId: string;
     turnId: string;
     resolution: HarnessRuntimeRequestResolution;

@@ -1,4 +1,7 @@
 import { assertIsolatedWorkspaceSourceReadAccess, retainIsolatedWorkspaceSourceAccess } from "../execution-workspace-repositories.js";
+import { selectRestoredProjectRepositories, type GitWorkspaceContents } from "../git-workspace-contents.js";
+import { GitCacheRestorationFailure } from "../git-workspace-restoration.js";
+import { deriveRepoNameFromRepoUrl, managedProjectCheckoutName, projectRepositoryIdentity } from "../managed-project-checkout-name.js";
 import { forbidden } from "../../errors.js";
 import { readGitConnectionFailure } from "../git-connection-failure.js";
 import { materializeManagedProjectWorkspace, ensureManagedRepositoriesIgnored } from "../managed-repository-checkout.js";
@@ -423,24 +426,6 @@ export async function resolveWorkspaceAfterLowTrustPreflight<
   };
 }
 
-function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
-  const trimmed = repoUrl?.trim() ?? "";
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed);
-    const cleanedPath = parsed.pathname.replace(/\/+$/, "");
-    const repoName =
-      cleanedPath
-        .split("/")
-        .filter(Boolean)
-        .pop()
-        ?.replace(/\.git$/i, "") ?? "";
-    return repoName || null;
-  } catch {
-    return null;
-  }
-}
-
 type PrepareManagedLocalSource = (sourceCwd: string, targetCwd: string) => Promise<(targetCwd: string) => Promise<void>>;
 
 /**
@@ -515,14 +500,16 @@ export async function prepareProjectRepositoryWorkspaces(input: {
   resolveGitAuth?: GitRemoteAuthProvider | null;
   beforePublish?: () => Promise<void>;
   prepareLocalSource?: (sourceCwd: string) => Promise<() => Promise<void>>;
+  restoredContents?: GitWorkspaceContents;
 }): Promise<Array<{ workspaceId: string; cwd: string; repoUrl: string; repoRef: string | null }>> {
-  const identity = (url: string) => url.trim().replace(/\.git\/?$/, "").replace(/\/$/, "");
+  const identity = projectRepositoryIdentity;
   const seen = new Set(input.anchorRepoUrl ? [identity(input.anchorRepoUrl)] : []);
-  const selected = input.workspaces.filter((workspace) => {
+  const selected = selectRestoredProjectRepositories(input.workspaces, input.restoredContents).filter((workspace) => {
     if (!workspace.repoUrl || seen.has(identity(workspace.repoUrl))) return false;
     seen.add(identity(workspace.repoUrl));
     return true;
   });
+  if (input.restoredContents?.checkouts.some(checkout => !selected.some(source => source.id === checkout.source.id))) throw new GitCacheRestorationFailure();
   const root = path.join(input.cwd, PROJECT_REPOSITORIES_DIR);
   if (selected.length === 0 && !(await fs.lstat(root).catch(() => null))) return [];
   await fs.mkdir(root, { recursive: true });
@@ -533,10 +520,10 @@ export async function prepareProjectRepositoryWorkspaces(input: {
   const results = [];
   for (const workspace of selected) {
     const repoUrl = workspace.repoUrl!;
-    const name = (deriveRepoNameFromRepoUrl(repoUrl) ?? "repo").replace(/[^a-zA-Z0-9_-]/g, "-");
-    const key = `${name}-${createHash("sha256").update(JSON.stringify([workspace.id, identity(repoUrl), workspace.repoRef, workspace.cwd ?? null])).digest("hex").slice(0, 12)}`;
+    const key = managedProjectCheckoutName({ id: workspace.id, repoUrl, repoRef: workspace.repoRef, cwd: workspace.cwd });
     const cwd = path.join(root, key);
     const existing = await fs.lstat(cwd).catch(() => null);
+    if (!existing && input.restoredContents?.checkouts.some(checkout => checkout.name === key)) throw new GitCacheRestorationFailure();
     if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("Invalid project repository checkout path");
     const configuredLocalSource = workspace.cwd && workspace.cwd !== REPO_ONLY_CWD_SENTINEL ? workspace.cwd : null;
     const localSource = configuredLocalSource

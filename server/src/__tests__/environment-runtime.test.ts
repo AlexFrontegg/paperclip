@@ -567,13 +567,16 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     };
   }
 
-  async function seedReusablePluginSandboxLease(adapterType: string | null = null) {
+  async function seedReusablePluginSandboxLease(
+    adapterType: string | null = null,
+    options: { timeoutMs?: number | null; defaultAcquireTimeoutMs?: number } = {},
+  ) {
     const pluginId = randomUUID();
     const { companyId, agentId, environment: baseEnvironment, runId } = await seedEnvironment();
     const providerConfig = {
       provider: "fake-plugin",
       image: "fake:test",
-      timeoutMs: 1234,
+      ...(options.timeoutMs === null ? {} : { timeoutMs: options.timeoutMs ?? 1234 }),
       reuseLease: true,
     };
     const environment = {
@@ -598,6 +601,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
           kind: "sandbox_provider",
           displayName: "Fake Plugin",
           supportsReusableLeases: true,
+          defaultAcquireTimeoutMs: options.defaultAcquireTimeoutMs,
           configSchema: {
             type: "object",
             properties: {
@@ -645,10 +649,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
         pluginId,
         pluginKey: "acme.reusable-sandbox-provider",
         sandboxProviderPlugin: true,
-        provider: "fake-plugin",
-        image: "fake:test",
-        timeoutMs: 1234,
-        reuseLease: true,
+        ...providerConfig,
         reusableSandboxLease: {
           version: 1,
           companyId,
@@ -4618,6 +4619,54 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     );
   });
 
+  it.each([
+    { label: "declared provider startup budget", timeoutMs: null, defaultAcquireTimeoutMs: 300_000, expectedRpcTimeoutMs: 330_000 },
+    { label: "explicit startup budget", timeoutMs: 120_000, defaultAcquireTimeoutMs: 300_000, expectedRpcTimeoutMs: 150_000 },
+  ])("resumes the same sandbox after a slow start within its $label", async (options) => {
+    const seeded = await seedReusablePluginSandboxLease("paperclip_runner", options);
+    let signalResumeStarted!: () => void;
+    const resumeStarted = new Promise<void>(resolve => { signalResumeStarted = resolve; });
+    const call = vi.fn(async (_pluginId: string, method: string, _params: unknown, rpcTimeoutMs: number) => {
+      if (method !== "environmentResumeLease") throw new Error(`Unexpected plugin method: ${method}`);
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      const response = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Plugin RPC timed out"));
+        }, rpcTimeoutMs);
+        setTimeout(() => {
+          clearTimeout(timeout);
+          vi.useRealTimers();
+          resolve({ providerLeaseId: seeded.reusableLease.providerLeaseId, metadata: { remoteCwd: "/workspace" } });
+        }, 61_000);
+      });
+      signalResumeStarted();
+      return await response;
+    });
+    const runtime = environmentRuntimeService(db, { pluginWorkerManager: {
+      isRunning: () => true, call,
+      getWorker: () => ({ supportedMethods: ["environmentResumeLease", "environmentReleaseLease", "environmentDestroyLease"] }),
+    } as unknown as PluginWorkerManager });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const acquisition = runtime.acquireRunLease({
+      companyId: seeded.companyId, environment: seeded.environment,
+      issueId: null, agentId: seeded.agentId, adapterType: "paperclip_runner", heartbeatRunId: seeded.runId,
+      persistedExecutionWorkspace: { id: seeded.executionWorkspaceId, mode: "shared_workspace" },
+    }).then(value => ({ value, error: null }), error => ({ value: null, error }));
+    try {
+      await resumeStarted;
+      await vi.advanceTimersByTimeAsync(61_000);
+    } finally {
+      vi.useRealTimers();
+      now.mockRestore();
+    }
+    const result = await acquisition;
+    expect(result.error).toBeNull();
+    expect(result.value?.lease).toMatchObject({ id: seeded.reusableLease.id, providerLeaseId: seeded.reusableLease.providerLeaseId });
+    expect(call).toHaveBeenCalledOnce();
+    expect(call.mock.calls[0]?.[3]).toBe(options.expectedRpcTimeoutMs);
+    expect(await environmentService(db).getLeaseById(seeded.reusableLease.id)).toMatchObject({ status: "active", heartbeatRunId: seeded.runId });
+  });
+
   it("preserves the exact lease when plugin-backed sandbox resume throws", async () => {
     const pluginId = randomUUID();
     const { companyId, agentId, environment: baseEnvironment, runId } = await seedEnvironment();
@@ -6800,6 +6849,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       },
     });
 
+    await db.delete(environments).where(eq(environments.driver, "local"));
     await environmentService(db).update(environment.id, {
       driver: "local",
       config: {},
@@ -6823,7 +6873,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
         }),
       }),
     });
-    expect(released[0]?.lease.status).toBe("released");
+    expect(released[0]?.lease).toMatchObject({ status: "released", cleanupStatus: "success" });
   });
 
   async function seedPluginDriverEnvironment(pluginId: string) {
@@ -7042,7 +7092,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       timedOut: false,
       stdout: "ok\n",
     });
-    expect(destroyed?.status).toBe("failed");
+    expect(destroyed).toMatchObject({ status: "failed", cleanupStatus: "success" });
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentResumeLease", {
       driverKey: "fake-plugin",
       companyId,

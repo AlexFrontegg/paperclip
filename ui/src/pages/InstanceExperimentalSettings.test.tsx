@@ -88,6 +88,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enablePublicMcp: false,
     enableOpenAiDot: false,
     enableGrokBot: false,
+    enableMuse: false,
     enableChatConnectors: false,
     enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
@@ -271,6 +272,17 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
       expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe(String(enabled));
       expect(Boolean(container.querySelector('a[href="/BUT/apps/assistant-connection"]'))).toBe(enabled);
     }
+  });
+
+  it("saves the personal Muse opt-in separately and names independent readiness evidence", async () => {
+    await renderPage();
+    expect(container.textContent).toContain("Muse — Personal agent");
+    expect(container.textContent).toContain("independent background reply");
+    expect(container.textContent).toContain("Provider usage and cost are unavailable");
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Toggle Muse experimental setting"]')!;
+    await act(() => toggle.click());
+    await flushReact();
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enableMuse: true });
   });
 
   it("names Dot prerequisites and saves its opt-in independently in both directions", async () => {
