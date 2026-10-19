@@ -274,7 +274,7 @@ export function classifyCodexTerminalSessionFailure(
   // also match a context/storage capacity limit and defer the wrong failure.
   if (failure.category !== "limit") return null;
   const surface = { errorMessage: [failure.title, failure.details].filter(Boolean).join("\n") };
-  if (!/\b(?:you(?:'|’)ve hit your usage limit|usage limit (?:reached|exceeded))\b/i.test(surface.errorMessage)) {
+  if (!/\b(?:you(?:'|’)ve hit your usage limit|usage limit (?:reached|exceeded)|out of credits)\b/i.test(surface.errorMessage)) {
     return null;
   }
   const retryNotBefore = extractCodexRetryNotBefore(surface, now)?.toISOString();
