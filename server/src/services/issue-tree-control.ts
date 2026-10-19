@@ -9,6 +9,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  CHAT_PROVIDERS,
   ISSUE_STATUSES,
   type IssueStatus,
   type IssueTreeControlMode,
@@ -22,6 +23,7 @@ import {
   type IssueTreePreviewWarning,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "./issue-assignment-wakeup.js";
 import type { IssuePostCommitAction } from "./issues.js";
 
 type IssueRow = typeof issues.$inferSelect;
@@ -77,11 +79,13 @@ export const ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS: ReadonlySet<string> = 
   "issue_commented",
   "issue_reopened_via_comment",
   "issue_comment_mentioned",
+  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
 ] as const);
 const ISSUE_TREE_CONTROL_INTERACTION_WAKE_SOURCES: Readonly<Record<string, ReadonlySet<string>>> = {
   issue_commented: new Set(["issue.comment"]),
   issue_reopened_via_comment: new Set(["issue.comment.reopen"]),
   issue_comment_mentioned: new Set(["comment.mention"]),
+  [EXTERNAL_CHAT_MESSAGE_WAKE_REASON]: new Set(CHAT_PROVIDERS.map((provider) => `chat:${provider}`)),
 };
 
 type VerifiedInteractionActor = {

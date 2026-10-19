@@ -251,6 +251,7 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import {
+  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
   queueIssueAssignmentWakeup,
   type IssueAssignmentWakeupDeps,
 } from "./issue-assignment-wakeup.js";
@@ -14404,7 +14405,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       await queueIssueAssignmentWakeup({
         heartbeat: options.heartbeat,
         issue: context.issue,
-        reason: "External chat message received",
+        reason: EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
         mutation: "chat_message_received",
         contextSource: `chat:${context.endpoint.provider}`,
         requestedByActorType: request.requestedByActorType,

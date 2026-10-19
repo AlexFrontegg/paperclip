@@ -22,6 +22,9 @@ export interface IssueAssignmentWakeupDeps {
   ) => Promise<unknown>;
 }
 
+/** Wake reason for an admitted message in a connected chat conversation (Slack, GitHub, ...). */
+export const EXTERNAL_CHAT_MESSAGE_WAKE_REASON = "External chat message received";
+
 export function queueIssueAssignmentWakeup(input: {
   heartbeat: IssueAssignmentWakeupDeps;
   issue: { id: string; assigneeAgentId: string | null; status: string };

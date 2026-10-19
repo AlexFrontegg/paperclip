@@ -29,6 +29,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "../services/issue-assignment-wakeup.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -642,6 +643,102 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       return rows.every((run) => run.status !== "queued" && run.status !== "running");
     }, 10_000);
     expect(noActiveRuns).toBe(true);
+  });
+
+  it("lets a connected chat message reach a blocked task as an interaction", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const blockerId = randomUUID();
+    const blockedIssueId = randomUUID();
+    const chatCommentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Coordinator",
+      role: "general",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: blockerId,
+        companyId,
+        title: "Child work",
+        status: "in_progress",
+        priority: "medium",
+        responsibleUserId: "responsible-user",
+      },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Slack request",
+        status: "blocked",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user",
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: blockedIssueId,
+      type: "blocks",
+    });
+    await db.insert(issueComments).values({
+      id: chatCommentId,
+      companyId,
+      issueId: blockedIssueId,
+      authorType: "user",
+      authorUserId: "responsible-user",
+      body: "The plan changed; cancel the child work.",
+    });
+
+    const chatWake = await heartbeat.wakeup(agentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
+      payload: { issueId: blockedIssueId, mutation: "chat_message_received", wakeCommentId: chatCommentId },
+      requestedByActorType: "user",
+      requestedByActorId: "responsible-user",
+      contextSnapshot: { issueId: blockedIssueId, source: "chat:slack", wakeCommentId: chatCommentId },
+    });
+    expect(chatWake).not.toBeNull();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, chatWake!.id))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+    const chatRun = await db
+      .select({ status: heartbeatRuns.status, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, chatWake!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(chatRun?.status).toBe("succeeded");
+    expect(chatRun?.contextSnapshot).toMatchObject({
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [blockerId],
+    });
+    const skippedWakes = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.reason, "issue_dependencies_blocked")))
+      .then((rows) => rows[0]?.count ?? 0);
+    expect(skippedWakes).toBe(0);
   });
 
   it("defers issue_blockers_resolved as a follow-up when the same issue is already running", async () => {
