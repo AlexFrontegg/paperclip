@@ -148,8 +148,10 @@ conversations and governed actions stay denied, and a revoked identity link is
 refused. Their tasks run under the responsible member
 without low-trust quarantine. A run that their request started, and a later run
 on the task without its own GitHub request, uses only the bot's gateway
-connection and never a person's or the host's GitHub credentials; only the
-agent's own GitHub account can be exported. Task admission, wakeups, bot tools
+connection and never a person's or the host's GitHub credentials. It exports the
+agent's own GitHub account when one is connected, otherwise a short-lived
+read-only installation token from the bot's GitHub App; a refused token exports
+nothing. Task admission, wakeups, bot tools
 and response comments each re-run automatic admission, so removal applies to
 queued and ongoing work. Sources: [review policy](../../server/src/services/chat-github-review-policy.ts),
 [bot scoping](../../server/src/services/chat-github-tools.ts) and

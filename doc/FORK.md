@@ -28,14 +28,15 @@ Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `s
 
 ## GitHub review bot
 
-- **Own GitHub App sign-in:** `deploymentOAuthClient` in `packages/shared/src/types/app-definition.ts` and `app-definitions/github.json`. Test: `packages/shared/src/app-definitions.test.ts`.
+- **Own GitHub App sign-in:** `deploymentOAuthClient` in `packages/shared/src/types/app-definition.ts` and `app-definitions/github.json`, which offers only personal accounts for this method. Test: `packages/shared/src/app-definitions.test.ts`.
 - **Reviewed authors:** listed teammates without a Paperclip account get automatic reviews, and can mention or reply to the bot in pull request conversations. Their runs use only the bot's GitHub connection.
-- **Resolve fixed findings:** the `resolve_finding` bot tool replies in and resolves the bot's own inline threads at the current head, behind the "Resolve fixed findings" setting.
-- Hook points: `chat-github-review-policy.ts`, `chat-github-events.ts`, `chat-github-reviews.ts`, `chat-github-tools.ts`, `chat-github-management.ts`, `chat-github-response-comments.ts`, `github-operation-credentials.ts`, `chat-channels/github/*`, `chat-channels/inbound/*`, `chat-channels/provider-effects.ts`, `heartbeat/execution-configuration.ts` (bot-only GitHub), `native-runtime/chat-attachment-reuse.ts`, `packages/shared/src/{types,validators}/chat-github.ts`, UI `pages/apps/chat/GitHubBotConfiguration.tsx`.
+- **Read-only bot token for `gh`:** bot-only runs without a dedicated agent account get a short-lived installation token from the bot's GitHub App with read permissions only (`githubBotReadOnlyToken` in `chat-github-client.ts`, used by `github-operation-credentials.ts`; run source `bot`). A refused token exports nothing.
+- **Resolve fixed findings:** the `resolve_finding` bot tool replies in and resolves the bot's own inline threads at the current head, behind the "Resolve fixed findings" setting. `GITHUB_PUBLICATION_TOOL_NAMES` in `chat-github-reviews.ts` lists the tools whose retries report the saved receipt; `tool-gateway.ts` uses it too.
+- Hook points: `chat-github-review-policy.ts`, `chat-github-events.ts`, `chat-github-reviews.ts`, `chat-github-tools.ts`, `chat-github-management.ts`, `chat-github-response-comments.ts`, `chat-github-client.ts`, `github-operation-credentials.ts`, `chat-channels/github/*`, `chat-channels/inbound/*`, `chat-channels/provider-effects.ts`, `heartbeat/execution-configuration.ts` (bot-only GitHub), `native-runtime/chat-attachment-reuse.ts`, `packages/shared/src/{types,validators}/chat-github.ts`, UI `pages/apps/chat/GitHubBotConfiguration.tsx`.
 - Proving tests: `server/src/__tests__/chat-channels.integration.test.ts`, `server/src/__tests__/heartbeat-reviewed-chat-binding.integration.test.ts`, `server/src/services/chat-github-review-policy.test.ts`, `packages/shared/src/validators/chat-github.test.ts`, `ui/src/pages/apps/chat/GitHubAccessEditor.test.tsx`.
 - Docs: `doc/connections/GITHUB-REVIEW-BOT.md`, `maps/*/chat-channels.md`.
 
-The upstream-layout versions of the three GitHub features are kept on branch `ports/github-bot` (upstream master plus the port commits). Take these files from that branch when an upstream merge conflicts in them.
+The upstream-layout versions of the four GitHub features are kept on branch `ports/github-bot` (upstream master plus the port commits). Take these files from that branch when an upstream merge conflicts in them.
 
 ## Remote MCP client credentials
 
