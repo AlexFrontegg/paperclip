@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps, ReactNode } from "react";
-import type { AgentAiHealth, UsageLimitFallbackConfig } from "@paperclipai/shared";
+import type { AgentAiHealth, CompanyAiConnectionHealth, UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UsageLimitFallbackField, UsageLimitFallbackStatus } from "./UsageLimitFallbackField";
 
@@ -216,10 +216,12 @@ describe("UsageLimitFallbackStatus", () => {
   ));
   const health: AgentAiHealth = {
     agentId: "agent", lane: "fallback", fallbackActive: true, noWorkingAi: false, since: "2026-10-06T09:00:00.000Z", until: null,
-    waitForReconnect: true, reason: "primary_signed_out", suspendedReason: null,
-    primaryAdapterType: "claude_local", primaryModel: "claude-opus", primaryConnectionId: "claude-for-all",
-    fallbackAdapterType: "codex_local", fallbackModel: "gpt-6-astra", fallbackConnectionId: "openai",
+    waitForReconnect: true, reason: "primary_signed_out", suspendedReason: null, backupIssue: null,
+    primaryAdapterType: "claude_local", primaryModel: "claude-opus", primaryConnectionKey: "account-1",
+    fallbackAdapterType: "codex_local", fallbackModel: "gpt-6-astra", fallbackConnectionKey: "account-2",
   };
+  const claudeForAll: CompanyAiConnectionHealth = { key: "account-1", id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention" };
+  const openai: CompanyAiConnectionHealth = { key: "account-2", id: "openai", name: "OpenAI", provider: "openai", status: "revoked" };
 
   it("shows the fallback in a box and lets the user return to the primary while it is active", async () => {
     const onReturnToPrimary = vi.fn();
@@ -237,7 +239,7 @@ describe("UsageLimitFallbackStatus", () => {
     renderStatus({ stateJson: waiting, health });
     expect(container.textContent).toContain("Running on backup: Codex gpt-6-astra (usually Claude Code claude-opus)");
     expect(container.textContent).toContain("Claude Code needs to sign in again. It returns to Claude Code by itself when Claude Code is signed in again.");
-    renderStatus({ stateJson: waiting, health, connections: [{ id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention", affectedAgentIds: ["agent"] }] });
+    renderStatus({ stateJson: waiting, health, connections: [claudeForAll] });
     expect(container.textContent).toContain(": \"Claude for all\" needs sign-in. It returns to Claude Code");
   });
 
@@ -256,17 +258,36 @@ describe("UsageLimitFallbackStatus", () => {
 
   it("turns red with a sign-in link when the agent has no working AI", async () => {
     renderStatus({
-      health: { ...health, lane: "primary", fallbackActive: false, noWorkingAi: true, since: null, reason: null, waitForReconnect: false },
-      connections: [
-        { id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention", affectedAgentIds: ["agent"] },
-        { id: "openai", name: "OpenAI", provider: "openai", status: "revoked", affectedAgentIds: ["agent"] },
-      ],
+      health: { ...health, lane: "primary", fallbackActive: false, noWorkingAi: true, backupIssue: "account", since: null, reason: null, waitForReconnect: false },
+      connections: [claudeForAll, openai],
     });
     const box = container.querySelector("[data-testid='usage-limit-fallback-status']");
     expect(box?.className).toContain("red");
     expect(box?.textContent).toContain("Forge has no working AI");
     expect(box?.textContent).toContain("\"Claude for all\" needs sign-in, and its backup, \"OpenAI\", was revoked. Runs fail until one of them is fixed.");
     expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/claude-for-all/permissions");
+  });
+
+  it("says the backup hit its own usage limit", async () => {
+    renderStatus({
+      stateJson: stateJson("2999-01-01T00:00:00.000Z"),
+      health: { ...health, noWorkingAi: true, backupIssue: "usage_limit", reason: "provider_quota", waitForReconnect: false },
+      connections: [{ ...claudeForAll, status: "connected" }, { ...openai, status: "connected" }],
+    });
+    expect(container.textContent).toContain("Usage limit reached, and its backup hit its usage limit too. Runs fail until one of them is fixed.");
+    expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("warns in amber when only the backup account is broken", async () => {
+    renderStatus({
+      health: { ...health, lane: "primary", fallbackActive: false, backupIssue: "account", since: null, reason: null, waitForReconnect: false },
+      connections: [{ ...claudeForAll, status: "connected" }, { ...openai, name: null, status: "needs_attention" }],
+    });
+    const box = container.querySelector("[data-testid='usage-limit-fallback-status']");
+    expect(box?.className).toContain("amber");
+    expect(box?.textContent).toContain("Forge has no working backup");
+    expect(box?.textContent).toContain("Its backup, an OpenAI account, needs sign-in.");
+    expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/openai/permissions");
   });
 
   it("renders nothing once the fallback has expired", async () => {

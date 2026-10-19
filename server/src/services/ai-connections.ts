@@ -37,7 +37,7 @@ import { secretService } from "./secrets.js";
 import { probeAiConnectionUsage } from "./ai-connection-usage.js";
 
 /** Same human audience displayed by the existing Connections identity controls. */
-function canUseCredential(
+export function canUseCredential(
   grant: { kind: string; subjectUserId: string | null },
   userId: string | null,
   audience: { subjectType: string; subjectId: string }[],
@@ -50,8 +50,8 @@ function canUseCredential(
 }
 
 export function aiConnectionStatus(
-  connection: typeof toolConnections.$inferSelect,
-  grant: typeof connectionGrants.$inferSelect,
+  connection: Pick<typeof toolConnections.$inferSelect, "enabled" | "status" | "healthStatus" | "config">,
+  grant: Pick<typeof connectionGrants.$inferSelect, "status">,
 ): AiManagedConnectionSummary["status"] {
   if (grant.status === "revoked") return "revoked";
   if (grant.status === "expired") return "expired";

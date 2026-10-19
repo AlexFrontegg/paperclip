@@ -263,7 +263,7 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
     assertBoard(req);
     assertCompanyAccess(req, companyId);
     res.setHeader("Cache-Control", "no-store");
-    res.json(await aiHealthService(db).summarize(companyId));
+    res.json(await aiHealthService(db).summarize(companyId, getActorInfo(req).actorId));
   });
   router.get(
     "/companies/:companyId/ai-connections/:connectionId/usage",

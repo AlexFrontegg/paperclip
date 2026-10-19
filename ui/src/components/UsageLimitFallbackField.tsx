@@ -19,7 +19,16 @@ import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
 import { cn } from "@/lib/utils";
-import { aiConnectionHref, fallbackCause, formatHealthTime, noWorkingAiReason } from "../lib/ai-health";
+import {
+  aiConnectionHref,
+  connectionLabel,
+  connectionProblem,
+  fallbackCause,
+  findConnection,
+  formatHealthTime,
+  hasBrokenBackup,
+  noWorkingAiReason,
+} from "../lib/ai-health";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
 import { Field, ToggleField } from "./agent-config-primitives";
@@ -259,6 +268,17 @@ function FallbackNotice({
   );
 }
 
+function AccountFixLink({ connection, variant }: { connection: CompanyAiConnectionHealth; variant: "destructive" | "outline" }) {
+  const signIn = connection.status === "needs_attention" || connection.status === "expired";
+  return (
+    <Button asChild variant={variant} size="xs">
+      <Link to={aiConnectionHref(connection)}>
+        {signIn ? `Sign in to ${connectionLabel(connection)}` : connection.status === "revoked" ? "Open account" : "Open AI accounts"}
+      </Link>
+    </Button>
+  );
+}
+
 /** Box at the top of the agent page while it runs on its usage-limit fallback or has no working AI. */
 export function UsageLimitFallbackStatus({
   agentName,
@@ -280,21 +300,26 @@ export function UsageLimitFallbackStatus({
   const fallbackState = state && (waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date())) ? state : null;
   if (health?.noWorkingAi) {
     const primaryLabel = getAdapterDisplay(health.primaryAdapterType).label;
-    const brokenConnection = connections.find((connection) =>
-      connection.status !== "connected"
-      && (connection.id === health.primaryConnectionId || connection.id === health.fallbackConnectionId));
+    const brokenConnection = [health.primaryConnectionKey, health.fallbackConnectionKey]
+      .map((key) => findConnection(connections, key))
+      .find((connection) => connection && connection.status !== "connected");
     return (
       <FallbackNotice
         tone="red"
         title={`${agentName} has no working AI`}
         detail={`${noWorkingAiReason(health, connections, primaryLabel)}. Runs fail until one of them is fixed.`}
-        action={brokenConnection ? (
-          <Button asChild variant="destructive" size="xs">
-            <Link to={aiConnectionHref(brokenConnection.id)}>
-              {brokenConnection.status === "revoked" ? "Open account" : `Sign in to "${brokenConnection.name}"`}
-            </Link>
-          </Button>
-        ) : null}
+        action={brokenConnection ? <AccountFixLink connection={brokenConnection} variant="destructive" /> : null}
+      />
+    );
+  }
+  const brokenBackup = health && hasBrokenBackup(health) ? findConnection(connections, health.fallbackConnectionKey) : undefined;
+  if (!fallbackState && brokenBackup) {
+    return (
+      <FallbackNotice
+        tone="amber"
+        title={`${agentName} has no working backup`}
+        detail={`Its backup, ${connectionLabel(brokenBackup)}, ${connectionProblem(brokenBackup.status)}. If ${getAdapterDisplay(health!.primaryAdapterType).label} stops, runs fail until it is fixed.`}
+        action={<AccountFixLink connection={brokenBackup} variant="outline" />}
       />
     );
   }
@@ -302,7 +327,7 @@ export function UsageLimitFallbackStatus({
   const until = formatHealthTime(fallbackState.activeUntil);
   const fallbackLabel = getAdapterDisplay(fallbackState.fallbackAdapterType).label;
   const primaryLabel = getAdapterDisplay(fallbackState.primaryAdapterType).label;
-  const primaryConnection = connections.find((connection) => connection.id === health?.primaryConnectionId);
+  const primaryConnection = findConnection(connections, health?.primaryConnectionKey ?? null);
   const cause = fallbackCause(fallbackState.reason, primaryLabel, primaryConnection);
   const returnAction = (
     <Button variant="outline" size="xs" disabled={pending} onClick={onReturnToPrimary}>

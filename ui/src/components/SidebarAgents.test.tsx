@@ -426,9 +426,9 @@ describe("SidebarAgents", () => {
       connections: [],
       agents: [{
         agentId: "agent-1", lane: "fallback", fallbackActive: true, noWorkingAi: false, since: null, until: null,
-        waitForReconnect: false, reason: "provider_quota", suspendedReason: null,
-        primaryAdapterType: "claude_local", primaryModel: null, primaryConnectionId: null,
-        fallbackAdapterType: "codex_local", fallbackModel: null, fallbackConnectionId: null,
+        waitForReconnect: false, reason: "provider_quota", suspendedReason: null, backupIssue: null,
+        primaryAdapterType: "claude_local", primaryModel: null, primaryConnectionKey: null,
+        fallbackAdapterType: "codex_local", fallbackModel: null, fallbackConnectionKey: null,
       }],
     });
     const currentRoot = createRoot(container);

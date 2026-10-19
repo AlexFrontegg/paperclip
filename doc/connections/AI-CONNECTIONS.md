@@ -291,20 +291,33 @@ does not switch on a sign-out. Design and limits:
 
 `GET /companies/:companyId/ai-health` (board members of the company) lists the
 shared and delegated AI accounts that agents' primaries and fallbacks use, with
-their status and the agents using each, and the agents running on their fallback
-or with no working AI. It holds no credential material. Accounts chosen by the
-responsible user resolve per run, so they are not listed. The board shows:
+their status, and the agents that are on their fallback, have no working AI, or
+whose fallback account is broken. It holds no credential material. Each lane
+comes from `usageLimitFallbackLaneView`, the same decision a run claim makes, so
+a fallback the next claim would clear (disabled, changed setup, reconnected
+primary) is not reported. An account is broken when it needs sign-in, has
+expired, was revoked or deleted, or belongs to someone no longer active in the
+company. Names of personal or restricted accounts the viewer cannot use are
+withheld; their status still counts. Accounts chosen by the responsible user
+resolve per run, so they are not listed.
 
-- a red bar at the top of every page while one of those accounts needs sign-in,
-  has expired or was revoked, or an agent has no working AI. Hiding it is stored
-  in the browser per company and problem set; it returns when the set changes or
-  after 24 hours, and a pill in the top bar reopens it meanwhile.
-- a **Backup** or **No AI** badge on agents in the sidebar and the agents page,
-  with the usual model, the current model, since when, why and when it returns.
+An agent has no working AI when its fallback window is current but runs go to the
+unavailable primary (the fallback is suspended or its account is broken), when its
+latest fallback run since the fallback started failed on a usage limit, or when its
+primary account is broken and the fallback cannot take over. The board shows:
 
-There is no per-account out-of-credits signal, so the board has no warning for
-an account that has run out of credits; the affected agents show **Backup** once
-their fallback takes over.
+- a red bar at the top of every page while one of those accounts is broken or an
+  agent has no working AI, and an amber line with **Retry** when the check itself
+  fails. Hiding the bar is stored in the browser per company and problem set; it
+  returns when the set changes, after 24 hours, or when a check shows the problem
+  gone and it breaks again. A pill in the top bar reopens it meanwhile.
+- a **Backup**, **Backup broken** or **No AI** badge on agents in the sidebar and
+  the agents page, with the usual model, the current or backup model, since when,
+  why and when it returns.
+
+There is no per-account out-of-credits signal before a run hits the limit, so the
+board has no account-level credits warning; an out-of-credits fallback shows as
+**No AI** once one of its runs fails on the limit.
 
 ## Runtime isolation
 

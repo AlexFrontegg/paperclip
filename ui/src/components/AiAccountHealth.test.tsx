@@ -19,15 +19,15 @@ vi.mock("@/lib/router", () => ({
 const agentOnBackup: AgentAiHealth = {
   agentId: "forge", lane: "fallback", fallbackActive: true, noWorkingAi: false,
   since: "2026-10-19T07:54:00.000Z", until: "2026-10-19T08:24:00.000Z", waitForReconnect: true,
-  reason: "primary_signed_out", suspendedReason: null,
-  primaryAdapterType: "claude_local", primaryModel: "claude-opus", primaryConnectionId: "claude-for-all",
-  fallbackAdapterType: "codex_local", fallbackModel: "gpt-6-astra", fallbackConnectionId: "openai",
+  reason: "primary_signed_out", suspendedReason: null, backupIssue: null,
+  primaryAdapterType: "claude_local", primaryModel: "claude-opus", primaryConnectionKey: "account-1",
+  fallbackAdapterType: "codex_local", fallbackModel: "gpt-6-astra", fallbackConnectionKey: "account-2",
 };
 const agentWithoutAi: AgentAiHealth = {
   ...agentOnBackup, agentId: "nureview", lane: "primary", fallbackActive: false, noWorkingAi: true,
-  since: null, until: null, waitForReconnect: false, reason: null, fallbackConnectionId: "spare",
+  since: null, until: null, waitForReconnect: false, reason: null, backupIssue: "account", fallbackConnectionKey: "account-3",
 };
-const claudeForAll: CompanyAiConnectionHealth = { id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention", affectedAgentIds: ["forge", "nureview"] };
+const claudeForAll: CompanyAiConnectionHealth = { key: "account-1", id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention" };
 const brokenClaude: CompanyAiHealth = { connections: [claudeForAll], agents: [agentOnBackup] };
 
 let root: Root;
@@ -68,6 +68,7 @@ afterEach(() => {
   flushSync(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("AiAccountHealthBar", () => {
@@ -86,7 +87,7 @@ describe("AiAccountHealthBar", () => {
   });
 
   it("reports agents with no working AI even without a broken account", async () => {
-    await mount({ connections: [], agents: [{ ...agentWithoutAi, primaryConnectionId: null, fallbackConnectionId: null }] });
+    await mount({ connections: [], agents: [{ ...agentWithoutAi, primaryConnectionKey: null, fallbackConnectionKey: null, backupIssue: "usage_limit" }] });
     expect(bar()?.textContent).toContain("1 agent has no working AI.");
     expect(bar()?.querySelector("a")?.getAttribute("href")).toBe("/apps");
   });
@@ -118,6 +119,59 @@ describe("AiAccountHealthBar", () => {
     expect(pill()).toBeNull();
   });
 
+  it("comes back by itself 24 hours after it was hidden in this session", async () => {
+    await mount(brokenClaude);
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const hiddenAt = Date.now();
+    flushSync(() => hideButton()!.click());
+    await settle();
+    expect(bar()).toBeNull();
+    const reopenTimers = setTimeoutSpy.mock.calls.filter(([, delay]) => typeof delay === "number" && delay > AI_HEALTH_DISMISS_MS - 60_000);
+    expect(reopenTimers.length).toBeGreaterThan(0);
+    for (const [, delay] of reopenTimers) expect(delay).toBeLessThanOrEqual(AI_HEALTH_DISMISS_MS);
+    vi.spyOn(Date, "now").mockReturnValue(hiddenAt + AI_HEALTH_DISMISS_MS + 1);
+    flushSync(() => { for (const [reopen] of reopenTimers) (reopen as () => void)(); });
+    expect(bar()).not.toBeNull();
+    expect(pill()).toBeNull();
+  });
+
+  it("names accounts the viewer cannot use by provider, and counts agents that lost their backup", async () => {
+    const lizzy: AgentAiHealth = { ...agentWithoutAi, agentId: "lizzy", noWorkingAi: false, backupIssue: "account", fallbackConnectionKey: "account-1" };
+    await mount({ connections: [{ ...claudeForAll, name: null }], agents: [lizzy] });
+    expect(bar()?.textContent).toContain("A Claude account needs sign-in. 1 agent has no working backup.");
+  });
+
+  it("forgets a dismissal once the problem recovers, so the same problem shows again", async () => {
+    await mount(brokenClaude);
+    flushSync(() => hideButton()!.click());
+    flushSync(() => root.unmount());
+    root = createRoot(container);
+    await mount({ connections: [{ ...claudeForAll, status: "connected" }], agents: [] });
+    expect(localStorage.getItem("paperclip:ai-health-dismissal:company-1")).toBeNull();
+    flushSync(() => root.unmount());
+    root = createRoot(container);
+    await mount(brokenClaude);
+    expect(bar()).not.toBeNull();
+  });
+
+  it("says when the AI accounts could not be checked and retries", async () => {
+    healthApi.health.mockRejectedValueOnce(new Error("Network down"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    flushSync(() => root.render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><AiAccountHealthBar /></TooltipProvider>
+      </QueryClientProvider>,
+    ));
+    await settle();
+    const failure = container.querySelector("[data-testid='ai-account-health-error']");
+    expect(failure?.textContent).toContain("Could not check the AI accounts agents use.");
+    healthApi.health.mockResolvedValue(brokenClaude);
+    flushSync(() => Array.from(failure!.querySelectorAll("button")).find((button) => button.textContent === "Retry")!.click());
+    await settle();
+    expect(container.querySelector("[data-testid='ai-account-health-error']")).toBeNull();
+    expect(bar()).not.toBeNull();
+  });
+
   it("comes back 24 hours after it was hidden", async () => {
     await mount(brokenClaude);
     flushSync(() => hideButton()!.click());
@@ -142,6 +196,16 @@ describe("AgentAiHealthBadge", () => {
       </>
     ));
     expect(badges()).toEqual(["Backup", "No AI"]);
+  });
+
+  it("marks an agent whose backup account is broken", async () => {
+    const lizzy: AgentAiHealth = { ...agentWithoutAi, agentId: "lizzy", noWorkingAi: false, backupIssue: "account", fallbackConnectionKey: "account-1" };
+    await mount({ connections: [claudeForAll], agents: [lizzy] }, <AgentAiHealthBadge agentId="lizzy" />);
+    expect(badges()).toEqual(["Backup broken"]);
+    const badge = container.querySelector<HTMLElement>("[data-testid='agent-ai-health-badge']")!;
+    flushSync(() => badge.dispatchEvent(new FocusEvent("focusin", { bubbles: true })));
+    await settle();
+    expect(document.body.textContent).toContain("WhyBackup \"Claude for all\" needs sign-in");
   });
 
   it("explains the backup on hover", async () => {

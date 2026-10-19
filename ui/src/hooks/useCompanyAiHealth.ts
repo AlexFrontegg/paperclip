@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { aiConnectionsApi } from "../api/ai-connections";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
-import { readAiHealthDismissal, subscribeAiHealthDismissal, writeAiHealthDismissal } from "../lib/ai-health";
+import { forgetOutdatedAiHealthDismissal, readAiHealthDismissal, subscribeAiHealthDismissal, writeAiHealthDismissal } from "../lib/ai-health";
 
 export function useCompanyAiHealth() {
   const { selectedCompanyId } = useCompany();
@@ -24,11 +24,14 @@ export function useAgentAiHealth(agentId: string | null | undefined) {
 }
 
 /** "Hide for now" of the AI account warning, shared by the bar and the reminder pill. */
-export function useAiHealthDismissal(signature: string) {
+export function useAiHealthDismissal(signature: string, loaded: boolean) {
   const { selectedCompanyId } = useCompany();
   const [, setVersion] = useState(0);
   const rerender = () => setVersion((version) => version + 1);
   useEffect(() => subscribeAiHealthDismissal(rerender), []);
+  useEffect(() => {
+    if (loaded && selectedCompanyId) forgetOutdatedAiHealthDismissal(selectedCompanyId, signature);
+  }, [loaded, selectedCompanyId, signature]);
   const hiddenUntil = selectedCompanyId && signature ? readAiHealthDismissal(selectedCompanyId, signature) : null;
   useEffect(() => {
     if (!hiddenUntil) return;

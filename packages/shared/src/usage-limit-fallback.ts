@@ -179,23 +179,31 @@ export function usageLimitFallbackConfigProblem(input: {
   return null;
 }
 
-export type CompanyAiConnectionHealthStatus = "connected" | "needs_attention" | "expired" | "revoked";
+/** `missing`: the account or its grant was deleted. */
+export type CompanyAiConnectionHealthStatus = "connected" | "needs_attention" | "expired" | "revoked" | "missing";
 
-/** A company AI connection that an agent's primary or fallback uses. */
+/** An AI account that an agent's primary or fallback uses. */
 export interface CompanyAiConnectionHealth {
+  /** Identifies this account and grant within one response. */
+  key: string;
+  /** The connection, for links; a missing account keeps the ID its agents still name. */
   id: string;
-  name: string;
+  /** Null when the viewer cannot use this personal or restricted account, or it is missing. */
+  name: string | null;
   provider: AiConnectionBinding["provider"];
   status: CompanyAiConnectionHealthStatus;
-  affectedAgentIds: string[];
 }
 
-/** An agent that runs on its fallback, or has no working AI. */
+/** Why an agent's fallback cannot take over right now. */
+export type AgentBackupIssue = "account" | "usage_limit" | "suspended" | "not_configured" | "no_switch";
+
+/** An agent that runs on its fallback, has no working AI, or whose fallback account is broken. */
 export interface AgentAiHealth {
   agentId: string;
   lane: UsageLimitFallbackLane;
   fallbackActive: boolean;
   noWorkingAi: boolean;
+  backupIssue: AgentBackupIssue | null;
   since: string | null;
   until: string | null;
   waitForReconnect: boolean;
@@ -203,10 +211,10 @@ export interface AgentAiHealth {
   suspendedReason: string | null;
   primaryAdapterType: string;
   primaryModel: string | null;
-  primaryConnectionId: string | null;
+  primaryConnectionKey: string | null;
   fallbackAdapterType: string | null;
   fallbackModel: string | null;
-  fallbackConnectionId: string | null;
+  fallbackConnectionKey: string | null;
 }
 
 export interface CompanyAiHealth {
