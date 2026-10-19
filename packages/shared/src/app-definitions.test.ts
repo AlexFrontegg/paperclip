@@ -706,6 +706,8 @@ describe("AppDefinition catalog", () => {
       },
     });
     expect(method("github", "own-oauth")?.oauthStrategy).toBeUndefined();
+    // A direct OAuth callback stores only personal identities; dedicated agent identities need the managed method.
+    expect(method("github", "own-oauth")?.grantKinds).toEqual(["user"]);
     expect(method("linear")?.ownershipModes).toEqual(["dcr", "customer"]);
     expect(method("sentry")).toMatchObject({
       key: "mcp-oauth",

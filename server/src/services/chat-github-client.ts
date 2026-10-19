@@ -200,13 +200,12 @@ export async function githubBotCredentials(
   };
 }
 
-/** Least-privilege short-lived token restricted to the single task repository. */
-export async function githubBotRepositoryToken(
+async function issueGithubBotInstallationToken(
   db: Db,
   companyId: string,
   endpointId: string,
-  repositoryId: string,
-  fetchImpl = fetch,
+  request: { repository_ids?: number[]; permissions: Record<string, "read" | "write"> },
+  fetchImpl: typeof fetch,
 ) {
   const result = await githubBotCredentials(db, companyId, endpointId);
   if (
@@ -215,31 +214,69 @@ export async function githubBotRepositoryToken(
     !["active", "verifying"].includes(result.endpoint.status)
   )
     throw conflict("GitHub bot connection is not active");
-  if (
-    !result.credentials.installationId ||
-    !/^[1-9][0-9]*$/.test(repositoryId) ||
-    !Number.isSafeInteger(Number(repositoryId))
-  )
+  if (!result.credentials.installationId)
     throw conflict("Verify the GitHub App installation first");
   const issued = await githubBotRequest<{ token?: string }>(
     fetchImpl,
     result.appJwt,
     `/app/installations/${encodeURIComponent(result.credentials.installationId)}/access_tokens`,
-    {
-      method: "POST",
-      body: {
-        repository_ids: [Number(repositoryId)],
-        permissions: {
-          contents: "read",
-          metadata: "read",
-          issues: "write",
-          pull_requests: "write",
-          checks: "write",
-        },
-      },
-    },
+    { method: "POST", body: request },
   );
   if (!issued.token)
     throw unprocessable("GitHub did not issue an installation token");
   return issued.token;
+}
+
+/** Least-privilege short-lived token restricted to the single task repository. */
+export async function githubBotRepositoryToken(
+  db: Db,
+  companyId: string,
+  endpointId: string,
+  repositoryId: string,
+  fetchImpl = fetch,
+) {
+  if (!/^[1-9][0-9]*$/.test(repositoryId) || !Number.isSafeInteger(Number(repositoryId)))
+    throw conflict("Verify the GitHub App installation first");
+  return issueGithubBotInstallationToken(db, companyId, endpointId, {
+    repository_ids: [Number(repositoryId)],
+    permissions: {
+      contents: "read",
+      metadata: "read",
+      issues: "write",
+      pull_requests: "write",
+      checks: "write",
+    },
+  }, fetchImpl);
+}
+
+/** Short-lived read-only token over the bot App's installation, for a bot-only run's own GitHub reads. */
+export async function githubBotReadOnlyToken(
+  db: Db,
+  companyId: string,
+  connectionId: string,
+  agentId: string,
+  fetchImpl = fetch,
+) {
+  const [endpoint] = await db
+    .select({ id: chatEndpoints.id })
+    .from(chatEndpoints)
+    .where(
+      and(
+        eq(chatEndpoints.companyId, companyId),
+        eq(chatEndpoints.connectionId, connectionId),
+        eq(chatEndpoints.assignedAgentId, agentId),
+        eq(chatEndpoints.provider, "github"),
+      ),
+    )
+    .limit(1);
+  if (!endpoint) throw conflict("GitHub bot connection is unavailable");
+  return issueGithubBotInstallationToken(db, companyId, endpoint.id, {
+    permissions: {
+      contents: "read",
+      metadata: "read",
+      issues: "read",
+      pull_requests: "read",
+      checks: "read",
+    },
+  }, fetchImpl);
 }

@@ -136,9 +136,11 @@ work also runs under the responsible member. A reviewed author gets no company
 membership, cannot use the bot in issue conversations, and cannot approve or
 control governed actions. Issues that they open do not start tasks. Their work
 is not quarantined as low-trust work, so add only people you trust. The run
-never receives a person's or the host's GitHub credentials; only the agent's
-own GitHub account can be used, and gateway tools stay limited to the bot
-connection. When you remove the author, new admissions and tool calls stop.
+never receives a person's or the host's GitHub credentials. Its `gh` and git
+use the agent's own GitHub account when one is connected, otherwise a
+short-lived token from the bot's GitHub App that can only read (code, issues,
+pull requests and checks). Gateway tools stay limited to the bot connection.
+When you remove the author, new admissions and tool calls stop.
 
 Choose automatic events and author filters in **Settings** to control which
 authored PRs and issues start work. Authorized mentions remain available with

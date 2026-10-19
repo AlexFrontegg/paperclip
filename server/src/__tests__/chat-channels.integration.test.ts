@@ -5293,9 +5293,27 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         contextSnapshot: { issueId: task.id, wakeCommentId: comment.id },
       }).returning();
       await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
-      const exported = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id });
-      expect(exported).toMatchObject({ status: "unavailable", reason: "No managed GitHub identity is available for this run" });
-      expect(exported.env).toEqual({});
+      const tokenRequests: unknown[] = [];
+      f.setSupplementalProviderFetch(async (input, init) => {
+        if (!String(input).endsWith("/access_tokens")) return undefined;
+        tokenRequests.push(JSON.parse(String(init?.body)));
+        return Response.json({ token: "bot-read-token" });
+      });
+      const exported = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }, f.providerFetch);
+      // Without the agent's own account, gh reads with the bot App's read-only token, never the member's grant.
+      expect(exported).toMatchObject({ status: "available", source: "bot", authenticationMode: "managed" });
+      expect(exported.env).toMatchObject({ GH_TOKEN: "bot-read-token", GITHUB_TOKEN: "bot-read-token" });
+      expect(tokenRequests).toEqual([{
+        permissions: { contents: "read", metadata: "read", issues: "read", pull_requests: "read", checks: "read" },
+      }]);
+      // A refused bot token must fail closed: "absent" would let git fall back to the server's token.
+      f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/access_tokens")
+        ? new Response("", { status: 403 })
+        : undefined);
+      const refused = await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }, f.providerFetch);
+      expect(refused).toMatchObject({ status: "unavailable" });
+      expect(refused.env).toEqual({});
+      f.setSupplementalProviderFetch(null);
       // A later run without its own GitHub request, such as a timer wake, stays limited to the bot.
       const [timerRun] = await db.insert(heartbeatRuns).values({
         companyId: f.companyId,
@@ -5306,8 +5324,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       }).returning();
       await initializeRunIdentity(db, { companyId: f.companyId, runId: timerRun.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
       expect(await githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id, issueId: task.id })).not.toBeNull();
-      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id }))
-        .toMatchObject({ reason: "No managed GitHub identity is available for this run" });
+      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id }, f.providerFetch))
+        .toMatchObject({ status: "available", source: "bot" });
       f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/pulls/95")
         ? Response.json({ ...pullRequest, head: { sha: "c".repeat(40) } })
         : undefined);
@@ -5470,8 +5488,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         contextSnapshot: { issueId: task.id, wakeCommentId: comment.id },
       }).returning();
       await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
-      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }))
-        .toMatchObject({ reason: "No managed GitHub identity is available for this run" });
+      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id }, f.providerFetch))
+        .toMatchObject({ status: "available", source: "bot", env: { GH_TOKEN: "installation-token" } });
       const readMetadataError = () => githubChatReviewService(db, f.providerFetch).execute({
         companyId: f.companyId,
         agentId: f.assignedAgentId,
