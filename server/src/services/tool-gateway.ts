@@ -117,6 +117,7 @@ import {
   forgetMcpHttpSession,
   readMcpHttpResponse,
   McpHttpResponseError,
+  McpHttpInitializationError,
   mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
 } from "./mcp-http.js";
@@ -6273,7 +6274,7 @@ export function createToolGatewayService(
       if (!response.ok) {
         // Session expiration is recoverable on an explicit retry. Marking the
         // connection unhealthy here would hide every tool and prevent it.
-        if (!sessionExpired) {
+        if (response.status === 401 || response.status === 403) {
           await markRemoteConnectionHealth(connection, "error", "Remote MCP server returned an HTTP error.");
         }
         throw new ToolGatewayHttpError(
@@ -6322,11 +6323,6 @@ export function createToolGatewayService(
       }
       if (payloadRecord.error !== undefined) {
         const errorRecord = asRecord(payloadRecord.error);
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP server returned a JSON-RPC error.",
-        );
         throw new ToolGatewayHttpError(
           502,
           "Remote MCP server returned an error",
@@ -6400,11 +6396,7 @@ export function createToolGatewayService(
         );
       }
       if (error instanceof Error && error.name === "AbortError") {
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP tool call timed out.",
-        );
+        if (mcpSession) forgetMcpHttpSession(mcpSession);
         throw new ToolGatewayHttpError(
           504,
           "Remote MCP tool call timed out",
@@ -6416,11 +6408,10 @@ export function createToolGatewayService(
           },
         );
       }
-      await markRemoteConnectionHealth(
-        connection,
-        "error",
-        "Remote MCP tool call failed.",
-      );
+      if (error instanceof McpHttpInitializationError && (error.status === 401 || error.status === 403)) {
+        await markRemoteConnectionHealth(connection, "error", "Remote MCP session authorization failed.");
+      }
+      if (mcpSession) forgetMcpHttpSession(mcpSession);
       throw new ToolGatewayHttpError(
         502,
         "Remote MCP tool call failed",

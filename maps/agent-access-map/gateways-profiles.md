@@ -97,6 +97,13 @@ approvals and revocation checks remain independent. Regression coverage lives in
 [assigned-tool tests](../../server/src/services/native-runtime/assigned-mcp-tools.test.ts);
 these fixtures do not certify a live external-client journey.
 
+Remote invocation regressions preserve access to authorized sibling tools after
+a fetch failure, timeout, non-authentication HTTP error, or JSON-RPC rejection.
+HTTP 401/403 and insufficient-scope errors keep their connection gates. The
+gateway records each failed invocation and never automatically replays it.
+This covers the gateway service with synthetic providers and a local HTTP
+server, not a live external provider or all client surfaces.
+
 ## `tokens`
 
 Review: `baseline`.
