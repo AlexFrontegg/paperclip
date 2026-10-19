@@ -36,6 +36,7 @@ import type { AskUserQuestionsAnswer, AskUserQuestionsInteraction, IssueThreadIn
 import { PhotonCloudClient, PhotonError, photonFailure, photonSharedIdentity, photonSharedScope } from "./photon/cloud.js";
 import { PhotonChatAdapter, photonThreadId, photonReplyReference } from "./photon/adapter.js";
 import { photonChannelConfigurationSchema, type PhotonChannelConfiguration } from "@paperclipai/shared";
+import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "@paperclipai/shared";
 import type { LiveEvent as PhotonEvent } from "@photon-ai/advanced-imessage";
 import {
   createHash,
@@ -251,7 +252,6 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import {
-  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
   queueIssueAssignmentWakeup,
   type IssueAssignmentWakeupDeps,
 } from "./issue-assignment-wakeup.js";

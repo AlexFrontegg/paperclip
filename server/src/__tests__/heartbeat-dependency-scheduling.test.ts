@@ -28,8 +28,8 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "@paperclipai/shared";
 import { heartbeatService } from "../services/heartbeat.ts";
-import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "../services/issue-assignment-wakeup.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -1341,6 +1341,90 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         mode: "pause",
         interaction: true,
       },
+    });
+  });
+
+  it("runs a connected chat message on a paused task tree as an interaction", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const rootIssueId = randomUUID();
+    const chatCommentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Coordinator",
+      role: "general",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: rootIssueId,
+      companyId,
+      title: "Paused Slack request",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      responsibleUserId: "responsible-user",
+    });
+    const [hold] = await db
+      .insert(issueTreeHolds)
+      .values({
+        companyId,
+        rootIssueId,
+        mode: "pause",
+        status: "active",
+        reason: "chat interaction test hold",
+        releasePolicy: { strategy: "manual" },
+      })
+      .returning();
+    await db.insert(issueComments).values({
+      id: chatCommentId,
+      companyId,
+      issueId: rootIssueId,
+      authorType: "user",
+      authorUserId: "responsible-user",
+      body: "What is left before you resume?",
+    });
+
+    const chatWake = await heartbeat.wakeup(agentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
+      payload: { issueId: rootIssueId, mutation: "chat_message_received", wakeCommentId: chatCommentId },
+      requestedByActorType: "user",
+      requestedByActorId: "responsible-user",
+      contextSnapshot: { issueId: rootIssueId, source: "chat:slack", wakeCommentId: chatCommentId },
+    });
+    expect(chatWake).not.toBeNull();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, chatWake!.id))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded" || run?.status === "cancelled";
+    });
+    const chatRun = await db
+      .select({ status: heartbeatRuns.status, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, chatWake!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(chatRun?.status).toBe("succeeded");
+    expect(chatRun?.contextSnapshot).toMatchObject({
+      treeHoldInteraction: true,
+      activeTreeHold: { holdId: hold.id, rootIssueId, mode: "pause", interaction: true },
     });
   });
 

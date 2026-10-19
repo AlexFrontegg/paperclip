@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/db";
 import {
   CHAT_PROVIDERS,
+  EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
   ISSUE_STATUSES,
   type IssueStatus,
   type IssueTreeControlMode,
@@ -23,7 +24,6 @@ import {
   type IssueTreePreviewWarning,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "./issue-assignment-wakeup.js";
 import type { IssuePostCommitAction } from "./issues.js";
 
 type IssueRow = typeof issues.$inferSelect;
@@ -145,7 +145,8 @@ async function hasVerifiedInteractionWakeRequest(
   const predicates = [
     eq(agentWakeupRequests.companyId, input.companyId),
     sql`${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}`,
-    sql`${agentWakeupRequests.payload} ->> 'commentId' = ${input.commentId}`,
+    // Chat wakes record their comment as wakeCommentId.
+    sql`(${agentWakeupRequests.payload} ->> 'commentId' = ${input.commentId} or ${agentWakeupRequests.payload} ->> 'wakeCommentId' = ${input.commentId})`,
   ];
   if (input.agentId) predicates.push(eq(agentWakeupRequests.agentId, input.agentId));
   if (input.runId && input.wakeupRequestId) {
