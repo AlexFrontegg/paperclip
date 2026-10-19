@@ -45,9 +45,9 @@ export function AiAccountHealthBar() {
     <div
       role="alert"
       data-testid="ai-account-health-bar"
-      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-red-300/60 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-100"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-foreground"
     >
-      <AlertTriangle className="h-4 w-4 shrink-0" />
+      <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
       <p className="min-w-0 flex-1 font-medium">{barMessage(problems)}</p>
       <div className="flex items-center gap-1">
         <Button asChild size="xs" variant="destructive">
