@@ -76,13 +76,13 @@ export function aiHealthService(db: Db) {
     return { accountRows, activeUserIds: new Set(activeUserIds.map((row) => row.userId)), audience };
   }
 
-  /** The latest finished fallback-lane run of each agent since its fallback started, to see whether the fallback hit its own limit. */
+  /** The latest finished fallback-lane run of each agent started since its fallback did, to see whether the fallback hit its own limit. */
   async function fallbackQuotaFailures(companyId: string, activations: Map<string, string>): Promise<Set<string>> {
     if (!activations.size) return new Set();
     const earliest = new Date(Math.min(...[...activations.values()].map((at) => Date.parse(at))));
     const latestRuns = await db.selectDistinctOn([heartbeatRuns.agentId], {
       agentId: heartbeatRuns.agentId,
-      finishedAt: heartbeatRuns.finishedAt,
+      startedAt: heartbeatRuns.startedAt,
       errorCode: heartbeatRuns.errorCode,
       errorFamily: sql<string | null>`${heartbeatRuns.resultJson} ->> 'errorFamily'`,
     })
@@ -90,13 +90,13 @@ export function aiHealthService(db: Db) {
       .where(and(
         eq(heartbeatRuns.companyId, companyId),
         inArray(heartbeatRuns.agentId, [...activations.keys()]),
+        gte(heartbeatRuns.startedAt, earliest),
         isNotNull(heartbeatRuns.finishedAt),
-        gte(heartbeatRuns.finishedAt, earliest),
         sql`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'lane' = 'fallback'`,
       ))
       .orderBy(heartbeatRuns.agentId, desc(heartbeatRuns.finishedAt));
     return new Set(latestRuns
-      .filter((run) => run.finishedAt && run.finishedAt.getTime() >= Date.parse(activations.get(run.agentId)!) && isQuotaFailure(run))
+      .filter((run) => run.startedAt && run.startedAt.getTime() >= Date.parse(activations.get(run.agentId)!) && isQuotaFailure(run))
       .map((run) => run.agentId));
   }
 

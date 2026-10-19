@@ -147,7 +147,7 @@ describeEmbeddedPostgres("company AI health route", () => {
     await c.setFallbackState(forge, { waitForReconnect: true });
     await c.signOut(claude);
     const fallbackRun = (finishedAt: Date, failure: Partial<typeof heartbeatRuns.$inferInsert>) => db.insert(heartbeatRuns).values({
-      companyId: c.companyId, agentId: forge, finishedAt, runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback" } }, ...failure,
+      companyId: c.companyId, agentId: forge, startedAt: new Date(finishedAt.getTime() - 1_000), finishedAt, runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback" } }, ...failure,
     });
     await fallbackRun(new Date(Date.now() - 5 * 60_000), { status: "failed", errorCode: "provider_quota" });
     await fallbackRun(new Date(Date.now() - 30_000), { status: "failed", errorCode: "acpx_turn_failed", resultJson: { errorFamily: "provider_quota" } });
