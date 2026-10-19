@@ -4,7 +4,7 @@ import { Link } from "@/lib/router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { brandChipBadge } from "@/lib/status-colors";
+import { brandBanner, brandChipBadge } from "@/lib/status-colors";
 import { cn } from "@/lib/utils";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { useAgentAiHealth, useAiHealthDismissal, useCompanyAiHealth } from "../hooks/useCompanyAiHealth";
@@ -24,6 +24,7 @@ import {
 } from "../lib/ai-health";
 
 const HIDE_HINT = "Hide until something new breaks, or for 24 hours";
+const STRIP_CLASS = "flex flex-wrap items-center gap-x-3 gap-y-2 border-0 border-b px-3 py-2 text-sm";
 
 function barHeadline({ brokenConnections, agentsWithoutAi }: AiHealthProblems): string {
   if (brokenConnections.length === 1) return `${capitalize(describeConnectionProblem(brokenConnections[0]!))}.`;
@@ -55,7 +56,7 @@ export function AiAccountHealthBar() {
     <div
       role="alert"
       data-testid="ai-account-health-error"
-      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-amber-300/60 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-100"
+      className={cn(STRIP_CLASS, brandBanner.warning)}
     >
       <AlertTriangle className="h-4 w-4 shrink-0" />
       <p className="min-w-0 flex-1">Could not check the AI accounts agents use.</p>
@@ -76,7 +77,7 @@ export function AiAccountHealthBar() {
       <div
         role="alert"
         data-testid="ai-account-health-bar"
-        className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-red-300/60 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-100"
+        className={cn(STRIP_CLASS, brandBanner.danger)}
       >
         <AlertTriangle className="h-4 w-4 shrink-0" />
         <p className="min-w-0 flex-1">

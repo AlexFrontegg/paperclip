@@ -1,5 +1,4 @@
 import { useState, type ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   isUsageLimitFallbackAdapterType,
@@ -18,7 +17,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
-import { cn } from "@/lib/utils";
+import { InlineBanner } from "./InlineBanner";
 import {
   aiConnectionHref,
   connectionLabel,
@@ -243,27 +242,16 @@ function FallbackNotice({
   detail,
   action,
 }: {
-  tone: "amber" | "red";
+  tone: "warning" | "danger";
   title: ReactNode;
   detail: string;
   action: ReactNode;
 }) {
   return (
-    <div
-      data-testid="usage-limit-fallback-status"
-      className={cn(
-        "flex flex-wrap items-start gap-3 border px-3 py-2 text-sm",
-        tone === "red"
-          ? "border-red-300/35 bg-red-300/10 text-red-900 dark:text-red-100"
-          : "border-amber-300/35 bg-amber-300/10 text-amber-900 dark:text-amber-100",
-      )}
-    >
-      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0 flex-1 space-y-1">
-        <p className="font-medium">{title}</p>
-        <p className="opacity-90">{detail}</p>
-      </div>
-      {action}
+    <div data-testid="usage-limit-fallback-status" data-tone={tone}>
+      <InlineBanner tone={tone} title={title} actions={action} compact>
+        {detail}
+      </InlineBanner>
     </div>
   );
 }
@@ -305,7 +293,7 @@ export function UsageLimitFallbackStatus({
       .find((connection) => connection && connection.status !== "connected");
     return (
       <FallbackNotice
-        tone="red"
+        tone="danger"
         title={`${agentName} has no working AI`}
         detail={`${noWorkingAiReason(health, connections, primaryLabel)}. Runs fail until one of them is fixed.`}
         action={brokenConnection ? <AccountFixLink connection={brokenConnection} variant="destructive" /> : null}
@@ -316,7 +304,7 @@ export function UsageLimitFallbackStatus({
   if (!fallbackState && brokenBackup) {
     return (
       <FallbackNotice
-        tone="amber"
+        tone="warning"
         title={`${agentName} has no working backup`}
         detail={`Its backup, ${connectionLabel(brokenBackup)}, ${connectionProblem(brokenBackup.status)}. If ${getAdapterDisplay(health!.primaryAdapterType).label} stops, runs fail until it is fixed.`}
         action={<AccountFixLink connection={brokenBackup} variant="outline" />}
@@ -337,7 +325,7 @@ export function UsageLimitFallbackStatus({
   if (fallbackState.suspendedReason) {
     return (
       <FallbackNotice
-        tone="amber"
+        tone="warning"
         title={cause}
         detail={`The ${fallbackLabel} backup cannot run (${fallbackState.suspendedReason}), so ${agentName} waits for ${primaryLabel} until ${until}.`}
         action={returnAction}
@@ -348,7 +336,7 @@ export function UsageLimitFallbackStatus({
   const returnsWhen = fallbackState.waitForReconnect ? `when ${primaryLabel} is signed in again` : `at ${until}`;
   return (
     <FallbackNotice
-      tone="amber"
+      tone="warning"
       title={(
         <>
           Running on backup: {[fallbackLabel, health?.fallbackModel].filter(Boolean).join(" ")}{" "}

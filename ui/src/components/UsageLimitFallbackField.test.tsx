@@ -262,7 +262,7 @@ describe("UsageLimitFallbackStatus", () => {
       connections: [claudeForAll, openai],
     });
     const box = container.querySelector("[data-testid='usage-limit-fallback-status']");
-    expect(box?.className).toContain("red");
+    expect(box?.getAttribute("data-tone")).toBe("danger");
     expect(box?.textContent).toContain("Forge has no working AI");
     expect(box?.textContent).toContain("\"Claude for all\" needs sign-in, and its backup, \"OpenAI\", was revoked. Runs fail until one of them is fixed.");
     expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/claude-for-all/permissions");
@@ -284,7 +284,7 @@ describe("UsageLimitFallbackStatus", () => {
       connections: [{ ...claudeForAll, status: "connected" }, { ...openai, name: null, status: "needs_attention" }],
     });
     const box = container.querySelector("[data-testid='usage-limit-fallback-status']");
-    expect(box?.className).toContain("amber");
+    expect(box?.getAttribute("data-tone")).toBe("warning");
     expect(box?.textContent).toContain("Forge has no working backup");
     expect(box?.textContent).toContain("Its backup, an OpenAI account, needs sign-in.");
     expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/openai/permissions");
