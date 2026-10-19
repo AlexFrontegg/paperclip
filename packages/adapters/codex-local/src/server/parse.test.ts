@@ -213,6 +213,14 @@ describe("isCodexTransientUpstreamError", () => {
     );
   });
 
+  it("classifies workspace credit exhaustion as provider quota without reset metadata", () => {
+    const errorMessage = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.";
+
+    expect(isCodexProviderQuotaError({ errorMessage })).toBe(true);
+    expect(isCodexTransientUpstreamError({ errorMessage })).toBe(false);
+    expect(extractCodexRetryNotBefore({ errorMessage })).toBeNull();
+  });
+
   it("classifies model-capacity messages as provider quota without reset metadata", () => {
     const errorMessage = "The requested model is at capacity. Please try again later.";
 

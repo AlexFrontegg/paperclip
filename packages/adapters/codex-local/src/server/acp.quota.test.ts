@@ -124,6 +124,23 @@ it("reads usage exhaustion and its reset clock from terminal details", () => {
   });
 });
 
+it("classifies workspace credit exhaustion behind the generic terminal-limit title", () => {
+  expect(classifyCodexTerminalSessionFailure({
+    category: "limit",
+    title: "ACP agent reported a terminal limit failure.",
+    details: "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+  }, now)).toEqual({ errorCode: "provider_quota", errorFamily: "provider_quota" });
+});
+
+it("classifies workspace credit exhaustion from a real ACP child without exposing provider text", async () => {
+  const title = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.";
+  const { result, logs } = await executeFailure(title);
+  expect(result).toMatchObject({ errorCode: "provider_quota", errorFamily: "provider_quota" });
+  expect(result.retryNotBefore).toBeUndefined();
+  expect(JSON.stringify(result)).not.toContain(title);
+  expect(logs).not.toContain(title);
+});
+
 it.each(["Usage limit reached", "Usage limit exceeded", "You’ve hit your usage limit"])(
   "classifies explicit usage exhaustion without a reset clock: %s", (title) => {
     expect(classifyCodexTerminalSessionFailure({ category: "limit", title }, now))
