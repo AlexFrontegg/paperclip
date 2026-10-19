@@ -178,3 +178,38 @@ export function usageLimitFallbackConfigProblem(input: {
   }
   return null;
 }
+
+export type CompanyAiConnectionHealthStatus = "connected" | "needs_attention" | "expired" | "revoked";
+
+/** A company AI connection that an agent's primary or fallback uses. */
+export interface CompanyAiConnectionHealth {
+  id: string;
+  name: string;
+  provider: AiConnectionBinding["provider"];
+  status: CompanyAiConnectionHealthStatus;
+  affectedAgentIds: string[];
+}
+
+/** An agent that runs on its fallback, or has no working AI. */
+export interface AgentAiHealth {
+  agentId: string;
+  lane: UsageLimitFallbackLane;
+  fallbackActive: boolean;
+  noWorkingAi: boolean;
+  since: string | null;
+  until: string | null;
+  waitForReconnect: boolean;
+  reason: UsageLimitFallbackReason | null;
+  suspendedReason: string | null;
+  primaryAdapterType: string;
+  primaryModel: string | null;
+  primaryConnectionId: string | null;
+  fallbackAdapterType: string | null;
+  fallbackModel: string | null;
+  fallbackConnectionId: string | null;
+}
+
+export interface CompanyAiHealth {
+  connections: CompanyAiConnectionHealth[];
+  agents: AgentAiHealth[];
+}

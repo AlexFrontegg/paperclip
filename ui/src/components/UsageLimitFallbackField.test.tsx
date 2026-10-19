@@ -3,8 +3,8 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ComponentProps } from "react";
-import type { UsageLimitFallbackConfig } from "@paperclipai/shared";
+import type { ComponentProps, ReactNode } from "react";
+import type { AgentAiHealth, UsageLimitFallbackConfig } from "@paperclipai/shared";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UsageLimitFallbackField, UsageLimitFallbackStatus } from "./UsageLimitFallbackField";
 
@@ -12,6 +12,9 @@ const connectionFieldProps = vi.hoisted(() => ({ last: undefined as Record<strin
 const pickerProps = vi.hoisted(() => ({
   model: undefined as Record<string, any> | undefined,
   effort: undefined as Record<string, any> | undefined,
+}));
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 vi.mock("../api/agents", () => ({ agentsApi: { adapterModels: vi.fn().mockResolvedValue([]) } }));
 vi.mock("./ai-connections/AiConnectionField", () => ({
@@ -208,40 +211,66 @@ describe("UsageLimitFallbackStatus", () => {
     fallbackAdapterType: "codex_local",
     reason: "provider_quota",
   } });
+  const renderStatus = (props: Partial<ComponentProps<typeof UsageLimitFallbackStatus>>) => flushSync(() => root.render(
+    <UsageLimitFallbackStatus agentName="Forge" stateJson={undefined} pending={false} onReturnToPrimary={vi.fn()} {...props} />,
+  ));
+  const health: AgentAiHealth = {
+    agentId: "agent", lane: "fallback", fallbackActive: true, noWorkingAi: false, since: "2026-10-06T09:00:00.000Z", until: null,
+    waitForReconnect: true, reason: "primary_signed_out", suspendedReason: null,
+    primaryAdapterType: "claude_local", primaryModel: "claude-opus", primaryConnectionId: "claude-for-all",
+    fallbackAdapterType: "codex_local", fallbackModel: "gpt-6-astra", fallbackConnectionId: "openai",
+  };
 
-  it("shows the fallback and lets the user return to the primary while it is active", async () => {
+  it("shows the fallback in a box and lets the user return to the primary while it is active", async () => {
     const onReturnToPrimary = vi.fn();
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={stateJson("2999-01-01T00:00:00.000Z")} pending={false} onReturnToPrimary={onReturnToPrimary} />));
-    expect(container.textContent).toContain("running on Codex");
+    renderStatus({ stateJson: stateJson("2999-01-01T00:00:00.000Z"), onReturnToPrimary });
+    expect(container.textContent).toContain("Running on backup: Codex");
+    expect(container.textContent).toContain("Usage limit reached. It returns to Claude Code by itself at");
     const button = Array.from(container.querySelectorAll("button")).find((item) => item.textContent?.startsWith("Return to"));
     expect(button).toBeDefined();
     flushSync(() => button!.click());
     expect(onReturnToPrimary).toHaveBeenCalledTimes(1);
   });
 
+  it("names the usual and backup models from the company AI health", async () => {
+    const waiting = { usageLimitFallback: { ...stateJson("2000-01-01T00:00:00.000Z").usageLimitFallback, reason: "primary_signed_out", waitForReconnect: true } };
+    renderStatus({ stateJson: waiting, health });
+    expect(container.textContent).toContain("Running on backup: Codex gpt-6-astra (usually Claude Code claude-opus)");
+    expect(container.textContent).toContain("Claude Code needs to sign in again. It returns to Claude Code by itself when Claude Code is signed in again.");
+    renderStatus({ stateJson: waiting, health, connections: [{ id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention", affectedAgentIds: ["agent"] }] });
+    expect(container.textContent).toContain(": \"Claude for all\" needs sign-in. It returns to Claude Code");
+  });
+
   it("says the fallback is paused and the agent is waiting for the primary", async () => {
     const suspended = { usageLimitFallback: { ...stateJson("2999-01-01T00:00:00.000Z").usageLimitFallback, suspendedReason: "codex_auth_required" } };
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={suspended} pending={false} onReturnToPrimary={vi.fn()} />));
-    expect(container.textContent).toContain("the Codex fallback cannot run (codex_auth_required), waiting for Claude Code");
-    expect(container.textContent).not.toContain("running on Codex");
+    renderStatus({ stateJson: suspended });
+    expect(container.textContent).toContain("The Codex backup cannot run (codex_auth_required), so Forge waits for Claude Code until");
+    expect(container.textContent).not.toContain("Running on backup");
   });
 
-  it("says why the agent switched when the primary is down or signed out", async () => {
+  it("says why the agent switched when the primary is down", async () => {
     const base = stateJson("2999-01-01T00:00:00.000Z").usageLimitFallback;
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={{ usageLimitFallback: { ...base, reason: "provider_outage" } }} pending={false} onReturnToPrimary={vi.fn()} />));
-    expect(container.textContent).toContain("Claude Code is not responding: running on Codex until");
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={{ usageLimitFallback: { ...base, reason: "primary_signed_out", waitForReconnect: true } }} pending={false} onReturnToPrimary={vi.fn()} />));
-    expect(container.textContent).toContain("Claude Code needs to sign in again: running on Codex until Claude Code is reconnected");
+    renderStatus({ stateJson: { usageLimitFallback: { ...base, reason: "provider_outage" } } });
+    expect(container.textContent).toContain("Claude Code is not responding. It returns to Claude Code by itself at");
   });
 
-  it("stays visible while waiting for the primary's account to be reconnected", async () => {
-    const waiting = { usageLimitFallback: { ...stateJson("2000-01-01T00:00:00.000Z").usageLimitFallback, reason: "primary_signed_out", waitForReconnect: true } };
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={waiting} pending={false} onReturnToPrimary={vi.fn()} />));
-    expect(container.textContent).toContain("running on Codex until Claude Code is reconnected");
+  it("turns red with a sign-in link when the agent has no working AI", async () => {
+    renderStatus({
+      health: { ...health, lane: "primary", fallbackActive: false, noWorkingAi: true, since: null, reason: null, waitForReconnect: false },
+      connections: [
+        { id: "claude-for-all", name: "Claude for all", provider: "anthropic", status: "needs_attention", affectedAgentIds: ["agent"] },
+        { id: "openai", name: "OpenAI", provider: "openai", status: "revoked", affectedAgentIds: ["agent"] },
+      ],
+    });
+    const box = container.querySelector("[data-testid='usage-limit-fallback-status']");
+    expect(box?.className).toContain("red");
+    expect(box?.textContent).toContain("Forge has no working AI");
+    expect(box?.textContent).toContain("\"Claude for all\" needs sign-in, and its backup, \"OpenAI\", was revoked. Runs fail until one of them is fixed.");
+    expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/claude-for-all/permissions");
   });
 
   it("renders nothing once the fallback has expired", async () => {
-    flushSync(() => root.render(<UsageLimitFallbackStatus stateJson={stateJson("2000-01-01T00:00:00.000Z")} pending={false} onReturnToPrimary={vi.fn()} />));
+    renderStatus({ stateJson: stateJson("2000-01-01T00:00:00.000Z") });
     expect(container.querySelector("[data-testid='usage-limit-fallback-status']")).toBeNull();
   });
 });

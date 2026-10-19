@@ -36,6 +36,10 @@ const mockResourceMembershipsApi = vi.hoisted(() => ({
   updateAgent: vi.fn(),
 }));
 
+const mockAiConnectionsApi = vi.hoisted(() => ({
+  health: vi.fn(),
+}));
+
 const mockOpenNewAgent = vi.hoisted(() => vi.fn());
 const mockPushToast = vi.hoisted(() => vi.fn());
 const mockSetSidebarOpen = vi.hoisted(() => vi.fn());
@@ -114,6 +118,10 @@ vi.mock("../api/auth", () => ({
 
 vi.mock("../api/heartbeats", () => ({
   heartbeatsApi: mockHeartbeatsApi,
+}));
+
+vi.mock("../api/ai-connections", () => ({
+  aiConnectionsApi: mockAiConnectionsApi,
 }));
 
 vi.mock("../api/resourceMemberships", () => ({
@@ -237,6 +245,7 @@ describe("SidebarAgents", () => {
       user: { id: "user-1" },
     });
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
+    mockAiConnectionsApi.health.mockResolvedValue({ connections: [], agents: [] });
     memberships = {
       projectMemberships: {},
       agentMemberships: {},
@@ -409,6 +418,40 @@ describe("SidebarAgents", () => {
 
     // The section header collapses to a divider (no caret / section menu).
     expect(container.querySelector('button[aria-label="Agents section actions"]')).toBeNull();
+  });
+
+  it("marks an agent running on its usage-limit fallback with a Backup badge", async () => {
+    vi.useRealTimers();
+    mockAiConnectionsApi.health.mockResolvedValue({
+      connections: [],
+      agents: [{
+        agentId: "agent-1", lane: "fallback", fallbackActive: true, noWorkingAi: false, since: null, until: null,
+        waitForReconnect: false, reason: "provider_quota", suspendedReason: null,
+        primaryAdapterType: "claude_local", primaryModel: null, primaryConnectionId: null,
+        fallbackAdapterType: "codex_local", fallbackModel: null, fallbackConnectionId: null,
+      }],
+    });
+    const currentRoot = createRoot(container);
+    root = currentRoot;
+    await act(async () => {
+      currentRoot.render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <SidebarAgents streamlined />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    const badge = container.querySelector("[data-testid='agent-ai-health-badge']");
+    expect(badge?.textContent).toBe("Backup");
+    expect(badge?.closest("a")?.textContent).toContain("Alpha");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   });
 
   it("pins starred agents at the top without subheadings and dedupes them from the recent list", async () => {

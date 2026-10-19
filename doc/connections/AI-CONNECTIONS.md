@@ -282,9 +282,29 @@ Problems with the work itself, such as a model refusal, a failing tool or a
 spent turn cap, never switch. A Codex agent's managed MCP gateway tools are not
 available on a Claude fallback.
 
-The agent header shows when the fallback is active or paused, and why. **Return to <primary>**
-(`POST /agents/:id/usage-limit-fallback/clear`) ends it early. Design and limits:
+A box at the top of the agent page shows when the fallback is active or paused, and why.
+**Return to <primary>** (`POST /agents/:id/usage-limit-fallback/clear`) ends it early.
+The box turns red when the agent has no working AI: its primary's shared or
+delegated account is broken and the fallback is missing, broken, suspended or
+does not switch on a sign-out. Design and limits:
 [usage-limit fallback plan](../plans/2026-10-06-usage-limit-fallback.md).
+
+`GET /companies/:companyId/ai-health` (board members of the company) lists the
+shared and delegated AI accounts that agents' primaries and fallbacks use, with
+their status and the agents using each, and the agents running on their fallback
+or with no working AI. It holds no credential material. Accounts chosen by the
+responsible user resolve per run, so they are not listed. The board shows:
+
+- a red bar at the top of every page while one of those accounts needs sign-in,
+  has expired or was revoked, or an agent has no working AI. Hiding it is stored
+  in the browser per company and problem set; it returns when the set changes or
+  after 24 hours, and a pill in the top bar reopens it meanwhile.
+- a **Backup** or **No AI** badge on agents in the sidebar and the agents page,
+  with the usual model, the current model, since when, why and when it returns.
+
+There is no per-account out-of-credits signal, so the board has no warning for
+an account that has run out of credits; the affected agents show **Backup** once
+their fallback takes over.
 
 ## Runtime isolation
 
