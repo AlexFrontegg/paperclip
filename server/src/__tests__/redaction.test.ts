@@ -953,13 +953,12 @@ describe("redaction of long letter/digit runs", () => {
     expect(gluedSecret).toBe(`${blob}apiKey:"${REDACTED_EVENT_VALUE}"`);
   });
 
-  it("scans dash-separated and authorization-shaped runs in linear time", () => {
-    for (const input of [
-      "a-".repeat(30_000),
-      "a--".repeat(20_000),
-      `${"a-".repeat(30_000)}Authorization: Bearer dash-run-secret`,
-    ]) {
-      expect(redactWithinTimeBudget(input)).not.toContain("dash-run-secret");
+  it("scans long dash-separated runs in linear time", () => {
+    for (const run of ["a-".repeat(60_000), "a--".repeat(40_000)]) {
+      expect(redactWithinTimeBudget(`${run} Authorization: Bearer dash-run-secret`))
+        .toBe(`${run} Authorization: ${REDACTED_EVENT_VALUE}`);
+      expect(redactWithinTimeBudget(`${run}Authorization: Bearer glued-run-secret`))
+        .toBe(`${run}Authorization: ${REDACTED_EVENT_VALUE}`);
     }
   });
 });

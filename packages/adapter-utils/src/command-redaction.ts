@@ -15,7 +15,7 @@ const SECRET_NAME_WORDS = String.raw`(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?to
 const SECRET_NAME_PATTERN = String.raw`[A-Za-z0-9_-]*${SECRET_NAME_WORDS}`;
 // A name starts where no name character precedes it, so a long letter/digit run is scanned once.
 const SECRET_NAME_START = String.raw`(?<![A-Za-z0-9_-])`;
-// An option name never spans "--", so each "--" in a long run starts its own short scan.
+// The name stops at "--" because that "--" starts its own candidate, so no scan rereads the run.
 const SECRET_OPTION_NAME_PATTERN = String.raw`(?:[A-Za-z0-9_]|-(?!-))*${SECRET_NAME_WORDS}`;
 
 const COMMAND_CLI_SECRET_OPTION_RE = new RegExp(

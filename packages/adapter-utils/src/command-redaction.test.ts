@@ -177,15 +177,10 @@ describe("redactCommandText on long runs", () => {
   });
 
   it("scans long letter/digit and dash-separated runs in linear time", () => {
-    const base64Url = Buffer.from(Array.from({ length: 48 * 1024 }, (_, index) => (index * 7919) % 256)).toString("base64url");
-    for (const input of [
-      "a".repeat(60_000),
-      "a-".repeat(30_000),
-      "a--".repeat(20_000),
-      base64Url,
-      `${"a-".repeat(30_000)} --token run-secret`,
-    ]) {
-      expect(redactWithinTimeBudget(input)).not.toContain("run-secret");
+    const base64Url = Buffer.from(Array.from({ length: 90_000 }, (_, index) => (index * 7919) % 256)).toString("base64url");
+    for (const run of ["a".repeat(120_000), "a-".repeat(60_000), "a--".repeat(40_000), base64Url]) {
+      expect(redactWithinTimeBudget(`${run} --token run-secret`)).toBe(`${run} --token ${REDACTED_COMMAND_TEXT_VALUE}`);
+      expect(redactWithinTimeBudget(`${run}--token run-secret`)).toBe(`${run}--token ${REDACTED_COMMAND_TEXT_VALUE}`);
     }
   });
 });
