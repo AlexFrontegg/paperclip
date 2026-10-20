@@ -13,9 +13,7 @@ export function isPublicExecutorToolSelector(value: string): boolean {
 
 const SECRET_NAME_WORDS = String.raw`(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?token|token|authorization(?:[-_]?code)?|bearer|secrets?|passwd|passwords?|credentials?|jwt|private[-_]?key|cookie|connectionstring)(?:[-_]?(?:value|header|prod(?:uction)?|dev(?:elopment)?|test|staging|primary|secondary))*`;
 const SECRET_NAME_PATTERN = String.raw`[A-Za-z0-9_-]*${SECRET_NAME_WORDS}`;
-// A name starts where no name character precedes it, so a long letter/digit run is scanned once.
 const SECRET_NAME_START = String.raw`(?<![A-Za-z0-9_-])`;
-// The name stops at "--" because that "--" starts its own candidate, so no scan rereads the run.
 const SECRET_OPTION_NAME_PATTERN = String.raw`(?:[A-Za-z0-9_]|-(?!-))*${SECRET_NAME_WORDS}`;
 
 const COMMAND_CLI_SECRET_OPTION_RE = new RegExp(
@@ -36,7 +34,6 @@ const COMMAND_AUTHORIZATION_BEARER_RE =
   /(\bAuthorization\s*:\s*Bearer\s+)[^\s"'`]+/gi;
 const COMMAND_OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{12,}\b/g;
 const COMMAND_GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
-// Only the first word character of a run can start a token; later starts would rescan the run.
 const COMMAND_JWT_RE =
   /\b(?<![A-Za-z0-9_]-*)[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){2}(?:\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})?\b/g;
 /** Recognize encoded JSON headers, without treating dotted identifiers as tokens. */
