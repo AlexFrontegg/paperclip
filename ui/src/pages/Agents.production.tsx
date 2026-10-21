@@ -18,6 +18,7 @@ import { MembershipAction } from "../components/MembershipAction";
 import { StarToggle } from "../components/StarToggle";
 import { EntityRow } from "../components/EntityRow";
 import { BuiltInLifecycleChip } from "../components/BuiltInAgentBadges";
+import { AgentAiHealthBadge } from "../components/AiAccountHealth";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
@@ -431,6 +432,7 @@ export function Agents() {
         metaSpacerClassName="hidden xl:block"
         trailing={
           <div className="flex items-center gap-3">
+            <AgentAiHealthBadge agentId={agent.id} />
             <div className="hidden sm:flex items-center gap-3">
               {liveRunByAgent.has(agent.id) && (
                 <LiveRunIndicator
@@ -669,6 +671,7 @@ function OrgTreeNode({
               {agent?.title ? ` - ${agent.title}` : ""}
             </span>
           </div>
+          <AgentAiHealthBadge agentId={node.id} />
           {builtInState && showBuiltInLifecycle && (
             <div className="flex items-center gap-1.5 shrink-0">
               <BuiltInLifecycleChip status={builtInState.status} />

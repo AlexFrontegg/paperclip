@@ -80,13 +80,65 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
   };
 }
 
-function fallbackConfigProblem(agent: AgentRow, fallback: UsageLimitFallbackConfig): string | null {
+type AgentSetup = Pick<AgentRow, "adapterType" | "runtimeConfig">;
+
+export function fallbackConfigProblem(agent: AgentSetup, fallback: UsageLimitFallbackConfig): string | null {
   const primaryAiConnection = aiRuntimeConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
   return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
 }
 
-function primaryAiAccount(agent: AgentRow): AiConnectionBinding | null {
+function primaryAiAccount(agent: AgentSetup): AiConnectionBinding | null {
   return aiConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data ?? null;
+}
+
+export type UsageLimitFallbackLaneView = {
+  lane: UsageLimitFallbackLane;
+  /** The saved fallback no longer matches the agent's setup or has ended; the claim deletes it. */
+  stale: boolean;
+  /** End of the current fallback window, extended while a signed-out primary waits for its reconnect. */
+  fallbackUntil: string | null;
+  extended: boolean;
+  /** Why a current fallback window still sends runs to the primary. */
+  primaryBecause: "suspended" | "fallback_account_unavailable" | null;
+};
+
+/**
+ * The lane a claim takes for this agent's saved fallback state. Pure, so the claim and the board's AI health read it the same way.
+ * `primarySignedOut` is whether the primary's shared or delegated account still cannot be used (null when it has none);
+ * `fallbackAccountUsable` is whether the fallback's account can be selected.
+ */
+export function usageLimitFallbackLaneView(input: {
+  agent: AgentSetup;
+  state: UsageLimitFallbackState | null;
+  now: Date;
+  primarySignedOut: boolean | null;
+  fallbackAccountUsable: boolean;
+}): UsageLimitFallbackLaneView {
+  const { agent, state, now } = input;
+  const primaryLane: UsageLimitFallbackLaneView = { lane: "primary", stale: false, fallbackUntil: null, extended: false, primaryBecause: null };
+  if (!state) return primaryLane;
+  const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
+  const sameSetup = fallback !== null
+    && !fallbackConfigProblem(agent, fallback)
+    && (state.reason === "provider_quota" || fallback.switchWhenUnavailable)
+    && state.primaryAdapterType === agent.adapterType
+    && state.fallbackAdapterType === fallback.adapterType
+    && (state.primaryAiConnection === undefined || sameAiConnectionBinding(state.primaryAiConnection, primaryAiAccount(agent)));
+  // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
+  const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason ? input.primarySignedOut : null;
+  if (!sameSetup || !(primarySignedOut ?? isUsageLimitFallbackStateActive(state, now))) return { ...primaryLane, stale: true };
+  let fallbackUntil = state.activeUntil;
+  let extended = false;
+  if (primarySignedOut) {
+    const checkAgainAt = new Date(now.getTime() + USAGE_LIMIT_FALLBACK_UNAVAILABLE_WINDOW_MS);
+    if (Date.parse(fallbackUntil) < checkAgainAt.getTime()) {
+      fallbackUntil = checkAgainAt.toISOString();
+      extended = true;
+    }
+  }
+  if (state.suspendedReason) return { ...primaryLane, fallbackUntil, extended, primaryBecause: "suspended" };
+  if (!input.fallbackAccountUsable) return { ...primaryLane, fallbackUntil, extended, primaryBecause: "fallback_account_unavailable" };
+  return { lane: "fallback", stale: false, fallbackUntil, extended, primaryBecause: null };
 }
 
 // Codex reports a model at capacity like a usage limit, but it is the provider's outage, not this account's limit.
@@ -213,31 +265,21 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   const state = await readAgentUsageLimitFallbackState(db, agent.id);
   if (!state) return primary;
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  const sameSetup = fallback !== null
-    && !fallbackConfigProblem(agent, fallback)
-    && (state.reason === "provider_quota" || fallback.switchWhenUnavailable)
-    && state.primaryAdapterType === agent.adapterType
-    && state.fallbackAdapterType === fallback.adapterType
-    && (state.primaryAiConnection === undefined || sameAiConnectionBinding(state.primaryAiConnection, primaryAiAccount(agent)));
-  // A managed primary account that is still signed out keeps a working fallback past its window; a reconnected one ends it early.
-  const primarySignedOut = sameSetup && state.waitForReconnect && !state.suspendedReason
-    ? await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null)
-    : null;
-  if (!fallback || !sameSetup || !(primarySignedOut ?? isUsageLimitFallbackStateActive(state, now))) {
+  const responsibleUserId = run.responsibleUserId ?? null;
+  const view = usageLimitFallbackLaneView({
+    agent,
+    state,
+    now,
+    primarySignedOut: state.waitForReconnect && !state.suspendedReason ? await primaryAccountSignedOut(db, agent, responsibleUserId) : null,
+    fallbackAccountUsable: fallback !== null && !state.suspendedReason && await fallbackAiConnectionSelectable(db, agent, fallback, responsibleUserId),
+  });
+  if (view.stale) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
     return primary;
   }
-  let fallbackUntil = state.activeUntil;
-  if (primarySignedOut) {
-    const checkAgainAt = new Date(now.getTime() + USAGE_LIMIT_FALLBACK_UNAVAILABLE_WINDOW_MS);
-    if (Date.parse(fallbackUntil) < checkAgainAt.getTime()) {
-      await extendUsageLimitFallback(db, agent.id, state.activatedAt, checkAgainAt);
-      fallbackUntil = checkAgainAt.toISOString();
-    }
-  }
-  if (state.suspendedReason) return primary;
-  if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) return primary;
-  return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil };
+  if (view.extended && view.fallbackUntil) await extendUsageLimitFallback(db, agent.id, state.activatedAt, new Date(view.fallbackUntil));
+  if (view.lane !== "fallback" || !fallback || !view.fallbackUntil) return primary;
+  return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil: view.fallbackUntil };
 }
 
 export type UsageLimitFallbackActivation =
