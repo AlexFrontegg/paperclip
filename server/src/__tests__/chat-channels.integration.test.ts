@@ -5,7 +5,8 @@ import { githubChatReviewService } from "../services/chat-github-reviews.js";
 import { githubReviewCheckService } from "../services/chat-github-checks.js";
 import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
 import { githubBotToolsForSession, githubGuestBotConnectionForSession, githubReadOnlyAgentBotConnection } from "../services/chat-github-tools.js";
-import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
+import { resolveGitHubOperationCredentials, resolveRunGitHubIdentitySelection } from "../services/github-operation-credentials.js";
+import { githubBotReadOnlyToken } from "../services/chat-github-client.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
 import { chatGitHubRegistrations, chatGitHubReviews, toolCatalogEntries } from "@paperclipai/db";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -2780,6 +2781,20 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(tokenRequests).toEqual([{
         permissions: { contents: "read", metadata: "read", issues: "read", pull_requests: "read", checks: "read" },
       }]);
+      // A launcher retry joins a slow token request instead of starting another.
+      let releaseToken = () => {};
+      f.setSupplementalProviderFetch(async (input, init) => {
+        if (!String(input).endsWith("/access_tokens")) return undefined;
+        tokenRequests.push(JSON.parse(String(init?.body)));
+        await new Promise<void>((resolve) => { releaseToken = resolve; });
+        return Response.json({ token: "slow-bot-token" });
+      });
+      const first = githubBotReadOnlyToken(db, f.companyId, f.endpoint.connectionId, f.assignedAgentId, f.providerFetch);
+      const retry = githubBotReadOnlyToken(db, f.companyId, f.endpoint.connectionId, f.assignedAgentId, f.providerFetch);
+      await vi.waitFor(() => expect(tokenRequests).toHaveLength(2));
+      releaseToken();
+      expect(await Promise.all([first, retry])).toEqual(["slow-bot-token", "slow-bot-token"]);
+      expect(tokenRequests).toHaveLength(2);
       // A refused bot token fails closed instead of falling back to the agent's account or the server's token.
       f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/access_tokens")
         ? new Response("", { status: 403 })
@@ -2798,6 +2813,29 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         "owner-user",
       );
       expect(await githubReadOnlyAgentBotConnection(db, agentScope)).toBeNull();
+    });
+    it("counts a run of an agent whose bot turns on read-only GitHub as having managed GitHub access", async () => {
+      const f = await reviewBotFixture();
+      const [task] = await db.insert(issues).values({
+        companyId: f.companyId, title: "Measure review outcomes", status: "todo", assigneeAgentId: f.assignedAgentId, responsibleUserId: "owner-user",
+      }).returning();
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: task.id },
+      }).returning();
+      const selectionInput = { companyId: f.companyId, agentId: f.assignedAgentId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user" };
+      // Without a GitHub connection, launchers and native sessions would otherwise skip the credential broker.
+      expect((await resolveRunGitHubIdentitySelection(db, selectionInput)).configured).toBe(false);
+      const initial = await f.management.configuration(f.endpoint.id, "owner-user");
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: initial.revision, configuration: { ...initial.configuration, agentReadOnlyGitHub: true } },
+        "owner-user",
+      );
+      expect((await resolveRunGitHubIdentitySelection(db, selectionInput)).configured).toBe(true);
     });
     it("reviews a reviewed author whose GitHub account is linked to a viewer", async () => {
       const f = await reviewBotFixture();
