@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import {
   chatEndpoints,
   chatEndpointResources,
@@ -275,6 +275,8 @@ export async function githubPreviousAssessment(
         eq(chatGitHubReviews.repositoryId, repositoryId),
         eq(chatGitHubReviews.pullNumber, pullNumber),
         isNotNull(chatGitHubReviews.assessment),
+        // A review superseded before it was published was never seen on GitHub, so it is no baseline.
+        inArray(chatGitHubReviews.state, ["completed", "incomplete"]),
       ),
     )
     .orderBy(desc(chatGitHubReviews.createdAt))

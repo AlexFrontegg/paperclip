@@ -827,6 +827,8 @@ const SUPPLIED_CREDENTIAL_KEYS: Record<ChatProvider, readonly string[]> = {
 const MAX_INBOUND_TEXT = 100_000;
 const MAX_ERROR_TEXT = 2_000;
 const DELIVERY_PROCESSING_STALE_MS = 60_000;
+// Quick follow-up pushes to a pull request get one automatic review of the newest head.
+export const GITHUB_PUSH_REVIEW_DEBOUNCE_MS = 30_000;
 // Reactions can beat the transaction that persists a just-sent provider
 // message link. Keep that narrow gap durable, but never retain an unbound
 // reaction indefinitely or let it enter the ordinary inbound-message FIFO.
@@ -14218,6 +14220,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         // An operator can repair a failed delivery ledger after its wake was
         // already committed. Keep the immutable receipt and never admit twice.
         if (action.status !== "preparing") return;
+        const push = githubAutomaticEvent(delivery)?.event === "synchronize";
         const issued = await tx
           .update(chatActions)
           .set({
@@ -14226,6 +14229,17 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               ...action.payload,
               attachmentOmissionReasons: attachmentResult.omissionReasons,
             },
+            ...(push
+              ? {
+                  result: {
+                    code: "github_push_debounce",
+                    retryAt: new Date(
+                      delivery.receivedAt.getTime() +
+                        GITHUB_PUSH_REVIEW_DEBOUNCE_MS,
+                    ).toISOString(),
+                  },
+                }
+              : {}),
             updatedAt: new Date(),
           })
           .where(
@@ -14239,6 +14253,120 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           throw new Error("chat_inbound_wakeup_action_claim_lost");
       }),
     );
+    await cancelOutdatedAutomaticReview(deliveryId).catch((error) =>
+      logger.warn(
+        { deliveryId, error: redactError(error) },
+        "could not cancel the automatic review of an older pull request head",
+      ),
+    );
+  }
+
+  function githubAutomaticEvent(delivery: DeliveryRow) {
+    const automatic = delivery.normalizedEvent.githubAutomatic as
+      | { context: GitHubReviewEventContext }
+      | undefined;
+    return automatic?.context ?? null;
+  }
+
+  /** Every review tool refuses an automatic review of an older head, so a newer push cancels that run. */
+  async function cancelOutdatedAutomaticReview(deliveryId: string) {
+    if (!options.heartbeat.cancelRun) return;
+    const [accepted] = await db
+      .select({ delivery: chatDeliveries, payload: chatActions.payload })
+      .from(chatActions)
+      .innerJoin(chatDeliveries, eq(chatDeliveries.id, chatActions.deliveryId))
+      .where(
+        and(
+          eq(chatActions.deliveryId, deliveryId),
+          eq(chatActions.kind, "inbound_wakeup"),
+        ),
+      );
+    const pushed = accepted ? githubAutomaticEvent(accepted.delivery) : null;
+    if (!accepted || !pushed || typeof accepted.payload.issueId !== "string")
+      return;
+    const [running] = await db
+      .select({ run: heartbeatRuns })
+      .from(issues)
+      .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, issues.executionRunId))
+      .where(
+        and(
+          eq(issues.id, accepted.payload.issueId),
+          eq(issues.companyId, accepted.delivery.companyId),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+        ),
+      );
+    if (!running) return;
+    const wakeCommentId = running.run.contextSnapshot?.wakeCommentId;
+    if (typeof wakeCommentId !== "string") return;
+    const [reviewSource] = await db
+      .select({ delivery: chatDeliveries })
+      .from(chatMessageLinks)
+      .innerJoin(chatDeliveries, eq(chatDeliveries.id, chatMessageLinks.deliveryId))
+      .where(
+        and(
+          eq(chatMessageLinks.commentId, wakeCommentId),
+          eq(chatDeliveries.endpointId, accepted.delivery.endpointId),
+        ),
+      );
+    const reviewing = reviewSource
+      ? githubAutomaticEvent(reviewSource.delivery)
+      : null;
+    if (
+      !reviewing ||
+      reviewing.repositoryId !== pushed.repositoryId ||
+      reviewing.pullNumber !== pushed.pullNumber ||
+      reviewing.headSha === pushed.headSha
+    )
+      return;
+    // A run that already submitted its assessment is publishing; publication supersedes it itself.
+    const [publishing] = await db
+      .select({ id: chatGitHubReviews.id })
+      .from(chatGitHubReviews)
+      .where(
+        and(
+          eq(chatGitHubReviews.runId, running.run.id),
+          isNotNull(chatGitHubReviews.assessment),
+        ),
+      )
+      .limit(1);
+    if (publishing) return;
+    await options.heartbeat.cancelRun(
+      running.run.id,
+      "A newer push replaced this automatic review",
+      {
+        errorCode: "github_review_superseded",
+        eventMessage: "automatic review cancelled by a newer push",
+        eventPayload: {
+          endpointId: accepted.delivery.endpointId,
+          deliveryId,
+          headSha: pushed.headSha,
+          supersededHeadSha: reviewing.headSha,
+        },
+      },
+    );
+  }
+
+  /** An automatic review never starts while a newer automatic event for the same pull request waits. */
+  async function newerAutomaticReviewWaiting(delivery: DeliveryRow) {
+    const event = githubAutomaticEvent(delivery);
+    if (!event) return false;
+    const context = sql`${chatDeliveries.normalizedEvent}->'githubAutomatic'->'context'`;
+    const [newer] = await db
+      .select({ id: chatDeliveries.id })
+      .from(chatDeliveries)
+      .where(
+        and(
+          eq(chatDeliveries.companyId, delivery.companyId),
+          eq(chatDeliveries.endpointId, delivery.endpointId),
+          ne(chatDeliveries.id, delivery.id),
+          notInArray(chatDeliveries.state, ["filtered", "failed"]),
+          gt(chatDeliveries.receivedAt, delivery.receivedAt),
+          sql`${context}->>'repositoryId' = ${event.repositoryId}`,
+          sql`${context}->>'pullNumber' = ${String(event.pullNumber)}`,
+        ),
+      )
+      .limit(1);
+    return Boolean(newer);
   }
 
   async function settleRejectedInboundWakeups(onlyDeliveryId?: string) {
@@ -14328,7 +14456,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               redactedError:
                 result.code === "inbound_wakeup_authorization_changed"
                   ? "Input saved. Work was not scheduled because current chat access no longer permits it."
-                  : "Input saved. Its work request was skipped, cancelled, or failed; no automatic replay was performed.",
+                  : result.code === "inbound_wakeup_superseded"
+                    ? "Input saved. A newer push to this pull request replaced this review request."
+                    : "Input saved. Its work request was skipped, cancelled, or failed; no automatic replay was performed.",
               updatedAt: new Date(),
             })
             .where(
@@ -14402,6 +14532,20 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       );
       if (context.delivery.state !== "processed")
         throw new Error("chat_inbound_wakeup_acceptance_not_committed");
+      if (await newerAutomaticReviewWaiting(context.delivery)) {
+        await db
+          .update(chatGitHubReviews)
+          .set({ state: "superseded", updatedAt: new Date() })
+          .where(
+            and(
+              eq(chatGitHubReviews.companyId, claimed.companyId),
+              eq(chatGitHubReviews.deliveryId, deliveryId),
+              isNull(chatGitHubReviews.assessment),
+            ),
+          );
+        await settle("failed", { code: "inbound_wakeup_superseded", attemptCount });
+        return true;
+      }
       await queueIssueAssignmentWakeup({
         heartbeat: options.heartbeat,
         issue: context.issue,
