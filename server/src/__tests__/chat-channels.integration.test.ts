@@ -4,7 +4,7 @@ import { githubChatManagementService } from "../services/chat-github-management.
 import { githubChatReviewService } from "../services/chat-github-reviews.js";
 import { githubReviewCheckService } from "../services/chat-github-checks.js";
 import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
-import { githubBotToolsForSession, githubGuestBotConnectionForSession } from "../services/chat-github-tools.js";
+import { githubBotToolsForSession, githubGuestBotConnectionForSession, githubReadOnlyAgentBotConnection } from "../services/chat-github-tools.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
 import { chatGitHubRegistrations, chatGitHubReviews, toolCatalogEntries } from "@paperclipai/db";
@@ -2729,6 +2729,75 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         contextSnapshot: { issueId: task.id },
       }).returning();
       expect(await githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id, issueId: task.id })).toBeNull();
+    });
+    it("gives every run of an agent whose bot turns on read-only GitHub only the bot's read-only token", async () => {
+      const f = await reviewBotFixture();
+      // The agent's own GitHub account may be able to write, so the switch must outrank it.
+      const applicationId = randomUUID();
+      const githubConnectionId = randomUUID();
+      await db.insert(toolApplications).values({ id: applicationId, companyId: f.companyId, name: applicationId, type: "mcp_http" });
+      await db.insert(toolConnections).values({
+        id: githubConnectionId, companyId: f.companyId, applicationId, name: "GitHub", uid: githubConnectionId,
+        transport: "mcp_remote", status: "active", enabled: true, credentialPolicy: "per_user", config: { sourceTemplateKey: "github" },
+      });
+      await db.insert(toolConnectionInstalls).values({ companyId: f.companyId, connectionId: githubConnectionId, targetType: "agent", targetId: f.assignedAgentId });
+      await db.insert(connectionGrants).values({
+        companyId: f.companyId, connectionId: githubConnectionId, kind: "agent", subjectAgentId: f.assignedAgentId, status: "active",
+        credentialSecretRefs: [{ secretId: randomUUID(), configPath: "oauth.access_token", versionSelector: "latest" }],
+      });
+      const [task] = await db.insert(issues).values({
+        companyId: f.companyId, title: "Measure review outcomes", status: "todo", assigneeAgentId: f.assignedAgentId, responsibleUserId: "owner-user",
+      }).returning();
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "assignment",
+        status: "running",
+        contextSnapshot: { issueId: task.id },
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: run.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      const agentScope = { companyId: f.companyId, agentId: f.assignedAgentId };
+      const runScope = { ...agentScope, runId: run.id };
+      const tokenRequests: unknown[] = [];
+      f.setSupplementalProviderFetch(async (input, init) => {
+        if (!String(input).endsWith("/access_tokens")) return undefined;
+        tokenRequests.push(JSON.parse(String(init?.body)));
+        return Response.json({ token: "bot-read-token" });
+      });
+      // Off by default: a run on a task without a GitHub request never uses the bot.
+      expect(await githubReadOnlyAgentBotConnection(db, agentScope)).toBeNull();
+      expect((await resolveGitHubOperationCredentials(db, runScope, f.providerFetch)).source).not.toBe("bot");
+      const initial = await f.management.configuration(f.endpoint.id, "owner-user");
+      const saved = await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: initial.revision, configuration: { ...initial.configuration, agentReadOnlyGitHub: true } },
+        "owner-user",
+      );
+      expect(await githubReadOnlyAgentBotConnection(db, agentScope)).toBe(f.endpoint.connectionId);
+      const exported = await resolveGitHubOperationCredentials(db, runScope, f.providerFetch);
+      expect(exported).toMatchObject({ status: "available", source: "bot", connectionId: f.endpoint.connectionId, authenticationMode: "managed" });
+      expect(exported.env).toMatchObject({ GH_TOKEN: "bot-read-token", GITHUB_TOKEN: "bot-read-token" });
+      expect(tokenRequests).toEqual([{
+        permissions: { contents: "read", metadata: "read", issues: "read", pull_requests: "read", checks: "read" },
+      }]);
+      // A refused bot token fails closed instead of falling back to the agent's account or the server's token.
+      f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/access_tokens")
+        ? new Response("", { status: 403 })
+        : undefined);
+      const refused = await resolveGitHubOperationCredentials(db, runScope, f.providerFetch);
+      expect(refused).toMatchObject({ status: "unavailable" });
+      expect(refused.env).toEqual({});
+      f.setSupplementalProviderFetch(null);
+      // An archived bot's settings can no longer be changed, so its switch stops applying.
+      await db.update(chatEndpoints).set({ status: "archived" }).where(eq(chatEndpoints.id, f.endpoint.id));
+      expect(await githubReadOnlyAgentBotConnection(db, agentScope)).toBeNull();
+      await db.update(chatEndpoints).set({ status: f.endpoint.status }).where(eq(chatEndpoints.id, f.endpoint.id));
+      await f.management.saveConfiguration(
+        f.endpoint.id,
+        { expectedRevision: saved.revision, configuration: { ...saved.configuration, agentReadOnlyGitHub: false } },
+        "owner-user",
+      );
+      expect(await githubReadOnlyAgentBotConnection(db, agentScope)).toBeNull();
     });
     it("reviews a reviewed author whose GitHub account is linked to a viewer", async () => {
       const f = await reviewBotFixture();

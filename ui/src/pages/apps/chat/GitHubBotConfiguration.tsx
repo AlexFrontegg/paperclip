@@ -472,6 +472,14 @@ export function GitHubAccessEditor({
           .
         </p>
       </div>
+      <GitHubToggle
+        label="Read-only GitHub for this agent"
+        description="Every run of this bot's agent uses the bot's read-only App token for git and gh, never a person's, the server's or the agent's own GitHub login."
+        checked={configuration.agentReadOnlyGitHub ?? false}
+        onChange={(value) =>
+          onChange({ ...configuration, agentReadOnlyGitHub: value })
+        }
+      />
       <div className="space-y-3">
         <h3 className="text-sm font-medium">Linked GitHub accounts</h3>
         {links.isError && (

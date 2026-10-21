@@ -23,7 +23,7 @@ import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slac
 import { settleSlackConversation } from "./slack-conversation-lifecycle.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
 import { toolActionDeliveryService } from "./tool-action-delivery.js";
-import { githubBotConnectionIdsForRun, githubGuestBotConnectionForSession } from "./chat-github-tools.js";
+import { githubBotConnectionIdsForRun, githubGuestBotConnectionForSession, githubReadOnlyAgentBotConnection } from "./chat-github-tools.js";
 import { isBrowserUseConnection } from "./browser-use-client.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
 import { AGENT_CHAT_DIRECTIVE, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
@@ -21973,8 +21973,10 @@ export function heartbeatService(
         !acceptedPlanWakeRoutingDecision?.suppressAcceptedContinuation
           ? [...runScopedMentionedSkillKeys, ACCEPTED_PLAN_CONVERSION_SKILL_KEY]
           : runScopedMentionedSkillKeys;
-      // A run started for a guest or reviewed author never receives a person's or the host's GitHub access.
+      // A run started for a guest or reviewed author, or any run of an agent whose bot
+      // turns on read-only GitHub, never receives a person's or the host's GitHub access.
       const botScopedGitHub = Boolean(
+        (await githubReadOnlyAgentBotConnection(db, { companyId: agent.companyId, agentId: agent.id })) ??
         await githubGuestBotConnectionForSession(db, {
           companyId: agent.companyId,
           agentId: agent.id,

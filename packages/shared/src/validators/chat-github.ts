@@ -85,6 +85,7 @@ export const githubChatConfigurationSchema = z
       )
       .max(500)
       .optional(),
+    agentReadOnlyGitHub: z.boolean().optional(),
     defaults: githubReviewPolicySchema,
     repositories: z
       .record(githubIdSchema, githubReviewPolicySchema.partial())
