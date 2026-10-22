@@ -1,6 +1,7 @@
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+import { assertExternalChannelAssigneeChangeAllowed } from "./chat-channel-binding.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -10696,31 +10697,11 @@ export function issueService(db: Db) {
       } = data;
       // An explicit edit claims the title, even if it keeps the same text.
       if (issueData.title !== undefined) issueData.titleNeedsGeneration = false;
-      if (
-        issueData.assigneeAgentId !== undefined &&
-        issueData.assigneeAgentId !== existing.assigneeAgentId
-      ) {
-        const externalBinding = await dbOrTx
-          .select({ id: chatConversations.id })
-          .from(chatConversations)
-          .where(
-            and(
-              eq(chatConversations.companyId, existing.companyId),
-              eq(chatConversations.issueId, existing.id),
-            ),
-          )
-          .limit(1)
-          .then((rows: Array<{ id: string }>) => rows[0] ?? null);
-        if (externalBinding) {
-          throw conflict(
-            "Agent assignment cannot change while this task is bound to an external channel",
-            {
-              code: "chat_binding_agent_locked",
-              conversationId: externalBinding.id,
-            },
-          );
-        }
-      }
+      await assertExternalChannelAssigneeChangeAllowed(
+        dbOrTx,
+        existing,
+        issueData.assigneeAgentId,
+      );
       const isolatedWorkspacesEnabled = (
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
