@@ -774,7 +774,7 @@ function fakeSlackFetch(botId = `U-BOT-${randomUUID()}`) {
         ),
       );
     }
-    if (url.startsWith("https://slack.com/api/conversations.list")) {
+    if (url.startsWith("https://slack.com/api/users.conversations")) {
       return Promise.resolve(
         new Response(
           JSON.stringify({
@@ -13829,7 +13829,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           },
         );
       }
-      if (url.startsWith("https://slack.com/api/conversations.list")) {
+      if (url.startsWith("https://slack.com/api/users.conversations")) {
         return new Response(
           JSON.stringify({
             ok: true,
@@ -13949,7 +13949,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           },
         );
       }
-      if (url.startsWith("https://slack.com/api/conversations.list")) {
+      if (url.startsWith("https://slack.com/api/users.conversations")) {
         return new Response(
           JSON.stringify({
             ok: true,
@@ -25129,7 +25129,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           },
         );
       }
-      if (url.startsWith("https://slack.com/api/conversations.list")) {
+      if (url.startsWith("https://slack.com/api/users.conversations")) {
         return new Response(
           JSON.stringify({
             ok: true,
@@ -31095,7 +31095,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const authorization = new Headers(init?.headers).get("authorization");
       if (
         includeResumeChannel &&
-        String(input).startsWith("https://slack.com/api/conversations.list") &&
+        String(input).startsWith("https://slack.com/api/users.conversations") &&
         authorization === "Bearer xoxb-blocked-outbox"
       ) {
         return Promise.resolve(
