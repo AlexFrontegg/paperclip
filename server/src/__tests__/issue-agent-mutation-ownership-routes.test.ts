@@ -2680,7 +2680,10 @@ describe("agent issue mutation checkout ownership", () => {
       return {
         transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
         select: vi.fn((selection: Record<string, unknown> = {}) => ({
-          from: vi.fn(() => buildQuery(selection)),
+          from: vi.fn((table: Parameters<typeof getTableName>[0]) =>
+            getTableName(table) === "chat_conversations"
+              ? { where: vi.fn(() => ({ limit: vi.fn(async () => []) })) }
+              : buildQuery(selection)),
         })),
       };
     }
