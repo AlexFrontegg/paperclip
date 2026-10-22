@@ -12860,6 +12860,11 @@ export function issueRoutes(
           req.body.assigneeAgentId as string | null | undefined,
           { actorType: req.actor.type },
         );
+      await assertExternalChannelAssigneeChangeAllowed(
+        db,
+        existing,
+        normalizedAssigneeAgentId,
+      );
       const titleOrDescriptionChanged =
         req.body.title !== undefined || req.body.description !== undefined;
       const existingRelations = Array.isArray(req.body.blockedByIssueIds)

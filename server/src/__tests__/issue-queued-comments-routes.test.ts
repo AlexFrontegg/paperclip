@@ -280,9 +280,13 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
   });
 
-  it.each(["agent", "board"] as const)(
-    "keeps the run alive when the %s attempts a Slack-bound human handoff",
-    async (actorType) => {
+  it.each([
+    ["agent", false],
+    ["board", false],
+    ["board", true],
+  ] as const)(
+    "keeps the run alive when the %s attempts a Slack-bound human handoff (interrupt: %s)",
+    async (actorType, interrupt) => {
       const seeded = await seedQueue();
       await db
         .delete(agentWakeupRequests)
@@ -374,6 +378,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
           assigneeAgentId: null,
           assigneeUserId: "queue-owner",
           comment: "Ready for human review.",
+          ...(interrupt ? { interrupt: true } : {}),
         })
         .expect(409);
 
