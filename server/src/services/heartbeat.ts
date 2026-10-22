@@ -23751,8 +23751,9 @@ export function heartbeatService(
           });
         };
         const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
-          const completeLines = runLogLineBuffer.take(stream, chunk);
-          if (completeLines) await emitRunLog(stream, completeLines);
+          for (const piece of runLogLineBuffer.take(stream, chunk)) {
+            await emitRunLog(stream, piece);
+          }
         };
         flushHeldRunLog = async () => {
           for (const held of runLogLineBuffer.drain()) {
