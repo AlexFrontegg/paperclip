@@ -290,6 +290,7 @@ import {
 import { createNativeSessionHandoffLoader } from "./native-runtime/native-session-handoff.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
+import { createRunLogLineBuffer } from "./run-log-line-buffer.js";
 import {
   providerTraceStore,
   PROVIDER_TRACE_MAX_BYTES,
@@ -23544,6 +23545,8 @@ export function heartbeatService(
       } = { current: null };
       let stdoutExcerpt = "";
       let stderrExcerpt = "";
+      const runLogLineBuffer = createRunLogLineBuffer();
+      let flushHeldRunLog = async () => {};
       let outputSeq = Number(run.lastOutputSeq ?? 0);
       let lastOutputFlushAt: Date | null = run.lastOutputAt ?? null;
       let lastLogRuntimeStatusTouchMs = 0;
@@ -23672,7 +23675,7 @@ export function heartbeatService(
 
         const currentUserRedactionOptions =
           await getCurrentUserRedactionOptions();
-        const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const emitRunLog = async (stream: "stdout" | "stderr", chunk: string) => {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
           );
@@ -23746,6 +23749,15 @@ export function heartbeatService(
               truncated: payloadChunk.length !== sanitizedChunk.length,
             },
           });
+        };
+        const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+          const completeLines = runLogLineBuffer.take(stream, chunk);
+          if (completeLines) await emitRunLog(stream, completeLines);
+        };
+        flushHeldRunLog = async () => {
+          for (const held of runLogLineBuffer.drain()) {
+            await emitRunLog(held.stream, held.text);
+          }
         };
         if (runScopedMentionedSkillKeys.length > 0) {
           await onLog(
@@ -25793,6 +25805,7 @@ export function heartbeatService(
           sha256?: string | null;
           compressed: boolean;
         } | null = null;
+        await flushHeldRunLog();
         if (handle) {
           logSummary = await runLogStore.finalize(handle);
         }
@@ -26527,6 +26540,12 @@ export function heartbeatService(
           sha256?: string | null;
           compressed: boolean;
         } | null = null;
+        await flushHeldRunLog().catch((flushErr) =>
+          logger.warn(
+            { err: flushErr, runId },
+            "failed to flush held run log after error",
+          ),
+        );
         if (handle) {
           try {
             logSummary = await runLogStore.finalize(handle);
