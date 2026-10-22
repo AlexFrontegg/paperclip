@@ -64,6 +64,10 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 - Proving tests: `server/src/__tests__/generic-mcp-connection.test.ts`, `server/src/__tests__/tool-access-service.test.ts`, `packages/shared/src/validators/tool-access.test.ts`, `ui/src/pages/apps/generic-mcp-connect.test.ts`, `ui/src/pages/apps/AppsConnect.test.tsx`.
 - Docs: `doc/connections/GENERIC-REMOTE-MCP.md`.
 
+## Upstream fixes taken early
+
+- Upstream #17216 (`042051904`): Codex shell commands see the secrets assigned to the agent, such as `GITHUB_TOKEN`. Our version leaves out upstream's telemetry keys (#16874, not merged yet). On the next sync, take upstream's version of these files.
+
 ## CI
 
 - `.github/workflows/pr.yml` calls the fork's `pr-trusted.yml@deploy`; `commitperclip-review.yml` skips upstream-only bot steps. Keep upstream's job conditions and swap only the `uses:` line.

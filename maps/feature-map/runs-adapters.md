@@ -47,6 +47,13 @@ Automated: [adapter validation routes](../../server/src/__tests__/agent-adapter-
 
 Manual: Select the intended adapter and account, refresh model choices, and run its environment test. Save, reload, then execute a small task. Repeat with a deliberately unavailable account and verify the failure remains visible.
 
+For Legacy Codex, assign a service secret such as `SLACK_BOT_TOKEN` through agent
+configuration and run a task that checks its presence without printing its value.
+Check both ACP and CLI execution. Remove the binding and repeat on the next run.
+The assigned secret must reach shell tools; an unassigned host token and Codex's
+own login keys must remain unavailable. Verify the same delivery without an
+agent identity. Shell-policy metadata must contain names rather than values.
+
 Choose Codex as the harness; the UI displays its name/icon for both runners.
 Advanced identifies the automatic default and offers Paperclip Runner or Legacy.
 Only new Codex agents default to the native runner on supported macOS or GNU/Linux
