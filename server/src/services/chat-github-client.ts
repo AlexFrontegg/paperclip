@@ -249,13 +249,32 @@ export async function githubBotRepositoryToken(
   }, fetchImpl);
 }
 
+const pendingReadOnlyTokens = new Map<string, Promise<string>>();
+
 /** Short-lived read-only token over the bot App's installation, for a bot-only run's own GitHub reads. */
-export async function githubBotReadOnlyToken(
+export function githubBotReadOnlyToken(
   db: Db,
   companyId: string,
   connectionId: string,
   agentId: string,
   fetchImpl = fetch,
+) {
+  // The gh launcher retries after 10 seconds; a retry joins a slow request instead of starting another.
+  const key = `${companyId}:${connectionId}:${agentId}`;
+  const pending = pendingReadOnlyTokens.get(key);
+  if (pending) return pending;
+  const request = issueGithubBotReadOnlyToken(db, companyId, connectionId, agentId, fetchImpl)
+    .finally(() => pendingReadOnlyTokens.delete(key));
+  pendingReadOnlyTokens.set(key, request);
+  return request;
+}
+
+async function issueGithubBotReadOnlyToken(
+  db: Db,
+  companyId: string,
+  connectionId: string,
+  agentId: string,
+  fetchImpl: typeof fetch,
 ) {
   const [endpoint] = await db
     .select({ id: chatEndpoints.id })

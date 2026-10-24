@@ -163,6 +163,10 @@ vi.mock("./WorktreeBanner", () => ({
   WorktreeBanner: () => null,
 }));
 
+vi.mock("./AiAccountHealth", () => ({
+  AiAccountHealthBar: () => null,
+}));
+
 vi.mock("./DevRestartBanner", () => ({
   DevRestartBanner: () => null,
 }));

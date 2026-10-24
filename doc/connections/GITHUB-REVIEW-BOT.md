@@ -142,6 +142,17 @@ short-lived token from the bot's GitHub App that can only read (code, issues,
 pull requests and checks). Gateway tools stay limited to the bot connection.
 When you remove the author, new admissions and tool calls stop.
 
+Turn on **Read-only GitHub for this agent** to apply the same read-only token to
+every run of the assigned agent: GitHub events, task assignments, routines and
+comments. Its `gh` and git then never use a person's account, the host's login,
+the agent's own GitHub account, or a `GITHUB_TOKEN` in the agent's settings.
+Each command gets a fresh token, so nothing expires during a run. If GitHub
+refuses the token, the command runs without credentials instead of falling back
+to another login. The token can read only what the App installation can read,
+so grant the App access to every repository the agent reads. An archived bot no
+longer applies the setting. The setting covers only `gh` and git; GitHub tools
+that the agent reaches through other connections keep their own access.
+
 Choose automatic events and author filters in **Settings** to control which
 authored PRs and issues start work. Authorized mentions remain available with
 automatic events off and bypass automatic author filters. The shared external-

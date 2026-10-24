@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   isUsageLimitFallbackAdapterType,
@@ -8,13 +8,26 @@ import {
   usageLimitFallbackPermissionDefaults,
   type AiRuntimeConnectionBinding,
   type UsageLimitFallbackAdapterType,
+  type AgentAiHealth,
+  type CompanyAiConnectionHealth,
   type UsageLimitFallbackConfig,
-  type UsageLimitFallbackReason,
 } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { queryKeys } from "../lib/queryKeys";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { Button } from "@/components/ui/button";
+import { Link } from "@/lib/router";
+import { InlineBanner } from "./InlineBanner";
+import {
+  aiConnectionHref,
+  connectionLabel,
+  connectionProblem,
+  fallbackCause,
+  findConnection,
+  formatHealthTime,
+  hasBrokenBackup,
+  noWorkingAiReason,
+} from "../lib/ai-health";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
 import { Field, ToggleField } from "./agent-config-primitives";
@@ -223,40 +236,115 @@ export function UsageLimitFallbackField({
   );
 }
 
-function fallbackCause(reason: UsageLimitFallbackReason, primaryLabel: string): string {
-  if (reason === "provider_outage") return `${primaryLabel} is not responding`;
-  if (reason === "primary_signed_out") return `${primaryLabel} needs to sign in again`;
-  return "Usage limit reached";
+function FallbackNotice({
+  tone,
+  title,
+  detail,
+  action,
+}: {
+  tone: "warning" | "danger";
+  title: ReactNode;
+  detail: string;
+  action: ReactNode;
+}) {
+  return (
+    <div data-testid="usage-limit-fallback-status" data-tone={tone}>
+      <InlineBanner tone={tone} title={title} actions={action} compact>
+        {detail}
+      </InlineBanner>
+    </div>
+  );
 }
 
-/** Header note shown while the agent runs on its usage-limit fallback. */
+function AccountFixLink({ connection, variant }: { connection: CompanyAiConnectionHealth; variant: "destructive" | "outline" }) {
+  const signIn = connection.status === "needs_attention" || connection.status === "expired";
+  return (
+    <Button asChild variant={variant} size="xs">
+      <Link to={aiConnectionHref(connection)}>
+        {signIn ? `Sign in to ${connectionLabel(connection)}` : connection.status === "revoked" ? "Open account" : "Open AI accounts"}
+      </Link>
+    </Button>
+  );
+}
+
+/** Box at the top of the agent page while it runs on its usage-limit fallback or has no working AI. */
 export function UsageLimitFallbackStatus({
+  agentName,
   stateJson,
+  health,
+  connections = [],
   pending,
   onReturnToPrimary,
 }: {
+  agentName: string;
   stateJson: Record<string, unknown> | undefined;
+  health?: AgentAiHealth;
+  connections?: CompanyAiConnectionHealth[];
   pending: boolean;
   onReturnToPrimary: () => void;
 }) {
   const state = readUsageLimitFallbackState(stateJson);
-  const waitingForReconnect = state?.waitForReconnect && !state.suspendedReason;
-  if (!state || !(waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date()))) return null;
-  const until = new Date(state.activeUntil).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-  const fallbackLabel = getAdapterDisplay(state.fallbackAdapterType).label;
-  const primaryLabel = getAdapterDisplay(state.primaryAdapterType).label;
-  const cause = fallbackCause(state.reason, primaryLabel);
+  const waitingForReconnect = Boolean(state?.waitForReconnect && !state.suspendedReason);
+  const fallbackState = state && (waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date())) ? state : null;
+  if (health?.noWorkingAi) {
+    const primaryLabel = getAdapterDisplay(health.primaryAdapterType).label;
+    const brokenConnection = [health.primaryConnectionKey, health.fallbackConnectionKey]
+      .map((key) => findConnection(connections, key))
+      .find((connection) => connection && connection.status !== "connected");
+    return (
+      <FallbackNotice
+        tone="danger"
+        title={`${agentName} has no working AI`}
+        detail={`${noWorkingAiReason(health, connections, primaryLabel)}. Runs fail until one of them is fixed.`}
+        action={brokenConnection ? <AccountFixLink connection={brokenConnection} variant="destructive" /> : null}
+      />
+    );
+  }
+  const brokenBackup = health && hasBrokenBackup(health) ? findConnection(connections, health.fallbackConnectionKey) : undefined;
+  if (!fallbackState && brokenBackup) {
+    return (
+      <FallbackNotice
+        tone="warning"
+        title={`${agentName} has no working backup`}
+        detail={`Its backup, ${connectionLabel(brokenBackup)}, ${connectionProblem(brokenBackup.status)}. If ${getAdapterDisplay(health!.primaryAdapterType).label} stops, runs fail until it is fixed.`}
+        action={<AccountFixLink connection={brokenBackup} variant="outline" />}
+      />
+    );
+  }
+  if (!fallbackState) return null;
+  const until = formatHealthTime(fallbackState.activeUntil);
+  const fallbackLabel = getAdapterDisplay(fallbackState.fallbackAdapterType).label;
+  const primaryLabel = getAdapterDisplay(fallbackState.primaryAdapterType).label;
+  const primaryConnection = findConnection(connections, health?.primaryConnectionKey ?? null);
+  const cause = fallbackCause(fallbackState.reason, primaryLabel, primaryConnection);
+  const returnAction = (
+    <Button variant="outline" size="xs" disabled={pending} onClick={onReturnToPrimary}>
+      Return to {primaryLabel}
+    </Button>
+  );
+  if (fallbackState.suspendedReason) {
+    return (
+      <FallbackNotice
+        tone="warning"
+        title={cause}
+        detail={`The ${fallbackLabel} backup cannot run (${fallbackState.suspendedReason}), so ${agentName} waits for ${primaryLabel} until ${until}.`}
+        action={returnAction}
+      />
+    );
+  }
+  const usualModel = [primaryLabel, health?.primaryModel].filter(Boolean).join(" ");
+  const returnsWhen = fallbackState.waitForReconnect ? `when ${primaryLabel} is signed in again` : `at ${until}`;
   return (
-    <span className="flex items-center gap-2" data-testid="usage-limit-fallback-status">
-      <span>·</span>
-      <span className="text-amber-600 dark:text-amber-400">
-        {state.suspendedReason
-          ? `${cause}: the ${fallbackLabel} fallback cannot run (${state.suspendedReason}), waiting for ${primaryLabel} until ${until}`
-          : `${cause}: running on ${fallbackLabel} until ${state.waitForReconnect ? `${primaryLabel} is reconnected` : until}`}
-      </span>
-      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={onReturnToPrimary}>
-        Return to {primaryLabel}
-      </Button>
-    </span>
+    <FallbackNotice
+      tone="warning"
+      title={(
+        <>
+          Running on backup: {[fallbackLabel, health?.fallbackModel].filter(Boolean).join(" ")}{" "}
+          <span className="font-normal opacity-80">(usually {usualModel})</span>
+        </>
+      )}
+      detail={`Since ${formatHealthTime(fallbackState.activatedAt)}: ${cause}. It returns to ${primaryLabel} by itself ${returnsWhen}.`}
+      action={returnAction}
+    />
   );
 }

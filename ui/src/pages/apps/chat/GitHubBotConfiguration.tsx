@@ -953,6 +953,19 @@ export function GitHubAccessEditor({
           ))}
         </div>
       </section>
+      <section
+        className="space-y-2 border-t border-border pt-6"
+        aria-label="Agent GitHub access"
+      >
+        <GitHubToggle
+          label="Read-only GitHub for this agent"
+          description="Every run of this bot's agent uses the bot's read-only App token for git and gh, never a person's, the server's or the agent's own GitHub login."
+          checked={configuration.agentReadOnlyGitHub ?? false}
+          onChange={(value) =>
+            onChange({ ...configuration, agentReadOnlyGitHub: value })
+          }
+        />
+      </section>
       <GitHubSettingsDisclosure title="Automatic task responsibility">
         <div className="space-y-2">
           {activeMembers.length === 1 && responsible ? (

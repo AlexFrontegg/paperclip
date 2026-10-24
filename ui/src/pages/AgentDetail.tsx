@@ -73,6 +73,7 @@ import { cn } from "../lib/utils";
 import { RunRetryDetails } from "../components/RunRetryDetails";
 import { Button } from "@/components/ui/button";
 import { UsageLimitFallbackStatus } from "../components/UsageLimitFallbackField";
+import { useAgentAiHealth } from "../hooks/useCompanyAiHealth";
 import { Tabs } from "@/components/ui/tabs";
 import { PageTabBar } from "../components/PageTabBar";
 import { AuditFeed } from "./audit/AuditFeed";
@@ -925,9 +926,13 @@ export function AgentDetail() {
     queryFn: () => agentsApi.runtimeState(resolvedAgentId!, resolvedCompanyId ?? undefined),
     enabled: Boolean(resolvedAgentId) && needsOverviewData,
   });
+  const { agentHealth, connections: aiHealthConnections } = useAgentAiHealth(resolvedAgentId);
   const clearUsageLimitFallback = useMutation({
     mutationFn: () => agentsApi.clearUsageLimitFallback(resolvedAgentId!, resolvedCompanyId ?? undefined),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(resolvedAgentId ?? routeAgentRef) }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(resolvedAgentId ?? routeAgentRef) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.aiHealth(resolvedCompanyId ?? "") });
+    },
   });
 
   const { data: heartbeats } = useQuery({
@@ -1260,6 +1265,14 @@ export function AgentDetail() {
           </div>
         </div>
       ) : null}
+      <UsageLimitFallbackStatus
+        agentName={agent.name}
+        stateJson={runtimeState?.stateJson}
+        health={agentHealth}
+        connections={aiHealthConnections}
+        pending={clearUsageLimitFallback.isPending}
+        onReturnToPrimary={() => clearUsageLimitFallback.mutate()}
+      />
       {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-5 border-b border-border pb-6">
         <div className="flex min-w-0 items-center gap-4">
@@ -1274,11 +1287,6 @@ export function AgentDetail() {
                 : null}
               <span>{getAdapterDisplay(agentDisplayAdapterType(agent)).label}</span><span>·</span>
               <span>{agent.title || roleLabels[agent.role] || agent.role}</span>
-              <UsageLimitFallbackStatus
-                stateJson={runtimeState?.stateJson}
-                pending={clearUsageLimitFallback.isPending}
-                onReturnToPrimary={() => clearUsageLimitFallback.mutate()}
-              />
             </div>
             <AgentLifecycleStatus agent={currentAgent} refreshError={lifecycle.isError} onRetry={() => agentAction.mutate("retryLifecycle")} retryPending={agentAction.isPending} />
             <SetPrimaryAgentButton agent={agent} />

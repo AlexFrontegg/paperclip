@@ -13,11 +13,15 @@ import { captureRunIdentity } from "./run-identity.js";
 import {
   buildGitAuthInvocation,
   resolveManagedGitHubCredential,
+  resolveManagedGitHubIdentitySelection,
 } from "./git-credentials.js";
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
-import { githubGuestBotConnectionForSession } from "./chat-github-tools.js";
+import {
+  githubGuestBotConnectionForSession,
+  githubReadOnlyAgentBotConnection,
+} from "./chat-github-tools.js";
 import { githubBotReadOnlyToken } from "./chat-github-client.js";
 
 export type GitHubCredentialSummary = {
@@ -105,6 +109,31 @@ async function allowsGitHubCredentialExport(
   );
 }
 
+/** A bot-scoped run brokers the bot's read-only token, so launchers and native sessions treat it as a managed identity. */
+export async function resolveRunGitHubIdentitySelection(
+  db: Db,
+  input: {
+    companyId: string;
+    agentId: string;
+    runId: string;
+    issueId: string | null;
+    responsibleUserId: string | null;
+  },
+) {
+  // A run started for a guest or reviewed author, or any run of an agent whose bot
+  // turns on read-only GitHub, never receives a person's or the host's GitHub access.
+  const botScoped = Boolean(
+    (await githubReadOnlyAgentBotConnection(db, input)) ??
+      (await githubGuestBotConnectionForSession(db, input)),
+  );
+  const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+    agentId: input.agentId,
+    responsibleUserId: botScoped ? null : input.responsibleUserId,
+    allowStandingDelegation: false,
+  });
+  return botScoped ? { ...selection, configured: true } : selection;
+}
+
 /** No company secrets or ambient credentials are consulted by this path. */
 export async function resolveGitHubOperationCredentials(
   db: Db,
@@ -145,26 +174,31 @@ export async function resolveGitHubOperationCredentials(
       typeof run.contextSnapshot?.issueId === "string"
         ? run.contextSnapshot.issueId
         : null;
+    // The bot's switch outranks the agent's own account, which may be able to write.
+    const readOnlyConnectionId = await githubReadOnlyAgentBotConnection(db, input);
     // A run started for a guest or reviewed author may use only the agent's own account,
     // otherwise the bot App's read-only token.
-    const botConnectionId = await githubGuestBotConnectionForSession(db, { ...input, issueId });
+    const botConnectionId = readOnlyConnectionId
+      ?? await githubGuestBotConnectionForSession(db, { ...input, issueId });
     const botScoped = Boolean(botConnectionId);
-    const resolved = await resolveManagedGitHubCredential(
-      db,
-      secretService(db),
-      input.companyId,
-      {
-        agentId: input.agentId,
-        heartbeatRunId: input.runId,
-        allowStandingDelegation: false,
-        responsibleUserId:
-          botScoped || context?.cause === "company_default"
-            ? null
-            : (context?.responsibleUserId ?? null),
-        issueId,
-      },
-    );
-    if (resolved.credential) {
+    const resolved = readOnlyConnectionId
+      ? null
+      : await resolveManagedGitHubCredential(
+          db,
+          secretService(db),
+          input.companyId,
+          {
+            agentId: input.agentId,
+            heartbeatRunId: input.runId,
+            allowStandingDelegation: false,
+            responsibleUserId:
+              botScoped || context?.cause === "company_default"
+                ? null
+                : (context?.responsibleUserId ?? null),
+            issueId,
+          },
+        );
+    if (resolved?.credential) {
       summary = {
         status: "available",
         source: resolved.credential.identitySource,
@@ -185,9 +219,9 @@ export async function resolveGitHubOperationCredentials(
       env = buildGitAuthInvocation({ token, source: "managed_connection", secretName: null }).env;
     } else {
       summary = {
-        status: resolved.configured ? "unavailable" : "absent",
-        source: resolved.identitySource ?? "personal",
-        reason: resolved.error ?? "No GitHub identity connected",
+        status: resolved?.configured ? "unavailable" : "absent",
+        source: resolved?.identitySource ?? "personal",
+        reason: resolved?.error ?? "No GitHub identity connected",
       };
     }
   } catch {

@@ -5,6 +5,7 @@ import { enqueueFastResponse } from "../../fast-responses.js";
 import { and, eq, sql } from "drizzle-orm";
 import { retryChatControlAdmission } from "../../chat-control-admission-retry.js";
 import type { Db } from "@paperclipai/db";
+import { EXTERNAL_CHAT_MESSAGE_WAKE_REASON } from "@paperclipai/shared";
 import { createDurableChatWakeupRequest, assertDurableChatWakeupReceipt } from "../../durable-chat-wakeup.js";
 import { agentWakeupRequests, chatActions, chatConversations, chatDeliveries, chatEndpoints } from "@paperclipai/db";
 import { forbidden } from "../../../errors.js";
@@ -355,7 +356,7 @@ export function createInboundWakeups(db: Db, options: WakeupOptions) {
       await queueIssueAssignmentWakeup({
         heartbeat: options.heartbeat,
         issue: context.issue,
-        reason: "External chat message received",
+        reason: EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
         mutation: "chat_message_received",
         contextSource: `chat:${context.endpoint.provider}`,
         requestedByActorType: request.requestedByActorType,

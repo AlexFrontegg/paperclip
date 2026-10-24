@@ -22,6 +22,7 @@ import { useToastActions } from "../context/ToastContext";
 import { agentsApi } from "../api/agents";
 import { builtInAgentsApi, type BuiltInAgentStatus } from "../api/builtInAgents";
 import { BuiltInLifecycleChip } from "./BuiltInAgentBadges";
+import { AgentAiHealthBadge } from "./AiAccountHealth";
 import { authApi } from "../api/auth";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -178,14 +179,13 @@ function SidebarAgentItem({
         starred && !isMobile ? "pr-14" : "pr-8",
       )}
       trailing={
-        showBuiltInLifecycle || hasInvalidOrgChain ? (
-          <span className="ml-1 flex shrink-0 items-center gap-1">
-            {showBuiltInLifecycle ? <BuiltInLifecycleChip status={builtInStatus} compact /> : null}
-            {hasInvalidOrgChain ? (
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Invalid reporting chain" />
-            ) : null}
-          </span>
-        ) : undefined
+        <span className="ml-1 flex shrink-0 items-center gap-1 empty:hidden">
+          {showBuiltInLifecycle ? <BuiltInLifecycleChip status={builtInStatus} compact /> : null}
+          <AgentAiHealthBadge agentId={agent.id} />
+          {hasInvalidOrgChain ? (
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Invalid reporting chain" />
+          ) : null}
+        </span>
       }
       trailingLabel={trailingLabel}
       liveAccessory={

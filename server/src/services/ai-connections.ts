@@ -47,7 +47,7 @@ import { secretService } from "./secrets.js";
 import { probeAiConnectionUsage } from "./ai-connection-usage.js";
 
 /** Same human audience displayed by the existing Connections identity controls. */
-function canUseCredential(
+export function canUseCredential(
   grant: { kind: string; subjectUserId: string | null },
   userId: string | null,
   audience: { subjectType: string; subjectId: string }[],
@@ -57,6 +57,17 @@ function canUseCredential(
   return grant.kind === "organization" && (
     audience.length === 0 || audience.some((member) => member.subjectType === "user" && member.subjectId === userId)
   );
+}
+
+export function aiConnectionStatus(
+  connection: Pick<typeof toolConnections.$inferSelect, "enabled" | "status" | "healthStatus" | "config">,
+  grant: Pick<typeof connectionGrants.$inferSelect, "status">,
+): AiManagedConnectionSummary["status"] {
+  if (grant.status === "revoked") return "revoked";
+  if (grant.status === "expired") return "expired";
+  const healthy = grant.status === "active" && connection.enabled && connection.status === "active"
+    && connection.healthStatus === "ok" && !aiSubscriptionNeedsIsolatedLogin(connection.config);
+  return healthy ? "connected" : "needs_attention";
 }
 
 export function aiConnectionService(db: Db) {
@@ -156,17 +167,7 @@ export function aiConnectionService(db: Db) {
             owners.find((owner) => owner.id === grant.subjectUserId)?.name ??
             (grant.subjectUserId === userId ? "You" : "Account owner"),
           isDefault: defaults.some((d) => d.grantId === grant.id),
-          status:
-            grant.status === "revoked"
-              ? ("revoked" as const)
-              : grant.status === "expired"
-                ? ("expired" as const)
-                : grant.status !== "active" ||
-                    !connection.enabled ||
-                    connection.status !== "active" ||
-                    connection.healthStatus !== "ok" || needsReconnect
-                  ? ("needs_attention" as const)
-                  : ("connected" as const),
+          status: aiConnectionStatus(connection, grant),
         },
       ];
     });

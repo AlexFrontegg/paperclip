@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { githubReviewAssessmentSchema } from "@paperclipai/shared";
-import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import {
   chatDeliveries,
   chatMessageLinks,
@@ -389,6 +389,32 @@ export async function githubBotConnectionIdsForRun(
       .filter((row) => row.configuration.toolsEnabled)
       .map((row) => row.connectionId),
   );
+}
+
+/** An archived bot is excluded because its settings can no longer be changed to undo the switch. */
+export async function githubReadOnlyAgentBotConnection(
+  db: Db,
+  input: { companyId: string; agentId: string },
+): Promise<string | null> {
+  const [endpoint] = await db
+    .select({ connectionId: chatEndpoints.connectionId })
+    .from(chatEndpoints)
+    .innerJoin(
+      chatGitHubConfigurations,
+      eq(chatGitHubConfigurations.endpointId, chatEndpoints.id),
+    )
+    .where(
+      and(
+        eq(chatEndpoints.companyId, input.companyId),
+        eq(chatEndpoints.assignedAgentId, input.agentId),
+        eq(chatEndpoints.provider, "github"),
+        ne(chatEndpoints.status, "archived"),
+        sql`${chatGitHubConfigurations.configuration} ->> 'agentReadOnlyGitHub' = 'true'`,
+      ),
+    )
+    .orderBy(asc(chatEndpoints.createdAt))
+    .limit(1);
+  return endpoint?.connectionId ?? null;
 }
 
 /** Admission records whether this run was sponsored. Linking later cannot lend

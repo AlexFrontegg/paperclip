@@ -17,9 +17,8 @@ import type { companySkillService } from "../company-skills.js";
 import { connectionIntentService } from "../connection-intents.js";
 import { prepareConnectionInstructionDelivery } from "../connection-instructions.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "../connector-runtime.js";
-import { githubGuestBotConnectionForSession } from "../chat-github-tools.js";
 import { readRunAdapterDispatch } from "../usage-limit-fallback.js";
-import { resolveManagedGitHubIdentitySelection } from "../git-credentials.js";
+import { resolveRunGitHubIdentitySelection } from "../github-operation-credentials.js";
 import { resolveAssignedConnectionInstructionsForRun } from "../native-runtime/assigned-mcp-tools.js";
 import { recordFailedSkillPreparation, type NativeRunHistoricalSpan } from "../native-runtime/native-run-trace.js";
 import { collectRunFailureSecretValues } from "../run-failure-diagnostics.js";
@@ -123,26 +122,14 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     !acceptedPlanWakeRoutingDecision?.suppressAcceptedContinuation
       ? [...runScopedMentionedSkillKeys, ACCEPTED_PLAN_CONVERSION_SKILL_KEY]
       : runScopedMentionedSkillKeys;
-  // A run started for a guest or reviewed author never receives a person's or the host's GitHub access.
-  const botScopedGitHub = Boolean(
-    await githubGuestBotConnectionForSession(db, {
-      companyId: agent.companyId,
-      agentId: agent.id,
-      runId: run.id,
-      issueId,
-    }),
-  );
-  const githubSelection = await time("configuration_github_identity", () => resolveManagedGitHubIdentitySelection(
-    db,
-    agent.companyId,
-    {
-      agentId: agent.id,
-      responsibleUserId: botScopedGitHub ? null : responsibleUserId,
-      allowStandingDelegation: false,
-    },
-  ));
+  const githubSelection = await time("configuration_github_identity", () => resolveRunGitHubIdentitySelection(db, {
+    companyId: agent.companyId,
+    agentId: agent.id,
+    runId: run.id,
+    issueId,
+    responsibleUserId,
+  }));
   const useHostGitHub =
-    !botScopedGitHub &&
     !githubSelection.configured &&
     trustPreset.kind === "standard" &&
     ["local", "ssh"].includes(

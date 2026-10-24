@@ -26,17 +26,36 @@ Hook points:
 
 Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `server/src/__tests__/agent-usage-limit-fallback-routes.test.ts`, `packages/shared/src/usage-limit-fallback.test.ts`, `ui/src/components/UsageLimitFallbackField.test.tsx`, `ui/src/lib/agent-config-patch.test.ts`.
 
+**AI account health:** every board page warns when a shared AI account needs sign-in or an agent runs on its fallback or has no working AI.
+- Hook points: `server/src/services/ai-health.ts`, `GET /companies/:companyId/ai-health` in `routes/ai-connections.ts`, `routes/openapi.ts`; UI `components/AiAccountHealth.tsx`, `hooks/useCompanyAiHealth.ts`, `lib/ai-health.ts`, `Layout.tsx`, `BreadcrumbBar.tsx`, `SidebarAgents.tsx`, `pages/Agents.tsx`, `pages/AgentDetail.tsx` (and their `.production.tsx` copies).
+- Proving tests: `server/src/__tests__/ai-health-routes.test.ts`, `ui/src/components/AiAccountHealth.test.tsx`, `ui/src/components/SidebarAgents.test.tsx`, `ui/src/components/Layout.test.tsx`, `ui/src/components/BreadcrumbBar.test.tsx`.
+
+**Codex out of credits:** a Codex workspace that is out of credits counts as a provider quota failure, so the fallback takes over. Hook points: the quota patterns in `packages/adapters/codex-local/src/server/parse.ts` and `acp.ts`. Proving tests: `packages/adapters/codex-local/src/server/parse.test.ts`, `acp.quota.test.ts`.
+
 ## GitHub review bot
 
 - **Own GitHub App sign-in:** `deploymentOAuthClient` in `packages/shared/src/types/app-definition.ts` and `app-definitions/github.json`, which offers only personal accounts for this method. Test: `packages/shared/src/app-definitions.test.ts`.
 - **Reviewed authors:** listed teammates without a Paperclip account get automatic reviews, and can mention or reply to the bot in pull request conversations. Their runs use only the bot's GitHub connection.
 - **Read-only bot token for `gh`:** bot-only runs without a dedicated agent account get a short-lived installation token from the bot's GitHub App with read permissions only (`githubBotReadOnlyToken` in `chat-github-client.ts`, used by `github-operation-credentials.ts`; run source `bot`). A refused token exports nothing.
+- **Read-only GitHub for this agent:** the bot setting `agentReadOnlyGitHub` gives every run of the bot's agent only the bot's read-only token for git and `gh` (`githubReadOnlyAgentBotConnection` in `chat-github-tools.ts`, `resolveRunGitHubIdentitySelection` in `github-operation-credentials.ts`, called from `heartbeat/execution-configuration.ts`).
 - **Resolve fixed findings:** the `resolve_finding` bot tool replies in and resolves the bot's own inline threads at the current head, behind the "Resolve fixed findings" setting. `GITHUB_PUBLICATION_TOOL_NAMES` in `chat-github-reviews.ts` lists the tools whose retries report the saved receipt; `tool-gateway.ts` uses it too.
 - Hook points: `chat-github-review-policy.ts`, `chat-github-events.ts`, `chat-github-reviews.ts`, `chat-github-tools.ts`, `chat-github-management.ts`, `chat-github-response-comments.ts`, `chat-github-client.ts`, `github-operation-credentials.ts`, `chat-channels/github/*`, `chat-channels/inbound/*`, `chat-channels/provider-effects.ts`, `heartbeat/execution-configuration.ts` (bot-only GitHub), `native-runtime/chat-attachment-reuse.ts`, `packages/shared/src/{types,validators}/chat-github.ts`, UI `pages/apps/chat/GitHubBotConfiguration.tsx`.
 - Proving tests: `server/src/__tests__/chat-channels.integration.test.ts`, `server/src/__tests__/heartbeat-reviewed-chat-binding.integration.test.ts`, `server/src/services/chat-github-review-policy.test.ts`, `packages/shared/src/validators/chat-github.test.ts`, `ui/src/pages/apps/chat/GitHubAccessEditor.test.tsx`.
 - Docs: `doc/connections/GITHUB-REVIEW-BOT.md`, `maps/*/chat-channels.md`.
 
 The upstream-layout versions of the four GitHub features are kept on branch `ports/github-bot` (upstream master plus the port commits). Take these files from that branch when an upstream merge conflicts in them.
+
+## Chat messages wake blocked tasks
+
+A message in a connected chat conversation (Slack and the other chat providers) wakes a task that is blocked or paused, as a comment does. Upstream issues #15040 and #15974.
+- Hook points: `EXTERNAL_CHAT_MESSAGE_WAKE_REASON` in `packages/shared/src/types/chat-channels.ts`, used by `server/src/services/chat-channels/inbound/wakeups.ts` and listed in the interaction wake reasons of `server/src/services/issue-tree-control.ts`, which also matches the chat wake's `wakeCommentId`.
+- Proving test: `server/src/__tests__/heartbeat-dependency-scheduling.test.ts`.
+
+## Linear-time redaction
+
+Long base64 blobs in run logs no longer make the secret patterns scan in quadratic time and freeze the server: the name patterns start with a lookbehind instead of `\b`.
+- Hook points: `packages/adapter-utils/src/command-redaction.ts`, `server/src/redaction.ts`.
+- Proving tests: `packages/adapter-utils/src/command-redaction.test.ts`, `server/src/__tests__/redaction.test.ts`, `server/src/__tests__/heartbeat-run-log.test.ts`.
 
 ## Remote MCP client credentials
 
