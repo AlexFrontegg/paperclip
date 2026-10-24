@@ -215,6 +215,19 @@ describePostgres("heartbeat retry module database wiring", () => {
     return { companyId, agent, issue, run };
   }
 
+  it("picks the Codex retry mode from the adapter that ran a fallback run", async () => {
+    const { run, agent, companyId } = await fixture();
+    // The stored agent is a Claude primary; recovery paths pass it, not the fallback lane's Codex agent.
+    const [claudePrimary] = await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agent.id)).returning();
+    const [fallbackRun] = await db.update(heartbeatRuns).set({
+      runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback", primaryAdapterType: "claude_local" } },
+    }).where(eq(heartbeatRuns.id, run.id)).returning();
+    const result = await boundRetries().retries.scheduleBoundedRetryForRun(fallbackRun, claudePrimary, { now, random: () => 0 });
+    expect(result.outcome).toBe("scheduled");
+    const [successor] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, run.id)));
+    expect(successor.contextSnapshot).toMatchObject({ codexTransientFallbackMode: "same_session" });
+  });
+
   it("reuses one successor across concurrent factories and keeps writes committed before callbacks", async () => {
     const { run, agent, issue, companyId } = await fixture();
     const first = boundRetries(), second = boundRetries();

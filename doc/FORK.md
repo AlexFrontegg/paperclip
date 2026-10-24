@@ -12,10 +12,10 @@ Core:
 
 Hook points:
 - `heartbeat.ts` `executeRun`: the run executes `effectiveAgentForRun(storedAgent, run)`; fallback runs drop the issue's engine overrides; a resume from a run on another adapter starts fresh; a deferred fallback retry is scheduled after cleanup.
-- `heartbeat/retries.ts`: `scheduleBoundedRetryForRun` switches to the fallback on a quota or repeated outage failure; `handleUsageLimitFallbackAccountFailure`; `deferredUsageLimitFallbackRetries`.
+- `heartbeat/retries.ts`: `scheduleBoundedRetryForRun` switches to the fallback on a quota or repeated outage failure, and picks Codex's transient retry mode from the failed run's claimed adapter; `handleUsageLimitFallbackAccountFailure`; `deferredUsageLimitFallbackRetries`.
 - `heartbeat/queue.ts`: the claim stores `adapterDispatch` from `resolveAdapterDispatchForClaim`.
 - `heartbeat/scheduling.ts`: a quota recovery monitor lets the other lane take the attempt.
-- `heartbeat/run-completion.ts`: account failures go to the fallback handler; the primary's task session is cleared after a fallback turn.
+- `heartbeat/run-completion.ts`: account failures go to the fallback handler; a turn on either lane clears the other lane's task session.
 - `heartbeat/run-control.ts`: release waits for a deferred fallback retry; Stop sends SIGINT by the claimed adapter.
 - `heartbeat/run-state.ts`: `dispatchedAdapterType` in run lists; a session reset clears the fallback's sessions and keeps the fallback state.
 - `heartbeat/session-preparation.ts`, `heartbeat/execution-configuration.ts`, `execution-workspace-policy.ts` (`withoutFallbackEngineOverrides`).

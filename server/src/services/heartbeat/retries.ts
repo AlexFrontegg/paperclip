@@ -45,7 +45,7 @@ import { logger } from "../../middleware/logger.js";
 import { parseObject } from "../../adapters/utils.js";
 import { logActivity } from "../activity-log.js";
 import { isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, type UsageLimitFallbackReason } from "@paperclipai/shared";
-import { activateUsageLimitFallback, isRunAiAccountFailure, readAgentUsageLimitFallbackState, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "../usage-limit-fallback.js";
+import { activateUsageLimitFallback, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "../usage-limit-fallback.js";
 import { readContinuationAttempt } from "../recovery/index.js";
 import { withRecoveryContext } from "../recovery/status-only-context.js";
 import {
@@ -604,8 +604,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
         ? readTransientRecoveryContractFromRun(run)
         : null;
+    // Recovery paths pass the stored agent; the failed run's claimed adapter says whether Codex ran it.
+    const failedRunAdapterType = readRunAdapterDispatch(run)?.adapterType ?? agent.adapterType;
     const codexTransientFallbackMode =
-      agent.adapterType === "codex_local" &&
+      failedRunAdapterType === "codex_local" &&
       transientRecovery?.errorFamily === "transient_upstream"
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;

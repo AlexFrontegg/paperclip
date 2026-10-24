@@ -29,6 +29,7 @@ import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publi
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
+import { readUsageLimitFallbackConfig } from "@paperclipai/shared";
 import { readRunAdapterDispatch } from "../usage-limit-fallback.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
@@ -1029,12 +1030,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             lastError: runErrorMessage,
           });
         }
-        // After a fallback turn the primary's session for this task is stale, so the primary resumes fresh with the
-        // handoff. Only a fallback run with positive evidence that no provider work started leaves it alone.
+        // A turn on one lane makes the other lane's session for this task stale, so that lane resumes fresh with the
+        // handoff. Only a run with positive evidence that no provider work started leaves it alone.
         const dispatch = readRunAdapterDispatch(finalizedRun);
-        const fallbackStartedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
-        if (!fallbackStartedNoWork && dispatch?.lane === "fallback" && dispatch.primaryAdapterType && dispatch.primaryAdapterType !== agent.adapterType) {
-          await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: dispatch.primaryAdapterType });
+        const startedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
+        const otherLaneAdapterType = dispatch?.lane === "fallback"
+          ? dispatch.primaryAdapterType
+          : readUsageLimitFallbackConfig(storedAgent.runtimeConfig)?.adapterType;
+        if (!startedNoWork && otherLaneAdapterType && otherLaneAdapterType !== agent.adapterType) {
+          await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: otherLaneAdapterType });
         }
       }
     }

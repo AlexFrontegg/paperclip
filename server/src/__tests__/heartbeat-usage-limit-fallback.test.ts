@@ -430,6 +430,29 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     }, { timeout: 10_000, interval: 50 }).toEqual([]);
   });
 
+  it("clears the fallback's stale session for a task after a primary turn", async () => {
+    const agent = await seedAgent();
+    const taskKey = "issue-task";
+    await db.insert(agentTaskSessions).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: "codex_local",
+      taskKey,
+      sessionParamsJson: { sessionId: "codex-session" },
+      sessionDisplayId: "codex-session",
+    });
+    claudeHitsLimit = false;
+    const run = await heartbeat.invoke(agent.id, "on_demand", { taskKey }, "manual");
+    const finished = await waitForRun(run!.id);
+    expect(finished.status).toBe("succeeded");
+    expect(dispatchOf(finished)?.lane).not.toBe("fallback");
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    await expect.poll(async () => {
+      const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+      return sessions.filter((session) => session.adapterType === "codex_local" && session.taskKey === taskKey);
+    }, { timeout: 10_000, interval: 50 }).toEqual([]);
+  });
+
   async function activeFallback(agent: typeof agents.$inferSelect, until = RESET_AT) {
     const activation = await activateUsageLimitFallback(db, {
       agent,
