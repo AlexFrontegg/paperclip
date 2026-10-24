@@ -14,5 +14,5 @@ permissions:
 jobs:
   ci:
     if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
-    # Pinned to deploy so CI matches the fork's code and a PR cannot change its own checks.
-    uses: AlexFrontegg/paperclip/.github/workflows/pr-trusted.yml@deploy
+    # TEMPORARY for the upstream sync: run this PR's own pipeline. Revert to the @deploy pin before merging.
+    uses: ./.github/workflows/pr-trusted.yml
