@@ -4717,6 +4717,20 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             ),
           );
       }
+      // Resolving fixed findings is optional, so a policy that blocks it leaves verification green.
+      const [resolveFinding] = await db
+        .select({ id: toolCatalogEntries.id })
+        .from(toolCatalogEntries)
+        .where(
+          and(
+            eq(toolCatalogEntries.connectionId, f.endpoint.connectionId),
+            eq(toolCatalogEntries.toolName, "resolve_finding"),
+          ),
+        );
+      await db.insert(toolPolicies).values({ companyId: f.companyId, name: "Block resolving findings", policyType: "block", priority: 0,
+        selectors: { catalogEntryId: resolveFinding!.id },
+      });
+      expect(await tools()).toMatchObject({ ok: true });
       contents = "write";
       expect(
         (await f.management.verification(f.endpoint.id)).checks.find(
@@ -5326,6 +5340,18 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await initializeRunIdentity(db, { companyId: f.companyId, runId: timerRun.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
       expect(await githubGuestBotConnectionForSession(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id, issueId: task.id })).not.toBeNull();
       expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: timerRun.id }, f.providerFetch))
+        .toMatchObject({ status: "available", source: "bot" });
+      // A run that names its task only as nativeIssueId stays limited to the bot too.
+      const [nativeRun] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        invocationSource: "timer",
+        status: "running",
+        contextSnapshot: {},
+        nativeIssueId: task.id,
+      }).returning();
+      await initializeRunIdentity(db, { companyId: f.companyId, runId: nativeRun.id, issueId: task.id, responsibleUserId: "owner-user", cause: "issue_responsible_user" });
+      expect(await resolveGitHubOperationCredentials(db, { companyId: f.companyId, agentId: f.assignedAgentId, runId: nativeRun.id }, f.providerFetch))
         .toMatchObject({ status: "available", source: "bot" });
       f.setSupplementalProviderFetch(async (input) => String(input).endsWith("/pulls/95")
         ? Response.json({ ...pullRequest, head: { sha: "c".repeat(40) } })

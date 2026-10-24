@@ -2329,7 +2329,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           })
           .where(eq(toolConnections.id, taskEndpoint.connectionId));
         if (endpoint.provider === "github") {
-          // A reviewed author's task keeps bot-only GitHub access even when the author is a linked member.
+          // A reviewed author's task keeps bot-only GitHub access, also when the author's linked identity is not admitted as a member.
           await retainGitHubDeliveryAuthority(taskTx, taskEndpoint, activeDelivery.id, reviewedAuthorReview ? null : principalResolution.userId, taskUserId);
         }
         if (githubAutomatic) {
@@ -2390,13 +2390,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             tx,
             currentEndpoint,
             principalResolution.principal.id,
-            githubAutomatic ? null : thread.id,
+            githubAutomatic || githubIssue ? null : thread.id,
           );
         const automaticContext = githubAutomatic?.context ?? githubIssue?.context;
         const automaticAdmission = automaticContext ? await githubAutomaticAdmission(tx, currentEndpoint, automaticContext) : null;
         if (automaticContext && !automaticAdmission?.allowed) currentPrincipalAuthorization.allowed = false;
         if (automaticAdmission?.allowed) currentPrincipalAuthorization.userId = automaticAdmission.responsibleUserId ?? null;
-        // A reviewed author's review or comment keeps bot-only GitHub access, even with a linked identity.
+        // A reviewed author's review or comment keeps bot-only GitHub access, also with a linked identity that is not admitted as a member.
         const reviewedAuthorReview = (automaticAdmission?.allowed === true && automaticAdmission.reviewedAuthor === true) ||
           currentPrincipalAuthorization.reviewedAuthor === true;
         if (reviewedAuthorReview) Object.assign(currentPrincipalAuthorization, { allowed: true, linkedDenied: false });

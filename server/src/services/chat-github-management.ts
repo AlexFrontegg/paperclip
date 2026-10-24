@@ -590,6 +590,7 @@ export function githubChatManagementService(db: Db, fetchImpl = fetch) {
         });
         if (
           entry.toolName !== "formal_review" &&
+          entry.toolName !== "resolve_finding" &&
           !decision.allowed &&
           decision.decision !== "require_approval"
         ) {

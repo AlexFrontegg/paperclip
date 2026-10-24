@@ -148,4 +148,18 @@ describe("GitHubAccessEditor reviewed authors", () => {
       reviewedAuthors: [],
     });
   });
+
+  it("turns on read-only GitHub for the bot's agent", async () => {
+    render(baseConfiguration);
+    await settle();
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Read-only GitHub for this agent"]',
+    );
+    expect(toggle).not.toBeNull();
+    flushSync(() => toggle!.click());
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...baseConfiguration,
+      agentReadOnlyGitHub: true,
+    });
+  });
 });

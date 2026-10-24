@@ -170,10 +170,9 @@ export async function resolveGitHubOperationCredentials(
     };
   }
   try {
-    const issueId =
-      typeof run.contextSnapshot?.issueId === "string"
-        ? run.contextSnapshot.issueId
-        : null;
+    // Read the task the same way as the export check, so no run escapes the bot scope.
+    const runIssueId = run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId ?? run.nativeIssueId;
+    const issueId = typeof runIssueId === "string" ? runIssueId : null;
     // The bot's switch outranks the agent's own account, which may be able to write.
     const readOnlyConnectionId = await githubReadOnlyAgentBotConnection(db, input);
     // A run started for a guest or reviewed author may use only the agent's own account,
