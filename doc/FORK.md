@@ -47,7 +47,7 @@ The upstream-layout versions of the four GitHub features are kept on branch `por
 
 ## Chat messages wake blocked tasks
 
-A message in a connected chat conversation (Slack and the other chat providers) wakes a task that is blocked or paused, as a comment does. Upstream issues #15040 and #15974.
+A message in a connected chat conversation (Slack and the other chat providers) wakes a task that is blocked or paused, as a comment does. Upstream issues #15040 and #15974. A paused tree admits only a message that a linked person wrote; a guest's message, a bot's message and an automatic GitHub event stay held (`isPersonChatMessage`).
 - Hook points: `EXTERNAL_CHAT_MESSAGE_WAKE_REASON` in `packages/shared/src/types/chat-channels.ts`, used by `server/src/services/chat-channels/inbound/wakeups.ts` and listed in the interaction wake reasons of `server/src/services/issue-tree-control.ts`, which also matches the chat wake's `wakeCommentId`.
 - Proving test: `server/src/__tests__/heartbeat-dependency-scheduling.test.ts`.
 

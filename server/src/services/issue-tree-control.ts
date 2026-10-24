@@ -2,6 +2,8 @@ import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm"
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
+  chatActions,
+  chatDeliveries,
   heartbeatRuns,
   issueComments,
   issueTreeHoldMembers,
@@ -121,9 +123,10 @@ function hasVerifiedInteractionSource(wakeReason: string, contextSnapshot: Recor
 function actorMatchesComment(
   actor: VerifiedInteractionActor,
   comment: { authorAgentId: string | null; authorUserId: string | null },
+  allowSystemActor: boolean,
 ) {
   if (!actor.requestedByActorType) return false;
-  if (actor.requestedByActorType === "system") return true;
+  if (actor.requestedByActorType === "system") return allowSystemActor;
   if (!actor.requestedByActorId) return false;
   if (actor.requestedByActorType === "agent") return comment.authorAgentId === actor.requestedByActorId;
   if (actor.requestedByActorType === "user") return comment.authorUserId === actor.requestedByActorId;
@@ -140,6 +143,7 @@ async function hasVerifiedInteractionWakeRequest(
     issueId: string;
     commentId: string;
     comment: { authorAgentId: string | null; authorUserId: string | null };
+    allowSystemActor: boolean;
   },
 ) {
   if (!input.runId && !input.wakeupRequestId) return false;
@@ -170,7 +174,39 @@ async function hasVerifiedInteractionWakeRequest(
     .from(agentWakeupRequests)
     .where(and(...predicates));
 
-  return requests.some((request) => actorMatchesComment(request, input.comment));
+  return requests.some((request) => actorMatchesComment(request, input.comment, input.allowSystemActor));
+}
+
+async function isPersonChatMessage(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  commentId: string,
+) {
+  const [delivery] = await dbOrTx
+    .select({ event: chatDeliveries.normalizedEvent })
+    .from(chatActions)
+    .innerJoin(
+      chatDeliveries,
+      and(
+        eq(chatDeliveries.id, chatActions.deliveryId),
+        eq(chatDeliveries.companyId, chatActions.companyId),
+      ),
+    )
+    .where(
+      and(
+        eq(chatActions.companyId, companyId),
+        eq(chatActions.kind, "inbound_wakeup"),
+        sql`${chatActions.payload} ->> 'commentId' = ${commentId}`,
+      ),
+    )
+    .limit(1);
+  if (!delivery) return false;
+  const event = delivery.event as {
+    githubAutomatic?: unknown;
+    githubIssue?: unknown;
+    principal?: { isBot?: boolean };
+  };
+  return !event.githubAutomatic && !event.githubIssue && event.principal?.isBot !== true;
 }
 
 export async function isVerifiedIssueTreeControlInteractionWake(
@@ -213,11 +249,15 @@ export async function isVerifiedIssueTreeControlInteractionWake(
     .then((rows) => rows[0] ?? null);
   if (!comment) return false;
 
+  // A chat message lifts a pause only when a linked person wrote it: not a guest, a bot or an automatic GitHub event.
+  const chatMessage = wakeReason === EXTERNAL_CHAT_MESSAGE_WAKE_REASON;
+  if (chatMessage && !(await isPersonChatMessage(dbOrTx, input.companyId, commentId))) return false;
+
   const directActor = {
     requestedByActorType: input.requestedByActorType,
     requestedByActorId: input.requestedByActorId,
   };
-  if (actorMatchesComment(directActor, comment)) return true;
+  if (actorMatchesComment(directActor, comment, !chatMessage)) return true;
 
   return hasVerifiedInteractionWakeRequest(dbOrTx, {
     companyId: input.companyId,
@@ -227,6 +267,7 @@ export async function isVerifiedIssueTreeControlInteractionWake(
     issueId: input.issueId,
     commentId,
     comment,
+    allowSystemActor: !chatMessage,
   });
 }
 

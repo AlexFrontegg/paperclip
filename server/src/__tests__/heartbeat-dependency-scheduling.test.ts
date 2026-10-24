@@ -7,6 +7,9 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
+  chatActions,
+  chatDeliveries,
+  chatEndpoints,
   companySkills,
   companies,
   authUsers,
@@ -25,6 +28,8 @@ import {
   issueRecoveryActions,
   issueTreeHolds,
   issues,
+  toolApplications,
+  toolConnections,
   workspaceOperations,
 } from "@paperclipai/db";
 import {
@@ -152,6 +157,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(chatActions);
+    await db.delete(chatDeliveries);
+    await db.delete(chatEndpoints);
+    await db.delete(toolConnections);
+    await db.delete(toolApplications);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(environments);
@@ -1441,11 +1451,17 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     });
   });
 
-  it("runs a connected chat message on a paused task tree as an interaction", async () => {
+  async function pausedTreeWithChatMessage(input: {
+    senderUserId: string | null;
+    normalizedEvent: Record<string, unknown>;
+  }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const rootIssueId = randomUUID();
     const chatCommentId = randomUUID();
+    const applicationId = randomUUID();
+    const connectionId = randomUUID();
+    const endpointId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -1489,9 +1505,25 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       id: chatCommentId,
       companyId,
       issueId: rootIssueId,
-      authorType: "user",
-      authorUserId: "responsible-user",
+      authorType: input.senderUserId ? "user" : "system",
+      authorUserId: input.senderUserId,
       body: "What is left before you resume?",
+    });
+    await db.insert(toolApplications).values({ id: applicationId, companyId, name: "Chat", type: "chat" });
+    await db.insert(toolConnections).values({
+      id: connectionId, companyId, applicationId, name: "Chat", uid: randomUUID(),
+      connectionPurpose: "channel", transport: "chat_sdk", status: "active",
+    });
+    await db.insert(chatEndpoints).values({
+      id: endpointId, companyId, connectionId, provider: "slack", publicId: randomUUID(), assignedAgentId: agentId, status: "active",
+    });
+    const [delivery] = await db.insert(chatDeliveries).values({
+      companyId, endpointId, providerEventId: randomUUID(), deduplicationKey: randomUUID(), eventKind: "message",
+      state: "processed", normalizedEvent: input.normalizedEvent,
+    }).returning();
+    await db.insert(chatActions).values({
+      companyId, endpointId, deliveryId: delivery.id, kind: "inbound_wakeup", providerActionId: randomUUID(),
+      status: "processed", payload: { issueId: rootIssueId, commentId: chatCommentId },
     });
 
     const chatWake = await heartbeat.wakeup(agentId, {
@@ -1499,9 +1531,26 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       triggerDetail: "system",
       reason: EXTERNAL_CHAT_MESSAGE_WAKE_REASON,
       payload: { issueId: rootIssueId, mutation: "chat_message_received", wakeCommentId: chatCommentId },
-      requestedByActorType: "user",
-      requestedByActorId: "responsible-user",
+      requestedByActorType: input.senderUserId ? "user" : "system",
+      requestedByActorId: input.senderUserId ?? "guest-principal",
       contextSnapshot: { issueId: rootIssueId, source: "chat:slack", wakeCommentId: chatCommentId },
+    });
+    return { chatWake, hold, rootIssueId };
+  }
+
+  async function expectHeldChatWake(rootIssueId: string) {
+    const wake = await db
+      .select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(sql`${agentWakeupRequests.payload} ->> 'issueId' = ${rootIssueId}`)
+      .then((rows) => rows[0] ?? null);
+    expect(wake).toMatchObject({ status: "skipped", reason: "issue_tree_hold_active" });
+  }
+
+  it("runs a connected chat message on a paused task tree as an interaction", async () => {
+    const { chatWake, hold, rootIssueId } = await pausedTreeWithChatMessage({
+      senderUserId: "responsible-user",
+      normalizedEvent: { trigger: "subscribed_message", message: { text: "What is left before you resume?" } },
     });
     expect(chatWake).not.toBeNull();
 
@@ -1523,6 +1572,24 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       treeHoldInteraction: true,
       activeTreeHold: { holdId: hold.id, rootIssueId, mode: "pause", interaction: true },
     });
+  });
+
+  it("keeps a paused task tree held for a chat message from a guest", async () => {
+    const { chatWake, rootIssueId } = await pausedTreeWithChatMessage({
+      senderUserId: null,
+      normalizedEvent: { trigger: "subscribed_message", message: { text: "Please continue." } },
+    });
+    expect(chatWake).toBeNull();
+    await expectHeldChatWake(rootIssueId);
+  });
+
+  it("keeps a paused task tree held for an automatic GitHub event", async () => {
+    const { chatWake, rootIssueId } = await pausedTreeWithChatMessage({
+      senderUserId: "responsible-user",
+      normalizedEvent: { trigger: "subscribed_message", githubAutomatic: { context: { event: "synchronize" } } },
+    });
+    expect(chatWake).toBeNull();
+    await expectHeldChatWake(rootIssueId);
   });
 
   it("allows comment interaction wakes when a legacy hold has a full_pause note", async () => {
