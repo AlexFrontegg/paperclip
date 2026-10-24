@@ -30,7 +30,7 @@ Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `s
 - Hook points: `server/src/services/ai-health.ts`, `GET /companies/:companyId/ai-health` in `routes/ai-connections.ts`, `routes/openapi.ts`; UI `components/AiAccountHealth.tsx`, `hooks/useCompanyAiHealth.ts`, `lib/ai-health.ts`, `Layout.tsx`, `BreadcrumbBar.tsx`, `SidebarAgents.tsx`, `pages/Agents.tsx`, `pages/AgentDetail.tsx` (and their `.production.tsx` copies).
 - Proving tests: `server/src/__tests__/ai-health-routes.test.ts`, `ui/src/components/AiAccountHealth.test.tsx`, `ui/src/components/SidebarAgents.test.tsx`, `ui/src/components/Layout.test.tsx`, `ui/src/components/BreadcrumbBar.test.tsx`.
 
-**Codex out of credits:** a Codex workspace that is out of credits counts as a provider quota failure, so the fallback takes over. Hook points: the quota patterns in `packages/adapters/codex-local/src/server/parse.ts` and `acp.ts`. Proving tests: `packages/adapters/codex-local/src/server/parse.test.ts`, `acp.quota.test.ts`.
+**Codex out of credits:** a Codex workspace that is out of credits counts as a provider quota failure, so the fallback takes over. Only Codex's own error reports count (`error` and `turn.failed` events, plain CLI lines), never tool output or agent text in item events, so a crash on a repo that mentions "usage limit" does not start the fallback (`codexErrorReportLines`). Hook points: the quota patterns and `isCodexProviderQuotaError` in `packages/adapters/codex-local/src/server/parse.ts`, and `acp.ts`. Proving tests: `packages/adapters/codex-local/src/server/parse.test.ts`, `acp.quota.test.ts`.
 
 ## GitHub review bot
 

@@ -333,11 +333,24 @@ export function isCodexTransientUpstreamError(input: {
   return CODEX_REMOTE_COMPACTION_RE.test(haystack) || /high\s+demand|temporary\s+errors/i.test(haystack);
 }
 
+// Tool output and agent text arrive in item events and can quote quota phrases; only Codex's own error reports count.
+function codexErrorReportLines(stdout: string): string {
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => {
+      const event = parseJson(line.trim());
+      if (!event) return true;
+      const type = asString(event.type, "");
+      return type === "error" || type === "turn.failed";
+    })
+    .join("\n");
+}
+
 export function isCodexProviderQuotaError(input: {
   stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): boolean {
-  const haystack = buildCodexErrorHaystack(input);
-  return CODEX_PROVIDER_QUOTA_RE.test(haystack) || extractCodexRetryNotBefore(input) != null;
+  const errorReport = { ...input, stdout: codexErrorReportLines(input.stdout ?? "") };
+  return CODEX_PROVIDER_QUOTA_RE.test(buildCodexErrorHaystack(errorReport)) || extractCodexRetryNotBefore(errorReport) != null;
 }

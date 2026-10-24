@@ -255,6 +255,27 @@ describe("isCodexTransientUpstreamError", () => {
     );
   });
 
+  it("ignores quota phrases that tool output or agent text quotes", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", aggregated_output: "docs: the fallback starts when the primary hits its usage limit" },
+      }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "The workspace is out of credits in this fixture." } }),
+    ].join("\n");
+
+    expect(isCodexProviderQuotaError({ stdout, errorMessage: "Transport channel closed" })).toBe(false);
+  });
+
+  it("classifies quota reported by Codex error events and plain CLI output", () => {
+    const quota = "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 11:31 PM.";
+
+    expect(isCodexProviderQuotaError({ stdout: JSON.stringify({ type: "error", message: quota }) })).toBe(true);
+    expect(isCodexProviderQuotaError({ stdout: JSON.stringify({ type: "turn.failed", error: { message: quota } }) })).toBe(true);
+    expect(isCodexProviderQuotaError({ stdout: `ERROR: ${quota}` })).toBe(true);
+  });
+
   it("does not classify deterministic compaction errors as transient", () => {
     expect(
       isCodexTransientUpstreamError({
