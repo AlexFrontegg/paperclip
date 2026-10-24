@@ -51,9 +51,9 @@ A message in a connected chat conversation (Slack and the other chat providers) 
 - Hook points: `EXTERNAL_CHAT_MESSAGE_WAKE_REASON` in `packages/shared/src/types/chat-channels.ts`, used by `server/src/services/chat-channels/inbound/wakeups.ts` and listed in the interaction wake reasons of `server/src/services/issue-tree-control.ts`, which also matches the chat wake's `wakeCommentId`.
 - Proving test: `server/src/__tests__/heartbeat-dependency-scheduling.test.ts`.
 
-## Linear-time redaction
+## Linear-time scan of long base64 blobs
 
-Long base64 blobs in run logs no longer make the secret patterns scan in quadratic time and freeze the server: the name patterns start with a lookbehind instead of `\b`.
+Long base64 blobs in run logs no longer make the secret patterns scan in quadratic time and freeze the server: the name patterns start with a lookbehind instead of `\b`. Only that case is fixed: redacting many quoted `authorization:` values is still quadratic in upstream's code (64 KB takes about 1 s).
 - Hook points: `packages/adapter-utils/src/command-redaction.ts`, `server/src/redaction.ts`.
 - Proving tests: `packages/adapter-utils/src/command-redaction.test.ts`, `server/src/__tests__/redaction.test.ts`, `server/src/__tests__/heartbeat-run-log.test.ts`.
 
@@ -76,3 +76,4 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 3. For the fallback, keep upstream's code and re-apply the hook points above.
 4. Type-check `server` and `ui`, and compare with upstream's own errors at the tag. The server type check skips `src/__tests__`, so a broken test merge shows up only when the test runs.
 5. Run every proving test file above in full, not filtered by test name.
+6. Right after the deploy, turn on **Settings → Experimental → GitHub review bots** (`enableGitHubReviewBots`, off by default since v2026.1023.0). Until then the bot keeps reviewing, but its settings page redirects away and GitHub identity linking returns 403, so new members' pull requests are not reviewed.
