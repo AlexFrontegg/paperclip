@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
+import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
@@ -120,6 +120,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-usage-limit-fallback-");
     db = createDb(tempDb.connectionString);
+    await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() });
     heartbeat = heartbeatService(db);
     const claude = getServerAdapter("claude_local");
     const codex = getServerAdapter("codex_local");
@@ -215,6 +216,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
     });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({
       id: agentId,
       companyId,
@@ -312,6 +314,8 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       identifier: `${company!.issuePrefix}-1`,
       startedAt: new Date(),
     });
+    // A retry takes its task from the run's own scope, not from its context.
+    await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId }).where(eq(heartbeatRuns.id, runId));
     const [comment] = await db.insert(issueComments).values({
       id: commentId,
       companyId: agent.companyId,
@@ -423,6 +427,29 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     await expect.poll(async () => {
       const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
       return sessions.filter((session) => session.adapterType === "claude_local" && session.taskKey === taskKey);
+    }, { timeout: 10_000, interval: 50 }).toEqual([]);
+  });
+
+  it("clears the fallback's stale session for a task after a primary turn", async () => {
+    const agent = await seedAgent();
+    const taskKey = "issue-task";
+    await db.insert(agentTaskSessions).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: "codex_local",
+      taskKey,
+      sessionParamsJson: { sessionId: "codex-session" },
+      sessionDisplayId: "codex-session",
+    });
+    claudeHitsLimit = false;
+    const run = await heartbeat.invoke(agent.id, "on_demand", { taskKey }, "manual");
+    const finished = await waitForRun(run!.id);
+    expect(finished.status).toBe("succeeded");
+    expect(dispatchOf(finished)?.lane).not.toBe("fallback");
+    expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+    await expect.poll(async () => {
+      const sessions = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agent.id));
+      return sessions.filter((session) => session.adapterType === "codex_local" && session.taskKey === taskKey);
     }, { timeout: 10_000, interval: 50 }).toEqual([]);
   });
 

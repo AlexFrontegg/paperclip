@@ -1,3 +1,4 @@
+import { configuredEnvironment } from "../configured-environment.js";
 import { spawn } from "node:child_process";
 import {
   createCipheriv,
@@ -29,7 +30,8 @@ import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { NativeSessionProtocolIntegrityError } from "../contracts/native-session-backend.js";
-import { ACPX_CREDENTIAL_BINDING_ENV, ACPX_CREDENTIAL_NAMES } from "../drivers/acpx/environment.js";
+import { ACPX_CREDENTIAL_BINDING_ENV, ACPX_CREDENTIAL_NAMES, CLAUDE_ROUTING_ENV_KEYS, createAcpxSidecarHostEnvironment } from "../drivers/acpx/environment.js";
+import { piCredentialNames } from "../drivers/acpx/pi-provider-config.js";
 import { githubCredentialEnvironment } from "../github-credential-environment.js";
 import {
   validatePrpEvent,
@@ -44,7 +46,7 @@ import {
 
 const protocol = "paperclip.runner";
 const protocolMinVersion = 1;
-const protocolVersion = 2;
+const protocolVersion = 3;
 const secureFrameSchema = "paperclip.runner.secure-frame.v1";
 const websocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const coreStateSchema = "paperclip.runner.durable.control-plane-state.v1";
@@ -78,6 +80,7 @@ const commandTypes = new Set([
   "request.resolve",
   "interaction.receipt",
   "semantic_tool.result",
+  "external_provider.operation",
   "session.snapshot",
   "session.goal.get",
   "session.goal.set",
@@ -700,7 +703,7 @@ function isStoredCoreState(
       (command, index) =>
         isRecord(command) &&
         (command.schema === "paperclip.prp.command.v1" ||
-          command.schema === "paperclip.prp.command.v2") &&
+          command.schema === "paperclip.prp.command.v2" || command.schema === "paperclip.prp.command.v3") &&
         typeof command.commandId === "string" &&
         stableIdPattern.test(command.commandId) &&
         command.commandId.length <= 160 &&
@@ -1489,8 +1492,13 @@ export class DurablePrpControlPlane {
   #expectedRunnerDigest: string;
   #server: Server | null = null;
   #connections = new Set<AuthorityConnection>();
+  #eventOwner: AuthorityConnection | null = null;
+  // Set when the last authenticated Runner connection closes; cleared on the
+  // next authentication. Diagnostic only: it never gates authority.
+  #runnerDisconnectedAt: number | null = null;
   #connectionProcessing = new Map<AuthorityConnection, Promise<void>>();
   #pendingSemanticCalls = new Set<string>();
+  #semanticCallbacksRetired = false;
   #semanticResultPersistenceFailed = false;
   #semanticResultFailures: Array<{
     callId: string;
@@ -1627,6 +1635,16 @@ export class DurablePrpControlPlane {
     }
   }
 
+  /** Retire this journal writer after stopped ingress is fully joined. A late
+   * external effect keeps its committed input pending for reconciliation;
+   * it must never overwrite the successor controller's durable state. */
+  retireSemanticToolCallbacks(): void {
+    if (this.#server !== null || this.#connections.size !== 0 || this.#connectionProcessing.size !== 0) {
+      throw new Error("Semantic callback retirement requires drained, stopped ingress.");
+    }
+    this.#semanticCallbacksRetired = true;
+  }
+
   /** Forces a resumable re-authentication after an immutable run attachment rotates. */
   disconnectActiveRunner(): void {
     const connections = [...this.#connections];
@@ -1638,6 +1656,15 @@ export class DurablePrpControlPlane {
     return [...this.#connections].filter(
       (connection) => connection.secureChannel !== null,
     ).length;
+  }
+
+  /**
+   * Milliseconds since the last authenticated Runner connection closed, or
+   * null when a Runner is connected or has never authenticated.
+   */
+  runnerDisconnectedForMs(now = Date.now()): number | null {
+    if (this.#runnerDisconnectedAt === null || this.activeRunnerConnectionCount() > 0) return null;
+    return Math.max(0, now - this.#runnerDisconnectedAt);
   }
 
   /** A reusable close requires every admitted callback's exact durable result. */
@@ -1959,7 +1986,7 @@ export class DurablePrpControlPlane {
     }
     const controllerSeq = this.#store.state.commands.length + 1;
     const command: DurableRecoveryCoreCommand = {
-      schema: type.startsWith("session.goal.")
+      schema: type === "external_provider.operation" ? "paperclip.prp.command.v3" : type.startsWith("session.goal.")
         ? "paperclip.prp.command.v2"
         : "paperclip.prp.command.v1",
       commandId:
@@ -2070,7 +2097,11 @@ export class DurablePrpControlPlane {
         };
         void tail.then(release, release);
       },
-      onClose: () => this.#connections.delete(connection),
+      onClose: () => {
+        this.#connections.delete(connection);
+        if (connection.secureChannel !== null && this.activeRunnerConnectionCount() === 0)
+          this.#runnerDisconnectedAt ??= Date.now();
+      },
     });
     this.#connections.add(connection);
     return {
@@ -2732,6 +2763,8 @@ export class DurablePrpControlPlane {
       pending.serverProof,
       clientProof,
     );
+    this.#runnerDisconnectedAt = null;
+    this.#eventOwner = connection;
     for (const active of this.#connections) {
       if (active !== connection && active.secureChannel !== null)
         active.close();
@@ -3072,6 +3105,8 @@ export class DurablePrpControlPlane {
     connection: AuthorityConnection,
     envelope: Record<string, unknown>,
   ): Promise<void> {
+    if (this.#eventOwner !== connection) return;
+    const identity = this.#identity;
     if (this.#protocolIntegrityError !== null) {
       connection.close();
       return;
@@ -3204,6 +3239,7 @@ export class DurablePrpControlPlane {
     try {
       await this.#onCommittedEvent?.(event);
     } catch (error) {
+      if (this.#eventOwner !== connection || this.#identity !== identity) return;
       if (error instanceof NativeSessionProtocolIntegrityError) {
         this.#failProtocolIntegrity(connection, error);
       } else {
@@ -3211,6 +3247,7 @@ export class DurablePrpControlPlane {
       }
       return;
     }
+    if (this.#eventOwner !== connection || this.#identity !== identity) return;
     // Another authenticated connection can replace this one while its commit
     // is in flight. Once that exact owner has faulted, even a prior successful
     // commit cannot reopen delivery or invoke a new business operation.
@@ -3298,6 +3335,7 @@ export class DurablePrpControlPlane {
           this.disconnectActiveRunner();
         };
         const queueResult = (result: unknown, isError: boolean): void => {
+          if (this.#semanticCallbacksRetired) return;
           try {
             // Retain the full input once in its canonical event. Copying a
             // large write into its result command can exceed the wire bound
@@ -3371,7 +3409,14 @@ const runnerPlatformEnvironmentKeys = [
 ] as const;
 
 const runnerExplicitProviderEnvironmentKeys = [
-  ...ACPX_CREDENTIAL_NAMES.pi,
+  ...ACPX_CREDENTIAL_NAMES.claude.filter(name => !name.startsWith("AWS_")),
+  ...CLAUDE_ROUTING_ENV_KEYS,
+  "PAPERCLIP_AI_PROVIDER_KEY",
+  "PAPERCLIP_AI_PROVIDER_URL",
+  "PAPERCLIP_AGENT_KEY_ID",
+  "PAPERCLIP_AGENT_PUBLIC_KEY",
+  "PAPERCLIP_AGENT_PRIVATE_KEY",
+  ...ACPX_CREDENTIAL_NAMES.pi.filter(name => !name.startsWith("AWS_")),
   ...ACPX_CREDENTIAL_NAMES.cursor,
   ...ACPX_CREDENTIAL_NAMES.copilot,
   ACPX_CREDENTIAL_BINDING_ENV,
@@ -3398,8 +3443,16 @@ const runnerExplicitProviderEnvironmentKeys = [
   "PAPERCLIP_NATIVE_MCP_NAME",
   "PAPERCLIP_NATIVE_MCP_URL",
   "PAPERCLIP_NATIVE_MCP_TOKEN",
+  "PAPERCLIP_NATIVE_MCP_STDIO",
+  "PAPERCLIP_NATIVE_MCP_PROXY",
   "PAPERCLIP_NATIVE_RUNTIME_CONTEXT_PATH",
   "PAPERCLIP_RUNNER_EXTERNAL_SANDBOX",
+  "PAPERCLIP_RUNNER_HOME_MODE",
+  "ACPX_CLAUDE_INCLUDE_USER_SETTINGS",
+  "CLAUDE_CONFIG_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
   "PAPERCLIP_ACPX_BUILTIN_ROOT",
   "PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT",
   "PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST",
@@ -3410,6 +3463,7 @@ const runnerExplicitProviderEnvironmentKeys = [
 
 function runnerEnvironment(
   ticket: string,
+  normalizedSessionId: string,
   explicitSource?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const platformSource = explicitSource ?? process.env;
@@ -3428,7 +3482,28 @@ function runnerEnvironment(
       const value = explicitSource[key];
       if (value !== undefined) environment[key] = value;
     }
-    Object.assign(environment, githubCredentialEnvironment(explicitSource));
+    if (explicitSource.CLAUDE_CODE_USE_BEDROCK === "1") {
+      for (const key of ["AWS_BEARER_TOKEN_BEDROCK"] as const) {
+        if (explicitSource[key] !== undefined) environment[key] = explicitSource[key];
+      }
+    }
+    // Pi custom-provider references and direct cloud credentials cross only
+    // under the controller's exact run/session credential binding.
+    const marker = explicitSource[ACPX_CREDENTIAL_BINDING_ENV];
+    let binding: unknown;
+    if (marker !== undefined && Buffer.byteLength(marker) <= 4_096) {
+      try { binding = JSON.parse(marker); } catch { /* Sidecar admission rejects invalid markers. */ }
+    }
+    let taskEnvironmentSource = explicitSource;
+    if (binding !== null && typeof binding === "object" && !Array.isArray(binding)
+      && (binding as Record<string, unknown>).agent === "pi") {
+      const bound = createAcpxSidecarHostEnvironment(explicitSource, "pi", normalizedSessionId);
+      taskEnvironmentSource = bound;
+      for (const key of piCredentialNames(explicitSource)) {
+        if (bound[key] !== undefined) environment[key] = bound[key];
+      }
+    }
+    Object.assign(environment, githubCredentialEnvironment(explicitSource), configuredEnvironment(taskEnvironmentSource));
   }
   return environment;
 }
@@ -3576,7 +3651,7 @@ export function spawnRunner(options: {
   }
 
   const command = options.runnerBinaryPath ?? runnerBinary;
-  const environment = runnerEnvironment(options.ticket, options.environment);
+  const environment = runnerEnvironment(options.ticket, options.identity.normalizedSessionId, options.environment);
   const withRestart = (handle: RunnerProcessHandle): RunnerProcessHandle => ({
     ...handle,
     restart: (ticket) => spawnRunner({ ...options, ticket }),

@@ -1,5 +1,22 @@
 # Paperclip evaluation guide
 
+The [Slack connector probe catalog](../server/src/services/connectors/slack/evals/README.md)
+organizes eleven manual model acceptance probes and a selector for existing
+deterministic regressions (`pnpm test:slack-connector`). It is not a registered
+model campaign; transport fixtures do not prove that an agent chooses a tool
+or that a real Slack interaction completes.
+
+The explicit-only [live provider connection suite](../tests/runner-e2e/PROVIDER-CONNECTIONS.md)
+is a Product E2E workflow for fresh subscription/API-key/gateway connections,
+with attended login and independent artifact checks against local or staging targets.
+
+The bounded [personal Muse receiver probe](muse-personal-agent.md#bounded-24-hour-probe)
+uses ordinary task APIs and retained native receipts to measure unattended
+receiver behavior. It is a separate manual qualification probe, not a registered
+Product E2E campaign. Synthetic receiver tests cannot qualify personal Muse;
+real setup, clarification and fresh-conversation collaboration remain separate
+release gates.
+
 Paperclip has two live eval families with different questions, owners, and
 evidence. Choose the family before selecting a model, profile, or case.
 
@@ -37,7 +54,25 @@ standard/Ask tasks early, while preserving user-supplied titles. Its oracle
 correlates browser creation, native tool receipts, durable titles, audit ownership,
 and the reloaded task UI; fixture prompts contain no naming instructions.
 
+The explicit-only [native connection guidance suite](../tests/runner-e2e/README.md#native-connection-guidance-explicit-only)
+adds neutral decline prompts, same-task run-attributed explanations, and measured
+no-use controls across three native local profiles. Its fifteen configured cells
+are preparation for future matched instruction comparisons, not a live result.
+Historical Everyday cases and production prompts are preserved.
+
 ## Selecting a family
+
+Pi's explicit-only `pi-controls` Product suite tests Stop while native permission
+is unanswered and browser-originated same-turn steering, locally and on Daytona.
+Its [fixture contract](../tests/runner-e2e/FIXTURES.md#pi-active-controls) separates
+control acknowledgment, actual message consumption and owned process retirement.
+The current Pi matrix has 26 explicit cells (13 local and 13 Daytona), including
+these four controls, pending-native-question controller restart, and a Daytona-only
+exact-Pi-child provider-death journey. Provider death must expire the original
+unanswered card and reject stale replies without a replacement run; any durable
+fallback is distinct from restoration. File editing
+also requires native edit/validation events and a registered artifact download.
+All remain unqualified until measured on the exact candidate runtime and harness.
 
 Use **Runner Evals** for a runner protocol, adapter, transport, native session,
 tool grant, or one-turn provider qualification question. The workflow checks
@@ -128,6 +163,11 @@ checks the legacy coordination skill against human authority, missing hiring
 permission, and requester scope decisions through saved browser interactions.
 
 ## Validation ladder
+
+The native Codex Daytona `recover-controller` cell in Everyday Workflows
+requires active process and lease continuity, native receipt continuity and
+workspace finalization. See the [restart evidence contract](../tests/runner-e2e/EVERYDAY-WORKFLOWS.md).
+Catalog discovery and deterministic calibration do not establish live recovery.
 
 The explicit-only [public MCP suite](../tests/runner-e2e/PUBLIC-MCP.md) evaluates
 paid assistant delegation, later retrieval, feedback, review, uncertain retries
@@ -375,6 +415,11 @@ The 26 native `first-task` cells exercise onboarding before native selection
 becomes the UI default. Live results and semantic answer reviews must accompany
 any qualification claim; catalog presence alone is not a pass.
 
+The explicit-only [native question/resume qualification](../tests/runner-e2e/README.md#task-continuation)
+separates a completed two-answer user journey from semantic-tool documentation
+qualification. It verifies the exact provider-pause or semantic-response-wake
+binding for each answer and preserves prior grades when the definition changes.
+
 ## Lifecycle behavior baseline
 
 The credential-free [lifecycle baseline](../tests/lifecycle-baseline/README.md)
@@ -407,6 +452,10 @@ Copilot and Pi ACP profiles on local and Daytona. See the
 The private Runner Evals campaign of the same name provides complementary
 semantic protocol cases; catalog membership is not live qualification.
 
+The explicit local [Copilot protection fixtures](../tests/runner-e2e/FIXTURES.md#copilot-native-protection)
+exercise native permission denial with operator cancellation and bounded attached
+command settlement. Their registration remains separate from paid qualification;
+source/pack provenance and complete persisted evidence are required.
 The explicit-only Product E2E `confirmation-replies` suite tests conversational
 approval and rejection, persisted message provenance, approval before execution,
 ambiguous proposals, and the existing card-click path with native Claude/Codex.
@@ -415,3 +464,9 @@ See the [suite contract](../tests/runner-e2e/README.md#conversational-confirmati
 Hiring notification accounting now also requires exact completed action attribution. Missing native/provider ID mapping is uncomparable evidence; it must not be reported as a model task regression or waived through name/order matching. The fixture waits for both known completion callbacks and settled bracketed observations, including the gap before pending outbox work becomes a wake. Strict action replay and original machine verdicts are retained separately.
 
 The explicit-only [planning guidance utility comparison](../tests/runner-e2e/PLAN-TASK-GUIDANCE.md) measures task decomposition and handoffs with current, short, and disabled skills.
+
+The explicit-only [task-workspaces Product E2E suite](../tests/runner-e2e/README.md#projectless-task-workspaces-explicit-only)
+covers projectless task files, deferred repository acquisition, controller restart
+and nested Git/dirty-file persistence on legacy local, native local and native
+Daytona OpenCode. Its three configured cells use independent filesystem, public
+API and download oracles; no live qualification is implied by fixture registration.

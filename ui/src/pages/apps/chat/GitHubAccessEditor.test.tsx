@@ -10,14 +10,15 @@ import {
 } from "@paperclipai/shared";
 import { GitHubAccessEditor } from "./GitHubBotConfiguration";
 
-const mocks = vi.hoisted(() => ({ lookup: vi.fn() }));
+const mocks = vi.hoisted(() => ({ lookup: vi.fn(), listPrincipals: vi.fn() }));
 vi.mock("@/api/access", () => ({
   accessApi: { listMembers: async () => ({ members: [] }) },
 }));
 vi.mock("@/api/chatEndpoints", () => ({
-  chatEndpointsApi: { listPrincipals: async () => [], revokeLink: vi.fn() },
+  chatEndpointsApi: { listPrincipals: mocks.listPrincipals, revokeLink: vi.fn() },
 }));
 vi.mock("@/api/githubChat", () => ({ githubChatApi: { lookup: mocks.lookup } }));
+vi.mock("@/context/CompanyContext", () => ({ useOptionalCompany: () => null }));
 vi.mock("@/lib/router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
 }));
@@ -45,6 +46,7 @@ describe("GitHubAccessEditor reviewed authors", () => {
     root = createRoot(container);
     onChange = vi.fn<(configuration: GitHubChatConfiguration) => void>();
     mocks.lookup.mockResolvedValue({ githubUserId: "91", login: "teammate" });
+    mocks.listPrincipals.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -74,8 +76,9 @@ describe("GitHubAccessEditor reviewed authors", () => {
     );
   }
 
+  // Dialog content renders in a portal outside the container.
   async function click(text: string) {
-    const button = [...container.querySelectorAll("button")].find(
+    const button = [...document.querySelectorAll("button")].find(
       (node) => node.textContent?.trim() === text,
     );
     expect(button, text).toBeDefined();
@@ -86,9 +89,9 @@ describe("GitHubAccessEditor reviewed authors", () => {
   it("adds a looked-up account as a reviewed author without a sponsor", async () => {
     render(baseConfiguration);
     await click("Add reviewed author");
-    expect(container.textContent).not.toContain("Sponsor");
+    expect(document.querySelector("#github-guest-sponsor")).toBeNull();
     const loginInput =
-      container.querySelector<HTMLInputElement>("#github-guest-login")!;
+      document.querySelector<HTMLInputElement>("#github-guest-login")!;
     const setValue = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype,
       "value",
@@ -99,6 +102,32 @@ describe("GitHubAccessEditor reviewed authors", () => {
     );
     await click("Look up");
     expect(mocks.lookup).toHaveBeenCalledWith("endpoint-a", "teammate");
+    await click("Add this account");
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...baseConfiguration,
+      reviewedAuthors: [{ githubUserId: "91", login: "teammate" }],
+    });
+  });
+
+  it("adds a reviewed author whose GitHub account is linked, for example to a viewer", async () => {
+    mocks.listPrincipals.mockResolvedValue([
+      { githubUserId: "91", githubLogin: "teammate", externalLabel: "teammate", status: "linked", paperclipUserId: "viewer-user" },
+    ]);
+    render(baseConfiguration);
+    await settle();
+    await click("Add reviewed author");
+    const loginInput =
+      document.querySelector<HTMLInputElement>("#github-guest-login")!;
+    const setValue = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    setValue.call(loginInput, "teammate");
+    flushSync(() =>
+      loginInput.dispatchEvent(new Event("input", { bubbles: true })),
+    );
+    await click("Look up");
+    expect(document.body.textContent).not.toContain("already listed");
     await click("Add this account");
     expect(onChange).toHaveBeenLastCalledWith({
       ...baseConfiguration,
@@ -117,6 +146,20 @@ describe("GitHubAccessEditor reviewed authors", () => {
     expect(onChange).toHaveBeenLastCalledWith({
       ...baseConfiguration,
       reviewedAuthors: [],
+    });
+  });
+
+  it("turns on read-only GitHub for the bot's agent", async () => {
+    render(baseConfiguration);
+    await settle();
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Read-only GitHub for this agent"]',
+    );
+    expect(toggle).not.toBeNull();
+    flushSync(() => toggle!.click());
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...baseConfiguration,
+      agentReadOnlyGitHub: true,
     });
   });
 });
