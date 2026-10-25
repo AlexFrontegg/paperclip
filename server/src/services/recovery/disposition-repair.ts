@@ -12,6 +12,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { parseIssueExecutionState } from "../issue-execution-policy.js";
+import { pendingCardsCoveredByFallback } from "../satisfied-connection-intents.js";
 
 const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 
@@ -189,7 +190,9 @@ export async function collectDispositionRepairSourceState(
     ]);
 
   const pendingExecutionState = parseIssueExecutionState(issue.executionState);
-  const pendingInteraction = interactions.some((row) => row.status === "pending");
+  const pendingInteractionIds = interactions.filter((row) => row.status === "pending").map((row) => row.id);
+  const pendingInteraction = pendingInteractionIds.length > 0
+    && !(await pendingCardsCoveredByFallback(db, issue, pendingInteractionIds));
   const pendingApproval = linkedApprovals.some((row) =>
     row.status === "pending" || row.status === "revision_requested",
   );

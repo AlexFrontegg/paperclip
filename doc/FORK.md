@@ -20,13 +20,14 @@ Hook points:
 - `heartbeat/run-state.ts`: `dispatchedAdapterType` in run lists; a session reset clears the fallback's sessions and keeps the fallback state.
 - `heartbeat/session-preparation.ts`, `heartbeat/execution-configuration.ts`, `execution-workspace-policy.ts` (`withoutFallbackEngineOverrides`).
 - `recovery/service.ts`: a quota wait can move the work to the fallback now.
+- `satisfied-connection-intents.ts` (`isAssigneeAiSignIn`, `pendingCardsCoveredByFallback`): while the next run uses the fallback (`nextRunUsesFallback`), the primary's AI sign-in card does not hold the task. Callers: the retry gate and queued-run check in `connectionContinuationPendingResponse` and `modules/run-dispatch/adapters/postgres.ts`; the legacy follow-up in `recovery/disposition-repair.ts` (`collectDispositionRepairSourceState`); the native follow-up in `heartbeat/run-lifecycle.ts` (`handleSuccessfulRunHandoff`).
 - `lib/agent-records.ts` and `services/agent-hiring.ts`: a hire installs the fallback AI connection.
 - `routes/agents.ts`, `services/agents.ts`, `services/activity.ts`, `services/connection-intents.ts`, `routes/openapi.ts`.
 - UI: `UsageLimitFallbackField.tsx`, `AgentConfigForm.tsx` (`label` prop on the model and effort pickers), `lib/agent-config-patch.ts`, `pages/AgentDetail.tsx`, `api/agents.ts`.
 
-Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `server/src/__tests__/agent-usage-limit-fallback-routes.test.ts`, `packages/shared/src/usage-limit-fallback.test.ts`, `ui/src/components/UsageLimitFallbackField.test.tsx`, `ui/src/lib/agent-config-patch.test.ts`.
+Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `server/src/__tests__/agent-usage-limit-fallback-routes.test.ts`, `server/src/__tests__/satisfied-connection-intents.test.ts`, `packages/shared/src/usage-limit-fallback.test.ts`, `ui/src/components/UsageLimitFallbackField.test.tsx`, `ui/src/lib/agent-config-patch.test.ts`.
 
-**AI account health:** every board page warns when a shared AI account needs sign-in or an agent runs on its fallback or has no working AI.
+**AI account health:** every board page warns when a shared AI account needs sign-in or an agent runs on its fallback or has no working AI. When every account works, the bar turns amber and names the agents still on their fallback. The agent page's fallback box follows this health once it loads, so a saved fallback that the next run ends is not shown.
 - Hook points: `server/src/services/ai-health.ts`, `GET /companies/:companyId/ai-health` in `routes/ai-connections.ts`, `routes/openapi.ts`; UI `components/AiAccountHealth.tsx`, `hooks/useCompanyAiHealth.ts`, `lib/ai-health.ts`, `Layout.tsx`, `BreadcrumbBar.tsx`, `SidebarAgents.tsx`, `pages/Agents.tsx`, `pages/AgentDetail.tsx` (and their `.production.tsx` copies).
 - Proving tests: `server/src/__tests__/ai-health-routes.test.ts`, `ui/src/components/AiAccountHealth.test.tsx`, `ui/src/components/SidebarAgents.test.tsx`, `ui/src/components/Layout.test.tsx`, `ui/src/components/BreadcrumbBar.test.tsx`.
 
@@ -68,6 +69,10 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 
 - Upstream #17216 (`042051904`): Codex shell commands see the secrets assigned to the agent, such as `GITHUB_TOKEN`. Our version leaves out upstream's telemetry keys (#16874, not merged yet). On the next sync, take upstream's version of these files.
 - Fork change on top of it: `codexShellEnvironmentKeys` also passes the run's `PAPERCLIP_GITHUB_BROKER_TOKEN` (and `PAPERCLIP_GITHUB_BRIDGE_TOKEN`) when Paperclip set it. Upstream keeps every `PAPERCLIP_GITHUB_*` name out of Codex shells, so Paperclip's `gh`/`git` launchers report `capability_missing` and managed GitHub (the read-only review bot token) fails on Codex. Keep this on the next sync until upstream passes the capability another way. Proving test: `packages/adapter-utils/src/codex-shell-environment.test.ts`.
+
+## Building the labs image
+
+- The `Dockerfile` keeps upstream's floating `node:24-trixie-slim` base. Run `docker pull node:24-trixie-slim`, build with `docker build --pull ...`, then check `node --version` inside the image. A cached base kept labs on Node 24.21.0 until 2026-10-25, after its security release. `--pull` on one build does not refresh the local tag for the next build.
 
 ## CI
 

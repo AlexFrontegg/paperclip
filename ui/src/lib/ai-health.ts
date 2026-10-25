@@ -84,7 +84,7 @@ export function summarizeAiHealth(health: CompanyAiHealth | undefined): AiHealth
     ...agentsWithoutAi.map((agent) => `${agent.agentId}:none`),
     ...agentsWithBrokenBackup.map((agent) => `${agent.agentId}:backup-broken`),
   ];
-  const signature = brokenConnections.length || agentsWithoutAi.length
+  const signature = brokenConnections.length || agentsWithoutAi.length || agentsOnBackup.length
     ? JSON.stringify({
       connections: brokenConnections.map((connection) => `${connection.id}:${connection.status}`).sort(),
       agents: agentStates.sort(),

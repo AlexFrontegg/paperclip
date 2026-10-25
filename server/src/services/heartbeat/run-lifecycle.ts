@@ -19,6 +19,7 @@ import { boundHeartbeatRunEventPayloadForStorage } from "./run-log.js";
 import { preserveWorkspaceRestoreRecoveryMetadata } from "../workspace-restore-recovery-state.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
+import { pendingCardsCoveredByFallback } from "../satisfied-connection-intents.js";
 import {
   nativeRetryCancellationCommitCondition,
   rethrowNativeCancellationLockConflict,
@@ -1673,7 +1674,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     const [
       activeExecutionPath,
       queuedWake,
-      pendingInteraction,
+      pendingInteractions,
       pendingApproval,
       explicitBlocker,
       openRecoveryIssue,
@@ -1739,9 +1740,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
                 activeIssueInteractionCondition({ runId: run.id }),
               ),
             )
-            .limit(1)
-            .then((rows) => rows[0] ?? null)
-        : Promise.resolve(null),
+        : Promise.resolve([]),
       issue
         ? db
             .select({ id: issueApprovals.approvalId })
@@ -1840,9 +1839,8 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       taskKey,
       hasActiveExecutionPath: Boolean(activeExecutionPath),
       hasQueuedWake: Boolean(queuedWake),
-      hasPendingInteractionOrApproval: Boolean(
-        pendingInteraction || pendingApproval,
-      ),
+      hasPendingInteractionOrApproval: Boolean(pendingApproval) || (issue !== null && pendingInteractions.length > 0
+        && !(await pendingCardsCoveredByFallback(db, issue, pendingInteractions.map((row) => row.id), run.responsibleUserId))),
       hasPersistedMonitor: Boolean(issue?.monitorNextCheckAt),
       hasExplicitBlockerPath: Boolean(explicitBlocker),
       hasOpenRecoveryIssue: Boolean(openRecoveryIssue),

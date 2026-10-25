@@ -272,6 +272,7 @@ export function UsageLimitFallbackStatus({
   agentName,
   stateJson,
   health,
+  healthLoaded = false,
   connections = [],
   pending,
   onReturnToPrimary,
@@ -279,13 +280,16 @@ export function UsageLimitFallbackStatus({
   agentName: string;
   stateJson: Record<string, unknown> | undefined;
   health?: AgentAiHealth;
+  /** The company AI health makes the same lane decision as the next run, so once loaded it overrules a saved state it has ended. */
+  healthLoaded?: boolean;
   connections?: CompanyAiConnectionHealth[];
   pending: boolean;
   onReturnToPrimary: () => void;
 }) {
   const state = readUsageLimitFallbackState(stateJson);
   const waitingForReconnect = Boolean(state?.waitForReconnect && !state.suspendedReason);
-  const fallbackState = state && (waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date())) ? state : null;
+  const savedStateActive = state && (waitingForReconnect || isUsageLimitFallbackStateActive(state, new Date()));
+  const fallbackState = savedStateActive && (!healthLoaded || health?.fallbackActive) ? state : null;
   if (health?.noWorkingAi) {
     const primaryLabel = getAdapterDisplay(health.primaryAdapterType).label;
     const brokenConnection = [health.primaryConnectionKey, health.fallbackConnectionKey]
