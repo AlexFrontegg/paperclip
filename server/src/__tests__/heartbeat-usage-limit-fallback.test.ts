@@ -1085,7 +1085,9 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       issueNumber: 1,
       identifier: `${company!.issuePrefix}-1`,
     });
-    const primaryBackAt = new Date(Date.now() + 1_500);
+    // Keep the expiry ahead of asynchronous run settlement on cold CI hosts.
+    // The handback below still waits for and observes the real expiry.
+    const primaryBackAt = new Date(Date.now() + 10_000);
     await activeFallback(agent, primaryBackAt.toISOString());
     codexErrorCode = "provider_quota";
     claudeHitsLimit = false;
@@ -1116,7 +1118,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     const finished = await runRetry(await retryOf(fallbackRun.id));
     expect(dispatchOf(finished)).toEqual({ adapterType: "claude_local" });
     expect(finished.status).toBe("succeeded");
-  });
+  }, 30_000);
 
   it("does not switch again from recovery for a failure older than Return to primary", async () => {
     const agent = await seedAgent();

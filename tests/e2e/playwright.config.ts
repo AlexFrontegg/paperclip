@@ -37,6 +37,8 @@ export default defineConfig({
   // intentionally not part of the default local_trusted e2e run.
   testIgnore: ["in-feed-native/**", "multi-user.spec.ts", "multi-user-authenticated.spec.ts"],
   timeout: 60_000,
+  // Asynchronous dispatch and provider startup can exceed the default 5s on cold CI hosts.
+  expect: { timeout: process.env.CI ? 15_000 : 5_000 },
   retries: 0,
   // All specs share one throwaway server, and several toggle instance-level
   // state (the `enableConferenceRoomChat` experimental flag) that changes
