@@ -11,6 +11,8 @@ import { AgentAiHealthBadge, AiAccountHealthBar, AiAccountHealthPill } from "./A
 
 const healthApi = vi.hoisted(() => ({ health: vi.fn() }));
 vi.mock("../api/ai-connections", () => ({ aiConnectionsApi: healthApi }));
+const agentsApi = vi.hoisted(() => ({ list: vi.fn() }));
+vi.mock("../api/agents", () => ({ agentsApi }));
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company-1" }) }));
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
@@ -140,6 +142,19 @@ describe("AiAccountHealthBar", () => {
     const lizzy: AgentAiHealth = { ...agentWithoutAi, agentId: "lizzy", noWorkingAi: false, backupIssue: "account", fallbackConnectionKey: "account-1" };
     await mount({ connections: [{ ...claudeForAll, name: null }], agents: [lizzy] });
     expect(bar()?.textContent).toContain("A Claude account needs sign-in. 1 agent has no working backup.");
+  });
+
+  it("names the agents still on their backup in amber when every AI account works", async () => {
+    agentsApi.list.mockResolvedValue([{ id: "forge", name: "Forge", urlKey: "forge" }, { id: "planner", name: "Planner", urlKey: "planner" }]);
+    const planner: AgentAiHealth = { ...agentOnBackup, agentId: "planner" };
+    await mount({ connections: [{ ...claudeForAll, status: "connected" }], agents: [agentOnBackup, planner] });
+    expect(bar()?.getAttribute("data-tone")).toBe("warning");
+    expect(bar()?.getAttribute("role")).toBe("status");
+    expect(bar()?.textContent).toContain("2 agents are running on their backup: Forge, Planner");
+    const links = Array.from(bar()!.querySelectorAll("a")).map((link) => [link.textContent, link.getAttribute("href")]);
+    expect(links).toEqual([["Forge", "/agents/forge"], ["Planner", "/agents/planner"], ["Details", "/agents/all"]]);
+    flushSync(() => hideButton()!.click());
+    expect(pill()?.textContent).toBe("2 agents on backup");
   });
 
   it("forgets a dismissal once the problem recovers, so the same problem shows again", async () => {
