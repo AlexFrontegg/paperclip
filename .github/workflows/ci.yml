@@ -6,7 +6,7 @@ permissions:
 jobs:
   policy:
     name: Repository checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -42,7 +42,7 @@ jobs:
 
   build:
     name: Typecheck and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -61,7 +61,7 @@ jobs:
 
   general:
     name: Tests (${{ matrix.group }} ${{ matrix.index }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -105,7 +105,7 @@ jobs:
 
   serialized:
     name: Route and authorization tests (${{ matrix.index }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -120,7 +120,7 @@ jobs:
 
   runner:
     name: Runner (${{ matrix.command }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -137,7 +137,7 @@ jobs:
 
   native_server:
     name: Native Runner integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -146,11 +146,13 @@ jobs:
       - uses: ./.github/actions/setup-paperclip
         with:
           rust: 'true'
+      - name: Build the native binary outside test hook timeouts
+        run: pnpm --filter @paperclipai/paperclip-runner build:binary
       - run: pnpm test:run:general -- --group general-server-native-runner
 
   e2e:
     name: Browser tests (${{ matrix.index }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -165,6 +167,7 @@ jobs:
         env:
           PAPERCLIP_E2E_SKIP_LLM: 'true'
           PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
+          PAPERCLIP_ANNOUNCEMENTS_ENABLED: 'false'
           SHARD_INDEX: ${{ matrix.index }}
         run: |
           google-chrome --version
@@ -182,7 +185,7 @@ jobs:
 
   docker_context:
     name: Docker context integrity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -194,7 +197,7 @@ jobs:
     name: CI required
     if: always()
     needs: [policy, build, general, serialized, runner, native_server, e2e, docker_context]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every verification lane to succeed

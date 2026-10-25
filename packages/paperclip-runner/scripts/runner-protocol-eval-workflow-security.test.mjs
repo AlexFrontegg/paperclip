@@ -8,11 +8,11 @@ import test from "node:test";
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const workflowPath = resolve(
   repositoryRoot,
-  ".github/workflows/runner-protocol-live-evals.yml",
+  ".github/archive/workflows/runner-protocol-live-evals.yml",
 );
 const trustedPrWorkflowPath = resolve(
   repositoryRoot,
-  ".github/workflows/pr-trusted.yml",
+  ".github/archive/workflows/pr-trusted.yml",
 );
 
 test("Grok subscription credentials require explicit catalog selection and observed auth evidence", async () => {

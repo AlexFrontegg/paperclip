@@ -54,11 +54,12 @@ test("an interrupted app bundle offers a retry that restores the saved task", as
     await json(await request.post(`/api/issues/${issue.id}/comments`, { data: { body: comment } }));
     const route = `/${fixture.company.issuePrefix}/issues/${issue.identifier}`;
     // Fail the shipped module before React (and its error boundary) can start.
-    await page.route("**/assets/*.js", intercepted => intercepted.abort());
+    // Vite can emit scripts at the URL root or in an assets directory.
+    await page.route("**/*.js", intercepted => intercepted.abort());
     await page.goto(route);
     await expect(page.getByRole("heading", { name: "Paperclip couldn’t start" })).toBeVisible();
     expect(await page.locator("#root").evaluate(root => root.childElementCount)).toBe(0);
-    await page.unroute("**/assets/*.js");
+    await page.unroute("**/*.js");
     await page.getByRole("button", { name: "Reload page" }).click();
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     await expect(page.getByText(comment, { exact: true })).toBeVisible();

@@ -18,7 +18,9 @@ Use the exact check name shown by the first PR run. Keep the existing review
 requirement and assign Frontegg maintainers to `.github/**` in CODEOWNERS.
 
 Node 24.11 or newer, pnpm 9.15.4, and the Runner's `rust-toolchain.toml` are the
-runtime/toolchain baseline. GitHub-hosted Linux runners execute all active jobs.
+runtime/toolchain baseline. GitHub-hosted Ubuntu 24.04 runners execute all active
+jobs. Pin the OS label: Ubuntu 26.04's multicall coreutils break executable-copy
+fixtures that require distinct `echo` and `sleep` binaries.
 The existing server/chat/route/browser partitions keep their process and database
 isolation. Runner integration has an explicit lane on both PR and publish runs.
 

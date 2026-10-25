@@ -37,6 +37,7 @@ const ecsTaskDefinition = JSON.parse(read("docker", "ecs-task-definition.json"))
 const reapingProbe = read("scripts", "assert-orphan-reaping.sh");
 const buildTest = read("scripts", "docker-build-test.sh");
 const dockerWorkflow = read(".github", "workflows", "docker.yml");
+const imageSmoke = read("scripts", "ci", "docker-image-smoke.sh");
 
 /** Every `ENTRYPOINT [...]` line in a Dockerfile, in order. */
 function entrypoints(source: string): string[] {
@@ -128,11 +129,16 @@ describe("deployment manifest parity", () => {
 describe("orphan-reaping probe", () => {
   it.each([
     ["the docker build test", buildTest],
-    ["the Docker publish workflow", dockerWorkflow],
+    ["the Docker image smoke", imageSmoke],
   ])("is exercised against a real image by %s", (_name, source) => {
     // A probe nothing runs proves nothing. The static assertions above only
     // check configuration; this is what keeps the behavioural check wired up.
     expect(source).toContain("scripts/assert-orphan-reaping.sh");
+  });
+
+  it("requires the image smoke before exporting publication digests", () => {
+    expect(dockerWorkflow).toContain('bash scripts/ci/docker-image-smoke.sh "$DOCKERHUB_IMAGE@$IMAGE_DIGEST" "$GITHUB_SHA"');
+    expect(dockerWorkflow.indexOf("docker-image-smoke.sh")).toBeLessThan(dockerWorkflow.indexOf("name: Export the verified digest"));
   });
 
   it("fails closed when the orphan is never adopted by PID 1", () => {

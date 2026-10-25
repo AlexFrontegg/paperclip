@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
 const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker.yml"), "utf8");
-const previewWorkflow = readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+const previewWorkflow = readFileSync(path.join(repoRoot, ".github", "archive", "workflows", "release.yml"), "utf8");
 
 /**
  * Return the text of the Dockerfile stage that starts at the named target.
