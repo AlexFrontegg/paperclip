@@ -68,6 +68,7 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 ## Upstream fixes taken early
 
 - Upstream #17216 (`042051904`): Codex shell commands see the secrets assigned to the agent, such as `GITHUB_TOKEN`. Our version leaves out upstream's telemetry keys (#16874, not merged yet). On the next sync, take upstream's version of these files.
+- Fork change on top of it: `codexShellEnvironmentKeys` also passes the run's `PAPERCLIP_GITHUB_BROKER_TOKEN` (and `PAPERCLIP_GITHUB_BRIDGE_TOKEN`) when Paperclip set it. Upstream keeps every `PAPERCLIP_GITHUB_*` name out of Codex shells, so Paperclip's `gh`/`git` launchers report `capability_missing` and managed GitHub (the read-only review bot token) fails on Codex. Keep this on the next sync until upstream passes the capability another way. Proving test: `packages/adapter-utils/src/codex-shell-environment.test.ts`.
 
 ## Building the labs image
 
