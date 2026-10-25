@@ -8,6 +8,8 @@ import { activityLog, agentWakeupRequests, agents, approvals, authUsers, compani
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { connectionContinuationPendingResponse, findSatisfiedToolConnection, satisfiedConnectionIntentService } from "../services/satisfied-connection-intents.js";
+import { activateUsageLimitFallback, readAgentUsageLimitFallbackState } from "../services/usage-limit-fallback.js";
+import { collectDispositionRepairSourceState } from "../services/recovery/disposition-repair.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { materializeNativeInteractionResponses } from "../services/native-runtime/native-interaction-bridge.js";
 import { DELIVERY_QUEUES, subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
@@ -432,6 +434,50 @@ describePostgres("already available connection requests", () => {
     expect(await satisfiedConnectionIntentService(db).sweepPending()).toMatchObject({ satisfied: 0 });
     expect((await db.select().from(issueThreadInteractions))[0].status).toBe("pending");
     expect(await db.select().from(connectionIntentDeliveries)).toHaveLength(0);
+  });
+
+  const signInSetups = ["on the fallback", "not on the fallback", "on the fallback with a question"] as const;
+  async function primarySignInCard(f: Awaited<ReturnType<typeof seed>>, run: typeof heartbeatRuns.$inferSelect, setup: typeof signInSetups[number]) {
+    const runtimeConfig = { heartbeat: { wakeOnDemand: true },
+      usageLimitFallback: { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset", switchWhenUnavailable: true } };
+    const [agent] = await db.update(agents).set({ runtimeConfig }).where(eq(agents.id, f.agentId)).returning();
+    await db.update(issueThreadInteractions).set({ payload: { version: 1, purpose: "ai", serviceSlug: "anthropic", serviceName: "Anthropic",
+      requestingAgentId: f.agentId, requestingAgentName: "Assignee", phase: "requested" } }).where(eq(issueThreadInteractions.id, f.intent.id));
+    if (setup !== "not on the fallback") {
+      expect(await activateUsageLimitFallback(db, { agent: agent!, run, reason: "primary_signed_out", retryNotBefore: null, now: new Date() }))
+        .toMatchObject({ activated: true });
+    }
+    if (setup === "on the fallback with a question") await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+      kind: "ask_user_questions", status: "pending", addresseeUserId: "connection-owner", payload: { version: 1, questions: [] } });
+  }
+
+  it.each(signInSetups)("lets the primary's AI sign-in card hold a retry only when the agent is not on its fallback: %s", async (setup) => {
+    const f = await seed(); const run = await retry(f);
+    await primarySignInCard(f, run, setup);
+
+    const dispatch = createPostgresRunDispatchAdapter(db);
+    const gate = await dispatch.evaluateScheduledRetryGate({ companyId: f.companyId, runId: run.id, now: new Date() });
+    if (setup !== "on the fallback") {
+      expect(gate).toMatchObject({ allowed: false, errorCode: "issue_waiting_for_response" });
+      return;
+    }
+    expect(gate).toMatchObject({ allowed: true });
+    await dispatch.promoteOrCancelDueRetry({ companyId: f.companyId, runId: run.id, now: new Date() });
+    await dispatch.cancelStaleQueuedRun({ companyId: f.companyId, runId: run.id, expectedStatus: "queued", now: new Date() });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].status).toBe("queued");
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, f.intent.id)))[0].status).toBe("pending");
+    expect(await readAgentUsageLimitFallbackState(db, f.agentId)).toMatchObject({ reason: "primary_signed_out" });
+  });
+
+  it.each(signInSetups)("lets the primary's AI sign-in card stop the follow-up after a successful run only when the agent is not on its fallback: %s", async (setup) => {
+    const f = await seed(); const run = await retry(f);
+    await primarySignInCard(f, run, setup);
+    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, f.issueId));
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(await collectDispositionRepairSourceState(db, { issue: task!, excludeRunId: run.id }))
+      .toMatchObject(setup === "on the fallback"
+        ? { hasDurableWaitingPath: false, durablePathReason: null }
+        : { hasDurableWaitingPath: true, durablePathReason: "interaction" });
   });
 
   it("keeps a real question blocking even when a sibling connection is available", async () => {

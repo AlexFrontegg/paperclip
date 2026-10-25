@@ -19,6 +19,7 @@ export function useAgentAiHealth(agentId: string | null | undefined) {
   const { data } = useCompanyAiHealth();
   return {
     agentHealth: data?.agents.find((agent) => agent.agentId === agentId),
+    healthLoaded: data !== undefined,
     connections: data?.connections ?? [],
   };
 }

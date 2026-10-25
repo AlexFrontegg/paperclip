@@ -1,11 +1,12 @@
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
-import { approvals, companyMemberships, connectionIntentDeliveries, issueApprovals, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
+import { agents, approvals, companyMemberships, connectionIntentDeliveries, issueApprovals, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { connectionIntentPayloadSchema } from "@paperclipai/shared";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { logger } from "../middleware/logger.js";
 import { createToolGatewayService } from "./tool-gateway.js";
+import { nextRunUsesFallback } from "./usage-limit-fallback.js";
 
 type Task = Pick<typeof issues.$inferSelect, "id" | "companyId" | "projectId" | "status" | "assigneeAgentId" | "assigneeUserId">;
 type Intent = Pick<typeof issueThreadInteractions.$inferSelect, "id" | "companyId" | "issueId" | "kind" | "status" | "payload" | "addresseeUserId"> & Partial<Pick<typeof issueThreadInteractions.$inferSelect, "sourceRunId">>;
@@ -47,9 +48,28 @@ export async function findSatisfiedToolConnection(db: Db, task: Task, intent: In
   return findAvailableToolConnection(db, task, intent, policyRunId);
 }
 
+/** The primary's AI sign-in card keeps asking for a reconnect, but the work goes on with the fallback meanwhile. */
+export function isAssigneeAiSignIn(interaction: Pick<Intent, "kind" | "payload">, task: Pick<Task, "assigneeAgentId">): boolean {
+  const payload = interaction.payload as { requestingAgentId?: string; purpose?: string } | null;
+  return interaction.kind === "connection_intent" && payload?.purpose === "ai" && payload.requestingAgentId === task.assigneeAgentId;
+}
+
+/** Whether these pending cards are all the assignee's AI sign-in cards, which its fallback covers for the next run. */
+export async function pendingCardsCoveredByFallback(db: Db, task: Pick<Task, "companyId" | "assigneeAgentId">,
+  interactionIds: string[], responsibleUserId?: string | null): Promise<boolean> {
+  if (!interactionIds.length || !task.assigneeAgentId) return false;
+  const cards = await db.select({ kind: issueThreadInteractions.kind, payload: issueThreadInteractions.payload, addresseeUserId: issueThreadInteractions.addresseeUserId })
+    .from(issueThreadInteractions)
+    .where(and(eq(issueThreadInteractions.companyId, task.companyId), inArray(issueThreadInteractions.id, interactionIds)));
+  if (!cards.length || !cards.every((card) => isAssigneeAiSignIn(card, task))) return false;
+  const [agent] = await db.select().from(agents).where(and(eq(agents.id, task.assigneeAgentId), eq(agents.companyId, task.companyId)));
+  // Without a run, the card's addressee is the user whose run failed, so their next run is the one that matters.
+  return agent ? nextRunUsesFallback(db, agent, responsibleUserId ?? cards[0]!.addresseeUserId ?? null, new Date()) : false;
+}
+
 /** Recheck both live requests and system-retired cards against the next run. */
 export async function connectionContinuationPendingResponse(db: Db, task: Task, responsibleUserId: string | null,
-  policyRunId?: string | null): Promise<"interaction" | "approval" | null> {
+  policyRunId?: string | null, fallbackCoversNextRun?: () => Promise<boolean>): Promise<"interaction" | "approval" | null> {
   const interactions = await db.select().from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, task.companyId), eq(issueThreadInteractions.issueId, task.id),
     or(eq(issueThreadInteractions.status, "pending"), and(eq(issueThreadInteractions.kind, "connection_intent"), eq(issueThreadInteractions.status, "expired"))),
@@ -59,6 +79,7 @@ export async function connectionContinuationPendingResponse(db: Db, task: Task, 
       && "connectionId" in interaction.result && typeof interaction.result.connectionId === "string";
     if (interaction.status !== "pending" && !retired) continue;
     if (retired && (interaction.payload as { requestingAgentId?: string }).requestingAgentId !== task.assigneeAgentId) continue;
+    if (isAssigneeAiSignIn(interaction, task) && fallbackCoversNextRun && await fallbackCoversNextRun()) continue;
     if (interaction.addresseeUserId !== responsibleUserId) return "interaction";
     const connection = await findAvailableToolConnection(db, task, { ...interaction, status: "pending" }, policyRunId);
     // Historical system retirements describe a service need, not a permanent

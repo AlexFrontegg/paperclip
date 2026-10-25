@@ -264,15 +264,7 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   const primary = { adapterType: agent.adapterType };
   const state = await readAgentUsageLimitFallbackState(db, agent.id);
   if (!state) return primary;
-  const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  const responsibleUserId = run.responsibleUserId ?? null;
-  const view = usageLimitFallbackLaneView({
-    agent,
-    state,
-    now,
-    primarySignedOut: state.waitForReconnect && !state.suspendedReason ? await primaryAccountSignedOut(db, agent, responsibleUserId) : null,
-    fallbackAccountUsable: fallback !== null && !state.suspendedReason && await fallbackAiConnectionSelectable(db, agent, fallback, responsibleUserId),
-  });
+  const { fallback, view } = await claimLaneView(db, agent, state, run.responsibleUserId ?? null, now);
   if (view.stale) {
     await clearUsageLimitFallbackState(db, agent.id, state.activatedAt);
     return primary;
@@ -280,6 +272,26 @@ export async function resolveAdapterDispatchForClaim(db: Db, agent: AgentRow, ru
   if (view.extended && view.fallbackUntil) await extendUsageLimitFallback(db, agent.id, state.activatedAt, new Date(view.fallbackUntil));
   if (view.lane !== "fallback" || !fallback || !view.fallbackUntil) return primary;
   return { adapterType: fallback.adapterType, lane: "fallback", primaryAdapterType: agent.adapterType, fallbackUntil: view.fallbackUntil };
+}
+
+async function claimLaneView(db: Db, agent: AgentRow, state: UsageLimitFallbackState, responsibleUserId: string | null, now: Date) {
+  const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
+  const view = usageLimitFallbackLaneView({
+    agent,
+    state,
+    now,
+    primarySignedOut: state.waitForReconnect && !state.suspendedReason ? await primaryAccountSignedOut(db, agent, responsibleUserId) : null,
+    fallbackAccountUsable: fallback !== null && !state.suspendedReason && await fallbackAiConnectionSelectable(db, agent, fallback, responsibleUserId),
+  });
+  return { fallback, view };
+}
+
+/** Whether the agent's next run for this user goes to its fallback. Read-only: unlike a claim, it clears nothing. */
+export async function nextRunUsesFallback(db: Db, agent: AgentRow, responsibleUserId: string | null, now: Date): Promise<boolean> {
+  const state = await readAgentUsageLimitFallbackState(db, agent.id);
+  if (!state) return false;
+  const { fallback, view } = await claimLaneView(db, agent, state, responsibleUserId, now);
+  return !view.stale && view.lane === "fallback" && fallback !== null && view.fallbackUntil !== null;
 }
 
 export type UsageLimitFallbackActivation =

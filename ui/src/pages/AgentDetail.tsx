@@ -926,7 +926,7 @@ export function AgentDetail() {
     queryFn: () => agentsApi.runtimeState(resolvedAgentId!, resolvedCompanyId ?? undefined),
     enabled: Boolean(resolvedAgentId) && needsOverviewData,
   });
-  const { agentHealth, connections: aiHealthConnections } = useAgentAiHealth(resolvedAgentId);
+  const { agentHealth, healthLoaded: aiHealthLoaded, connections: aiHealthConnections } = useAgentAiHealth(resolvedAgentId);
   const clearUsageLimitFallback = useMutation({
     mutationFn: () => agentsApi.clearUsageLimitFallback(resolvedAgentId!, resolvedCompanyId ?? undefined),
     onSuccess: () => {
@@ -1269,6 +1269,7 @@ export function AgentDetail() {
         agentName={agent.name}
         stateJson={runtimeState?.stateJson}
         health={agentHealth}
+        healthLoaded={aiHealthLoaded}
         connections={aiHealthConnections}
         pending={clearUsageLimitFallback.isPending}
         onReturnToPrimary={() => clearUsageLimitFallback.mutate()}
