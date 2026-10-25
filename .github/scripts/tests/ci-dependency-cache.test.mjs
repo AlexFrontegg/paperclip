@@ -83,6 +83,6 @@ test('cache restores are exact and only a frozen canonical master push can publi
     assert.match(step, /github\.ref == 'refs\/heads\/master'/);
     assert.match(step, /steps\.install\.outputs\.frozen == 'true'/);
   }
-  const workflow = readFileSync(new URL('../../workflows/release-verify.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../../archive/workflows/release-verify.yml', import.meta.url), 'utf8');
   assert.match(workflow, /save-cache: .*inputs\.ref == github\.sha/);
 });

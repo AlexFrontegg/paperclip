@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const read = (name) => readFileSync(new URL(`../../workflows/${name}`, import.meta.url), "utf8");
+const read = (name) => readFileSync(new URL(`../../archive/workflows/${name}`, import.meta.url), "utf8");
 const prWorkflow = read("pr-trusted.yml");
 const releaseWorkflow = read("release-verify.yml");
 

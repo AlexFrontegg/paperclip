@@ -1,18 +1,13 @@
-name: PR
-run-name: >-
-  ${{ contains(github.event.pull_request.labels.*.name, 'profile-ci') && (github.event.action != 'labeled' || github.event.label.name == 'profile-ci') && format('CI profile · PR #{0}', github.event.pull_request.number) || '' }}
-
+name: Frontegg PR
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-
+    branches: [deploy]
+    types: [opened, synchronize, reopened, ready_for_review]
 permissions:
-  actions: read
   contents: read
-  pull-requests: read
-
+concurrency:
+  group: frontegg-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   ci:
-    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
-    # Pinned to deploy so CI matches the fork's code and a PR cannot change its own checks.
-    uses: AlexFrontegg/paperclip/.github/workflows/pr-trusted.yml@deploy
+    uses: ./.github/workflows/ci.yml

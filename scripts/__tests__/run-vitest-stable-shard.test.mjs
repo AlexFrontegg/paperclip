@@ -163,7 +163,7 @@ test("workspaces-c runs the db project alone and workspaces-b no longer carries 
   assert.ok(!workspacesB.workspaceProjects.includes("@paperclipai/db"), "db must not run twice");
   assert.ok(workspacesB.workspaceProjects.length > 0, "workspaces-b must still run its other projects");
   for (const workflow of ["pr-trusted.yml", "release-verify.yml"]) {
-    const entries = matrixEntries(readFileSync(path.join(repoRoot, ".github", "workflows", workflow), "utf8"));
+    const entries = matrixEntries(readFileSync(path.join(repoRoot, ".github", "archive", "workflows", workflow), "utf8"));
     // The parser must demonstrably see shard keys in this workflow, otherwise
     // the unsharded assertions below could pass for the wrong reason.
     const sharded = entries.filter(entry => entry.group === "general-workspaces-a");
@@ -422,11 +422,11 @@ test("shard flags are rejected for the native-runner group", () => {
 // with exactly one final shard, and that lane's package script routes through
 // the wrapper that runs the native-runner group.
 test("the PR workflow wiring for the native-runner lane holds", () => {
-  const prWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
+  const prWorkflow = readFileSync(path.join(repoRoot, ".github/archive/workflows/pr.yml"), "utf8");
   assert.match(prWorkflow, /^name: PR$/m,
     "renaming pr.yml silently moves the native-runner suite back into the uncached server shards");
 
-  const trustedWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/pr-trusted.yml"), "utf8");
+  const trustedWorkflow = readFileSync(path.join(repoRoot, ".github/archive/workflows/pr-trusted.yml"), "utf8");
   const lanes = [...trustedWorkflow.matchAll(/command: test:typescript:vitest --shard=(\d+)\/(\d+)/g)]
     .map((match) => [Number(match[1]), Number(match[2])]);
   assert.ok(lanes.length > 0, "expected sharded test:typescript:vitest lanes in pr-trusted.yml");

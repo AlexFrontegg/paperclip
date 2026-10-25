@@ -17,7 +17,7 @@ const expectedJobs = {
   "release.yml": ["plan_preview", "package_preview"],
 };
 for (const [file, expectedNames] of Object.entries(expectedJobs)) {
-  const workflow = readFileSync(new URL(`../../workflows/${file}`, import.meta.url), "utf8");
+  const workflow = readFileSync(new URL(`../../archive/workflows/${file}`, import.meta.url), "utf8");
   const jobs = [...workflow.matchAll(/^  ([a-z_]+):\n([\s\S]*?)(?=^  [a-z_]+:\n|(?![\s\S]))/gm)];
   const routed = jobs.filter(([, , body]) => body.includes(fleet));
   test(`${file}: all intended jobs carry the post-merge guard`, () => {
@@ -84,7 +84,7 @@ for (const [file, expectedNames] of Object.entries(expectedJobs)) {
 
 
 test("Cloud readiness bookkeeping never waits for the AWS verification fleet", () => {
-  const workflow = readFileSync(new URL("../../workflows/cloud-readiness.yml", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../../archive/workflows/cloud-readiness.yml", import.meta.url), "utf8");
   const bodies = new Map();
   for (const [name, needs] of [
     ["source_verified", "[verify]"],

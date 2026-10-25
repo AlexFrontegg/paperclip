@@ -18,76 +18,17 @@ Current implementation status:
 - Node.js 24.11+
 - pnpm 9+
 
-## Dependency Lockfile Policy
+## CI and dependency lockfile policy
 
-GitHub Actions owns `pnpm-lock.yaml`.
+This fork uses repository-owned GitHub Actions on `deploy` and publishes the
+verified `production` Docker image to Docker Hub. See [CI and publishing](CI.md)
+for the workflows, credential names, required checks, tagging, and rollback.
+Unused upstream workflows are kept in `.github/archive/workflows/`.
 
-- Do not commit `pnpm-lock.yaml` in pull requests.
-- Pull request CI validates dependency resolution when manifests change.
-- Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
-
-## Trusted PR Workflow
-
-The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.
-The AWS runner group `paperclip-public-pr` must allow
-`paperclipai/paperclip/.github/workflows/pr-trusted.yml@refs/heads/master`.
-New workflow versions merged into master then receive runner access without a
-separate SHA allowlist update. Dependabot leaves this first-party reference on
-master.
-
-Runner selection calls `ci-routing.yml@master` on the dedicated
-`paperclip-ci-routing-x64` AWS Fleet. The `paperclip-ci-routing` runner group
-admits only `paperclipai/paperclip/.github/workflows/ci-routing.yml@refs/heads/master`
-and repository ID `1170821064`. GitHub evaluates the canonical repository, author, and sender checks before
-allocating reserved capacity. The validated admission snapshot (`AWS_CI_ROUTING_USER_IDS_SOURCE` and
-`AWS_CI_ROUTING_USER_IDS`) must match `AWS_CI_TRUSTED_USER_IDS`. Refresh it through
-the runner-group configuration helper when the roster changes. Missing, stale,
-or malformed settings keep hosted routing available without evaluating JSON
-in the job's placement expression. Unapproved PRs use hosted metadata routing;
-approved manual canaries on master can use the reserved pool. The routing
-workflow reads GitHub metadata without checking out or executing PR code. Its author, sender, rerun actor,
-repository, head, and merge validation still decide whether tests can use AWS.
-Unapproved test workloads continue to use GitHub-hosted runners.
-
-The routing workflow also selects the CI scope. Middle PRs in a stack and PRs
-whose diff changes only release notes (`releases/v*.md` or
-`releases/beta/v*.md`) skip the build, test, and e2e lanes. The `policy` job
-and the `verify` and `e2e` aggregate checks still run. The release-notes check
-reads the diff between the event's base and head commits. If that lookup
-fails, or the diff is empty or may be truncated, the PR runs full CI. A
-notes-only PR stacked above other PRs also runs full CI, because its own diff
-does not include the lower PRs' code.
-
-The routing Fleet has two warm On-Demand runners and a four-runner ceiling.
-Test fleets cannot consume its runner slots. Hosted test queues therefore do
-not block AWS runner selection. A manual dispatch of `ci-routing.yml` on master
-checks placement without launching the test matrix; its non-PR event returns
-the hosted test-runner output. Configure and verify the group and Fleet before
-merging this caller. To roll back, restore the hosted gate and retain the routing
-workflow authorization until assigned jobs finish.
-
-Keep the `.github/**` rule in `.github/CODEOWNERS` and the active master ruleset's
-code-owner review requirement enabled. This covers the caller, the trusted
-workflow, and CODEOWNERS itself. Existing administrator pull-request bypasses
-remain governed by the repository ruleset.
-
-When changing the workflow path or branch, authorize the new reference before
-updating the caller. Retain older authorized SHA references while queued runs or
-supported reruns still use them.
-
-General server shards run at most two test files at a time in separate Vitest
-forks. Each file retains its own home, config and process state, and its test
-cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
-serial because the database is shared. Unsharded local tests, route/authz lanes,
-and native Runner lanes retain their existing concurrency. Sharded chat jobs run
-two independent partitions, each with its own embedded PostgreSQL, home and
-config; an explicit shared test database retains one partition per job.
-The Runner transport lease-expiry and cold-admission regressions live in their
-own file so those real-clock waits overlap other files in the existing pool.
-
-For a full wall-clock profile of all main PR CI jobs, add `profile-ci` to the PR.
-See [CI profiling](ci-profiling.md) for the Honeycomb waterfall, coverage,
-operator setup, and activation requirements.
+Commit `pnpm-lock.yaml` with dependency changes. Use pnpm 9.15.4 to update it;
+CI and Docker install with `--frozen-lockfile`. The upstream lockfile-refresh
+bot and AWS CI routing do not run in this fork. Historical workflow tests
+explicitly target the archived definitions.
 
 ## Start Dev
 

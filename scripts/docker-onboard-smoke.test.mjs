@@ -17,7 +17,7 @@ const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const scriptPath = join(repoRoot, "scripts", "docker-onboard-smoke.sh");
 const script = readFileSync(scriptPath, "utf8");
 const workflow = readFileSync(
-  join(repoRoot, ".github", "workflows", "release-smoke.yml"),
+  join(repoRoot, ".github", "archive", "workflows", "release-smoke.yml"),
   "utf8",
 );
 const dockerJob = workflow.split(/^  smoke:$/m)[1] ?? "";

@@ -7,7 +7,7 @@ All commands below assume you are in the **project root** (the directory contain
 ## Building the image
 
 ```sh
-docker build -t paperclip-local .
+docker build --target production -t paperclip-local .
 ```
 
 The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
@@ -40,47 +40,26 @@ This avoids transpiling them through the tsx loader on every boot. To check a
 build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
 PR CI runs the same check after `pnpm build`.
 
-## Standard images and downstream composition
+## Published images
 
-The Docker workflow publishes the standard `production` target for Linux AMD64
-and ARM64. Canonical master pushes also publish
-`ghcr.io/paperclipai/paperclip:sha-<FULL_SHA>` and a GitHub/Sigstore attestation
-for its immutable multi-platform digest. Downstream services can compose their
-own images from this public base without rebuilding Core.
+This fork publishes native Linux AMD64 and ARM64 `production` images to Docker
+Hub after source verification and real-image smoke tests. The destination defaults
+to `frontegg/paperclip` and can be set through `DOCKERHUB_IMAGE`. See [CI.md](CI.md)
+for credentials, visibility, tags, required checks, and digest-based rollback.
 
-Stamped standard images include the build-owned remote provider pack at
-`/opt/paperclip-runner/provider-pack` and set
-`PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH` to that directory. Downstream
-compositions and the explicit `cloud` target inherit both. The pack is required
-on the controller for remote OpenCode and ACPX runs, even when the sandbox has
-preinstalled providers; setting the environment variable alone cannot repair an
-image that omits the pack. Rebuild and redeploy from a standard image containing
-the pack if runs fail with `runner_remote_provider_artifact_incompatible`.
+Always select `--target production` for self-hosted builds: the Dockerfile also
+contains a later `cloud` target. Supply a full `PAPERCLIP_BUILD_COMMIT` when
+building an image that must support remote OpenCode/ACPX execution. That stamp
+qualifies and generates the provider pack shipped at
+`/opt/paperclip-runner/provider-pack`; an unstamped local build skips the pack.
 
-Local Docker builds must supply a full `PAPERCLIP_BUILD_COMMIT` to include a
-qualified pack. Unstamped builds remain usable for local adapters and skip pack
-generation. The pack stays root-owned and readable by remapped runtime UIDs.
-
-The legacy recurring public `-cloud` publisher is retired. Master pushes,
-release tags, and manual `Docker` dispatches no longer build that variant.
-Existing `-cloud` tags and digests remain in the registry for rollback; their
-release-channel aliases no longer advance. This change deletes no images,
-cache tags, or migrator artifacts.
-
-The `cloud` Dockerfile target remains available for explicit
-[preview builds](preview-release-artifacts.md). Those requests still publish a
-full-SHA `-cloud` tag when needed. They do not advance a release channel or
-replace downstream private composition.
-
-A published image alone does not prove source tests or migration compatibility.
-Downstream deployment tooling must verify [source proof](cloud-build-readiness.md),
-the standard image attestation, the exact-source migrator, and its own composed
-image before rollout. Resolve immutable digests instead of deploying mutable tags.
+Keep data volumes, signing secrets, and database migration handling in the
+runtime deployment. Publishing an image does not deploy the application.
 
 ## One-liner (build + run)
 
 ```sh
-docker build -t paperclip-local . && \
+docker build --target production -t paperclip-local . && \
 docker run --name paperclip \
   -p 3100:3100 \
   -e HOST=0.0.0.0 \

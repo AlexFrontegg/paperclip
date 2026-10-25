@@ -1,6 +1,6 @@
 # Fork changes
 
-This fork (`AlexFrontegg/paperclip`, deploy branch `deploy`) adds the features below on top of `paperclipai/paperclip`. Use this list when merging an upstream release: every hook point must still exist after the merge, and every proving test must pass.
+This fork (`frontegg/paperclip`, deploy branch `deploy`) adds the features below on top of `paperclipai/paperclip`. Use this list when merging an upstream release: every hook point must still exist after the merge, and every proving test must pass.
 
 ## Usage-limit fallback
 
@@ -70,8 +70,15 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 
 ## CI
 
-- `.github/workflows/pr.yml` calls the fork's `pr-trusted.yml@deploy`; `commitperclip-review.yml` skips upstream-only bot steps. Keep upstream's job conditions and swap only the `uses:` line.
-- `pnpm-lock.yaml`: take upstream's version, then run `pnpm install --lockfile-only` only if the fork added a dependency.
+- `pr.yml` calls this repository's `ci.yml`; all source checks use GitHub-hosted
+  runners and require no publishing or provider credentials.
+- `docker.yml` verifies `deploy`, builds and smoke-tests native AMD64/ARM64
+  production images, then publishes to Docker Hub with Frontegg credentials.
+- Unused upstream workflows are preserved in `.github/archive/workflows/`.
+  Do not restore them to the active directory during an upstream merge.
+- Commit `pnpm-lock.yaml` with dependency changes. CI and Docker use frozen
+  installs; resolve and commit the lockfile after an upstream dependency merge.
+- [CI.md](CI.md) defines publishing configuration, required checks, and rollback.
 
 ## Merging an upstream release
 

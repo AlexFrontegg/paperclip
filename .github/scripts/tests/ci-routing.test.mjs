@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 
-const workflow = readFileSync(new URL("../../workflows/ci-routing.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../../archive/workflows/ci-routing.yml", import.meta.url), "utf8");
 const jobs = workflow.split(/^jobs:\n/m)[1];
 
 test("routing uses reserved capacity and runs no PR code or actions", () => {

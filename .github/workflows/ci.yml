@@ -1,0 +1,199 @@
+name: Paperclip CI
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  policy:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check repository contracts
+        run: |
+          node scripts/check-node-version-policy.mjs
+          node scripts/check-docker-deps-stage.mjs
+          node scripts/check-no-git-push.mjs
+          node scripts/check-module-boundaries.mjs
+          node scripts/check-token-gates.mjs
+          node scripts/sync-agent-palette-tokens.mjs --check
+          node scripts/sync-cliplab-character.mjs --check
+          node --test .github/scripts/tests/*.test.mjs
+          node --test scripts/check-no-git-push.test.mjs scripts/check-module-boundaries.test.mjs scripts/__tests__/run-vitest-stable-shard.test.mjs scripts/__tests__/e2e-shard.test.mjs
+      - name: Check migration ordering against the PR base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .github/scripts/check-pr-migration-order.mjs "$BASE_SHA" "$HEAD_SHA"
+
+  build:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+        with:
+          rust: 'true'
+      - run: pnpm typecheck
+      - run: pnpm typecheck:build-gaps
+      - run: pnpm build
+      - name: Verify the bundled server starts
+        run: |
+          pnpm --filter @paperclipai/server build:runtime
+          bash scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs
+
+  general:
+    name: Tests (${{ matrix.group }} ${{ matrix.index }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { group: general-server-without-chat-or-native-runner, index: 0, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 1, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 2, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 3, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 4, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 5, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 6, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 7, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 8, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 9, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 10, count: 12 }
+          - { group: general-server-without-chat-or-native-runner, index: 11, count: 12 }
+          - { group: general-chat, index: 0, count: 3 }
+          - { group: general-chat, index: 1, count: 3 }
+          - { group: general-chat, index: 2, count: 3 }
+          - { group: general-workspaces-a, index: 0, count: 2 }
+          - { group: general-workspaces-a, index: 1, count: 2 }
+          - { group: general-workspaces-b, index: 0, count: 0 }
+          - { group: general-workspaces-c, index: 0, count: 0 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+      - name: Run a complete test partition
+        env:
+          TEST_GROUP: ${{ matrix.group }}
+          SHARD_INDEX: ${{ matrix.index }}
+          SHARD_COUNT: ${{ matrix.count }}
+        run: |
+          args=(--group "$TEST_GROUP")
+          if (( SHARD_COUNT > 0 )); then
+            args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT")
+          fi
+          pnpm test:run:general -- "${args[@]}"
+
+  serialized:
+    name: Route and authorization tests (${{ matrix.index }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+      - run: pnpm test:run:serialized -- --shard-index ${{ matrix.index }} --shard-count 9
+
+  runner:
+    name: Runner (${{ matrix.command }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        command: [check:static, check:runner, 'test:typescript:vitest --shard=1/2', 'test:typescript:vitest --shard=2/2']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+        with:
+          rust: 'true'
+      - run: pnpm --filter @paperclipai/paperclip-runner ${{ matrix.command }}
+
+  native_server:
+    name: Native Runner integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+        with:
+          rust: 'true'
+      - run: pnpm test:run:general -- --group general-server-native-runner
+
+  e2e:
+    name: Browser tests (${{ matrix.index }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-paperclip
+      - name: Run browser tests with fixture providers
+        env:
+          PAPERCLIP_E2E_SKIP_LLM: 'true'
+          PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
+          SHARD_INDEX: ${{ matrix.index }}
+        run: |
+          google-chrome --version
+          mapfile -t specs < <(node scripts/e2e-shard.mjs --shard-index "$SHARD_INDEX" --shard-count 8 | tr ' ' '\n')
+          test "${#specs[@]}" -gt 0
+          pnpm test:e2e "${specs[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: playwright-${{ matrix.index }}
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 7
+
+  docker_context:
+    name: Docker context integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: docker build --file .github/docker-context-checks.Dockerfile .
+
+  required:
+    name: CI required
+    if: always()
+    needs: [policy, build, general, serialized, runner, native_server, e2e, docker_context]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification lane to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$RESULTS"

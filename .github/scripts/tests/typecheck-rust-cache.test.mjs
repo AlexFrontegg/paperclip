@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 
-const workflow = readFileSync(new URL("../../workflows/release-verify.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../../archive/workflows/release-verify.yml", import.meta.url), "utf8");
 const typecheck = workflow.split("  typecheck:\n")[1].split("  general_tests:\n")[0];
 const cache = typecheck.split("      - name: Cache typecheck Rust dependencies\n")[1].split("      - name: Validate release package manifest")[0];
 const sha = "a".repeat(40);
