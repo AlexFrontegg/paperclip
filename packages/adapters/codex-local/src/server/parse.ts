@@ -1,6 +1,5 @@
 import {
   asString,
-  asNumber,
   parseObject,
   parseJson,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -28,72 +27,88 @@ export type CodexAuthRefreshFailureClass =
   | "refresh_token_invalidated";
 
 export function parseCodexJsonl(stdout: string) {
+  return createCodexJsonlParser()(stdout);
+}
+
+/** Consume complete JSONL records once, retaining protocol accounting state. */
+export function createCodexJsonlParser() {
   let sessionId: string | null = null;
   let finalMessage: string | null = null;
   let errorMessage: string | null = null;
   let sawProtocolEvent = false;
   let sawProtocolTerminalEvent = false;
+  let usageReported = false;
+  let usageComplete = false;
   const usage = {
     inputTokens: 0,
     cachedInputTokens: 0,
     outputTokens: 0,
   };
 
-  for (const rawLine of stdout.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
+  return (stdout: string) => {
+    for (const rawLine of stdout.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
 
-    const event = parseJson(line);
-    if (!event) continue;
+      const event = parseJson(line);
+      if (!event) continue;
 
-    const type = asString(event.type, "");
-    if (type) sawProtocolEvent = true;
-    if (type === "error" || type === "turn.completed" || type === "turn.failed") {
-      sawProtocolTerminalEvent = true;
-    }
-    if (type === "thread.started") {
-      sessionId = asString(event.thread_id, sessionId ?? "") || sessionId;
-      continue;
-    }
-
-    if (type === "error") {
-      const msg = asString(event.message, "").trim();
-      if (msg) errorMessage = msg;
-      continue;
-    }
-
-    if (type === "item.completed") {
-      const item = parseObject(event.item);
-      if (asString(item.type, "") === "agent_message") {
-        const text = asString(item.text, "");
-        if (text) finalMessage = text;
+      const type = asString(event.type, "");
+      if (type) sawProtocolEvent = true;
+      if (type === "error" || type === "turn.completed" || type === "turn.failed") {
+        sawProtocolTerminalEvent = true;
+        const reported = parseObject(event.usage);
+        const validCount = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+        const cached = reported.cached_input_tokens ?? 0;
+        usageComplete = validCount(reported.input_tokens) && validCount(reported.output_tokens)
+          && validCount(cached) && cached <= reported.input_tokens;
+        if (usageComplete) {
+          usage.inputTokens = reported.input_tokens as number;
+          usage.cachedInputTokens = cached as number;
+          usage.outputTokens = reported.output_tokens as number;
+          usageReported = true;
+        }
       }
-      continue;
+      if (type === "turn.started") usageComplete = false;
+      if (type === "thread.started") {
+        sessionId = asString(event.thread_id, sessionId ?? "") || sessionId;
+        continue;
+      }
+
+      if (type === "error") {
+        const msg = asString(event.message, "").trim();
+        if (msg) errorMessage = msg;
+        continue;
+      }
+
+      if (type === "item.completed") {
+        const item = parseObject(event.item);
+        if (asString(item.type, "") === "agent_message") {
+          const text = asString(item.text, "");
+          if (text) finalMessage = text;
+        }
+        continue;
+      }
+
+      if (type === "turn.failed") {
+        const err = parseObject(event.error);
+        const msg = asString(err.message, "").trim();
+        if (msg) errorMessage = msg;
+      }
     }
 
-    if (type === "turn.completed") {
-      const usageObj = parseObject(event.usage);
-      usage.inputTokens = asNumber(usageObj.input_tokens, usage.inputTokens);
-      usage.cachedInputTokens = asNumber(usageObj.cached_input_tokens, usage.cachedInputTokens);
-      usage.outputTokens = asNumber(usageObj.output_tokens, usage.outputTokens);
-      continue;
-    }
-
-    if (type === "turn.failed") {
-      const err = parseObject(event.error);
-      const msg = asString(err.message, "").trim();
-      if (msg) errorMessage = msg;
-    }
-  }
-
-  return {
-    sessionId,
-    summary: finalMessage?.trim() ?? "",
-    usage,
-    usageBasis: "per_run" as const,
-    errorMessage,
-    sawProtocolEvent,
-    sawProtocolTerminalEvent,
+    return {
+      sessionId,
+      summary: finalMessage?.trim() ?? "",
+      // Codex includes cache hits in input_tokens; Paperclip stores them separately.
+      usage: { ...usage, inputTokens: Math.max(0, usage.inputTokens - usage.cachedInputTokens) },
+      usageBasis: "per_run" as const,
+      errorMessage,
+      sawProtocolEvent,
+      sawProtocolTerminalEvent,
+      usageReported,
+      usageComplete,
+    };
   };
 }
 
@@ -318,11 +333,24 @@ export function isCodexTransientUpstreamError(input: {
   return CODEX_REMOTE_COMPACTION_RE.test(haystack) || /high\s+demand|temporary\s+errors/i.test(haystack);
 }
 
+// Tool output and agent text arrive in item events and can quote quota phrases; only Codex's own error reports count.
+function codexErrorReportLines(stdout: string): string {
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => {
+      const event = parseJson(line.trim());
+      if (!event) return true;
+      const type = asString(event.type, "");
+      return type === "error" || type === "turn.failed";
+    })
+    .join("\n");
+}
+
 export function isCodexProviderQuotaError(input: {
   stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): boolean {
-  const haystack = buildCodexErrorHaystack(input);
-  return CODEX_PROVIDER_QUOTA_RE.test(haystack) || extractCodexRetryNotBefore(input) != null;
+  const errorReport = { ...input, stdout: codexErrorReportLines(input.stdout ?? "") };
+  return CODEX_PROVIDER_QUOTA_RE.test(buildCodexErrorHaystack(errorReport)) || extractCodexRetryNotBefore(errorReport) != null;
 }

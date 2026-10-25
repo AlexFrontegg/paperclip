@@ -10,6 +10,19 @@ import {
 } from "./parse.js";
 
 describe("parseCodexJsonl", () => {
+  it.each(["turn.failed", "error", "turn.completed"])("does not invent zero usage for %s without counters", (type) => {
+    expect(parseCodexJsonl(JSON.stringify({ type }))).toMatchObject({
+      sawProtocolTerminalEvent: true, usageReported: false, usageComplete: false,
+    });
+  });
+  it.each([{}, { input_tokens: 0 }, { input_tokens: -1, output_tokens: 0 }, { input_tokens: 1, output_tokens: 0, cached_input_tokens: 2 }])("rejects missing or invalid completion counters: %j", (usage) => {
+    expect(parseCodexJsonl(JSON.stringify({ type: "turn.completed", usage })).usageComplete).toBe(false);
+  });
+  it("distinguishes explicit zero usage from missing usage", () => {
+    expect(parseCodexJsonl(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, output_tokens: 0 } }))).toMatchObject({
+      usageReported: true, usageComplete: true, usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+    });
+  });
   it("captures session id, assistant summary, usage, and error message", () => {
     const stdout = [
       JSON.stringify({ type: "thread.started", thread_id: "thread_123" }),
@@ -28,7 +41,7 @@ describe("parseCodexJsonl", () => {
       sessionId: "thread_123",
       summary: "Recovered response",
       usage: {
-        inputTokens: 10,
+        inputTokens: 8,
         cachedInputTokens: 2,
         outputTokens: 4,
       },
@@ -36,6 +49,8 @@ describe("parseCodexJsonl", () => {
       errorMessage: "resume failed",
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
+      usageReported: true,
+      usageComplete: false,
     });
   });
 
@@ -64,7 +79,7 @@ describe("parseCodexJsonl", () => {
       sessionId: "thread_123",
       summary: "Fixed the issue and verified the targeted tests pass.",
       usage: {
-        inputTokens: 10,
+        inputTokens: 8,
         cachedInputTokens: 2,
         outputTokens: 4,
       },
@@ -72,6 +87,8 @@ describe("parseCodexJsonl", () => {
       errorMessage: null,
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
+      usageReported: true,
+      usageComplete: true,
     });
   });
 });
@@ -236,6 +253,27 @@ describe("isCodexTransientUpstreamError", () => {
     expect(extractCodexRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
       "2026-04-23T04:31:00.000Z",
     );
+  });
+
+  it("ignores quota phrases that tool output or agent text quotes", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", aggregated_output: "docs: the fallback starts when the primary hits its usage limit" },
+      }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "The workspace is out of credits in this fixture." } }),
+    ].join("\n");
+
+    expect(isCodexProviderQuotaError({ stdout, errorMessage: "Transport channel closed" })).toBe(false);
+  });
+
+  it("classifies quota reported by Codex error events and plain CLI output", () => {
+    const quota = "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 11:31 PM.";
+
+    expect(isCodexProviderQuotaError({ stdout: JSON.stringify({ type: "error", message: quota }) })).toBe(true);
+    expect(isCodexProviderQuotaError({ stdout: JSON.stringify({ type: "turn.failed", error: { message: quota } }) })).toBe(true);
+    expect(isCodexProviderQuotaError({ stdout: `ERROR: ${quota}` })).toBe(true);
   });
 
   it("does not classify deterministic compaction errors as transient", () => {

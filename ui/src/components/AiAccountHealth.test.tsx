@@ -122,8 +122,9 @@ describe("AiAccountHealthBar", () => {
   it("comes back by itself 24 hours after it was hidden in this session", async () => {
     await mount(brokenClaude);
     const setTimeoutSpy = vi.spyOn(window, "setTimeout");
-    const hiddenAt = Date.now();
     flushSync(() => hideButton()!.click());
+    // Read the clock after the click: the stored dismissal time is never later than this.
+    const hiddenAt = Date.now();
     await settle();
     expect(bar()).toBeNull();
     const reopenTimers = setTimeoutSpy.mock.calls.filter(([, delay]) => typeof delay === "number" && delay > AI_HEALTH_DISMISS_MS - 60_000);
