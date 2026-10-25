@@ -63,7 +63,9 @@ credentials must have write access to the chosen destination. Never put their
 values in repository variables, build arguments, `.npmrc`, or build context.
 
 Native AMD64 and ARM64 runners build `target: production` and push candidate
-digests. Each exact digest must pass the real image smoke: process reaping,
+digests. The image jobs remove unused preinstalled SDKs from their disposable
+hosted runners and require 30 GiB of free disk before building. Each exact
+digest must pass the real image smoke: process reaping,
 server readiness, UI HTML, source commit, Runner executable, and remote provider
 pack. Only after both pass does the publisher assemble the multi-platform image.
 Build cache tags are separate per architecture and only publishing jobs log in.
