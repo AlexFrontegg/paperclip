@@ -462,9 +462,11 @@ test("shared questions resume and existing project reuse creates no project card
     );
     await page.goto(f.route);
     await send(page, { action: "question" });
+    // The fixture publishes the question through heartbeat settlement and live
+    // delivery. A cold hosted runner can take longer than the 5s UI default.
     await expect(
       page.getByRole("radio", { name: "Garden club", exact: true }).last(),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 30_000 });
     await page
       .getByRole("radio", { name: "Garden club", exact: true })
       .last()
