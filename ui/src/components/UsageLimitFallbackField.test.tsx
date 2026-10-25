@@ -290,6 +290,16 @@ describe("UsageLimitFallbackStatus", () => {
     expect(box?.querySelector("a")?.getAttribute("href")).toBe("/apps/openai/permissions");
   });
 
+  it("follows the company AI health once it is loaded, so a reconnected primary's saved fallback is not shown", async () => {
+    const waiting = { usageLimitFallback: { ...stateJson("2000-01-01T00:00:00.000Z").usageLimitFallback, reason: "primary_signed_out", waitForReconnect: true } };
+    renderStatus({ stateJson: waiting, healthLoaded: true });
+    expect(container.querySelector("[data-testid='usage-limit-fallback-status']")).toBeNull();
+    renderStatus({ stateJson: waiting, health, healthLoaded: true });
+    expect(container.textContent).toContain("Running on backup: Codex");
+    renderStatus({ stateJson: waiting });
+    expect(container.textContent).toContain("Running on backup: Codex");
+  });
+
   it("renders nothing once the fallback has expired", async () => {
     renderStatus({ stateJson: stateJson("2000-01-01T00:00:00.000Z") });
     expect(container.querySelector("[data-testid='usage-limit-fallback-status']")).toBeNull();

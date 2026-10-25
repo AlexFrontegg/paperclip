@@ -23,6 +23,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
 import { connectionContinuationPendingResponse } from "../../../services/satisfied-connection-intents.js";
+import { nextRunUsesFallback } from "../../../services/usage-limit-fallback.js";
 import { collectDispositionRepairSourceState } from "../../../services/recovery/disposition-repair.js";
 import { legacyDispositionEpisode, legacyDispositionFingerprint } from "../../../services/recovery/legacy-continuation.js";
 import { appendHeartbeatRunEvent } from "../../../services/heartbeat-run-events.js";
@@ -124,6 +125,11 @@ async function readNativeReviewParticipantFacts(db: Db, input: {
     participantAgentId: input.agentId, currentStageType: "native_completion_review",
     currentParticipant: { type: "agent", agentId: input.agentId, interactionId: review.interaction.id },
   } : null;
+}
+
+async function agentNextRunUsesFallback(db: Db, companyId: string, agentId: string, responsibleUserId: string | null, now: Date) {
+  const [agent] = await db.select().from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+  return agent ? nextRunUsesFallback(db, agent, responsibleUserId, now) : false;
 }
 
 function readNonEmptyString(value: unknown): string | null {
@@ -370,7 +376,8 @@ export function createPostgresRunDispatchAdapter(
     facts.issueCheckoutRunId = issue.checkoutRunId;
     if (input.conversationContinuation) {
       facts.pendingResponse = await connectionContinuationPendingResponse(dbOrTx as unknown as Db,
-        issue, input.responsibleUserId, input.runId);
+        issue, input.responsibleUserId, input.runId,
+        () => nextRunUsesFallback(dbOrTx as unknown as Db, agent, input.responsibleUserId, now));
     }
     facts.reviewParticipant = await readNativeReviewParticipantFacts(dbOrTx, {
       companyId: input.companyId, issueId, agentId: input.agentId,
@@ -504,7 +511,7 @@ export function createPostgresRunDispatchAdapter(
 
   async function loadStalenessFacts(
     input: LoadStalenessFactsInput,
-    _now: Date,
+    now: Date,
     tx?: unknown,
   ): Promise<QueuedRunFacts> {
     const dbOrTx = (tx as Db | undefined) ?? db;
@@ -599,7 +606,8 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
       pendingResponse: issue && (input.conversationContinuation || context.connectionIntentResolution === "existing_connection")
-        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
+        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId,
+          () => agentNextRunUsesFallback(dbOrTx as unknown as Db, input.companyId, input.agentId, input.responsibleUserId, now))
         : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,

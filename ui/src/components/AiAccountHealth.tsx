@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, X } from "lucide-react";
 import type { AgentAiHealth, CompanyAiConnectionHealth } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
@@ -5,7 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { brandBanner, brandChipBadge } from "@/lib/status-colors";
-import { cn } from "@/lib/utils";
+import { agentUrl, cn } from "@/lib/utils";
+import { agentsApi } from "../api/agents";
+import { useCompany } from "../context/CompanyContext";
+import { queryKeys } from "../lib/queryKeys";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { useAgentAiHealth, useAiHealthDismissal, useCompanyAiHealth } from "../hooks/useCompanyAiHealth";
 import {
@@ -26,7 +30,14 @@ import {
 const HIDE_HINT = "Hide until something new breaks, or for 24 hours";
 const STRIP_CLASS = "flex flex-wrap items-center gap-x-3 gap-y-2 border-0 border-b px-3 py-2 text-sm";
 
-function barHeadline({ brokenConnections, agentsWithoutAi }: AiHealthProblems): string {
+/** Every AI account works and every agent has AI, but some agents still run on their backup. */
+function onlyAgentsOnBackup({ brokenConnections, agentsWithoutAi }: AiHealthProblems): boolean {
+  return !brokenConnections.length && !agentsWithoutAi.length;
+}
+
+function barHeadline(problems: AiHealthProblems): string {
+  const { brokenConnections, agentsWithoutAi, agentsOnBackup } = problems;
+  if (onlyAgentsOnBackup(problems)) return `${plural(agentsOnBackup.length, "agent is", "agents are")} running on their backup:`;
   if (brokenConnections.length === 1) return `${capitalize(describeConnectionProblem(brokenConnections[0]!))}.`;
   if (brokenConnections.length > 1) {
     return `${brokenConnections.length} AI accounts need attention: ${brokenConnections.map(connectionLabel).join(", ")}.`;
@@ -42,12 +53,35 @@ function barDetail({ brokenConnections, agentsOnBackup, agentsWithoutAi, agentsW
   return parts.join(" ");
 }
 
-function pillLabel({ brokenConnections, agentsWithoutAi }: AiHealthProblems): string {
+function pillLabel(problems: AiHealthProblems): string {
+  const { brokenConnections, agentsWithoutAi, agentsOnBackup } = problems;
+  if (onlyAgentsOnBackup(problems)) return `${plural(agentsOnBackup.length, "agent", "agents")} on backup`;
   if (brokenConnections.length) return `${plural(brokenConnections.length, "AI account needs", "AI accounts need")} attention`;
   return `${plural(agentsWithoutAi.length, "agent has", "agents have")} no working AI`;
 }
 
-/** Company-wide warning shown on every board page while an AI account that agents use is broken. */
+function AgentsOnBackupLinks({ agentsOnBackup }: { agentsOnBackup: AgentAiHealth[] }) {
+  const { selectedCompanyId } = useCompany();
+  const { data: agents } = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId!),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+  const agentById = new Map((agents ?? []).map((agent) => [agent.id, agent]));
+  return agentsOnBackup.map((health, index) => {
+    const agent = agentById.get(health.agentId);
+    return (
+      <span key={health.agentId}>
+        {index > 0 ? ", " : null}
+        <Link to={agent ? agentUrl(agent) : `/agents/${health.agentId}`} className="underline underline-offset-2">
+          {agent?.name ?? "an agent"}
+        </Link>
+      </span>
+    );
+  });
+}
+
+/** Company-wide warning shown on every board page while an AI account is broken or agents run on their backup. */
 export function AiAccountHealthBar() {
   const { data, isSuccess, isError, isFetching, refetch } = useCompanyAiHealth();
   const problems = summarizeAiHealth(data);
@@ -66,6 +100,7 @@ export function AiAccountHealthBar() {
     </div>
   ) : null;
   if (!problems.signature || dismissed) return failure;
+  const backupOnly = onlyAgentsOnBackup(problems);
   const [onlyConnection] = problems.brokenConnections.length === 1 ? problems.brokenConnections : [];
   const fixHref = onlyConnection ? aiConnectionHref(onlyConnection) : "/apps";
   const fixLabel = onlyConnection && (onlyConnection.status === "needs_attention" || onlyConnection.status === "expired")
@@ -75,18 +110,22 @@ export function AiAccountHealthBar() {
     <>
       {failure}
       <div
-        role="alert"
+        role={backupOnly ? "status" : "alert"}
         data-testid="ai-account-health-bar"
-        className={cn(STRIP_CLASS, brandBanner.danger)}
+        data-tone={backupOnly ? "warning" : "danger"}
+        className={cn(STRIP_CLASS, backupOnly ? brandBanner.warning : brandBanner.danger)}
       >
         <AlertTriangle className="h-4 w-4 shrink-0" />
         <p className="min-w-0 flex-1">
-          <span className="font-semibold">{barHeadline(problems)}</span> {barDetail(problems)}
+          <span className="font-semibold">{barHeadline(problems)}</span>{" "}
+          {backupOnly ? <AgentsOnBackupLinks agentsOnBackup={problems.agentsOnBackup} /> : barDetail(problems)}
         </p>
         <div className="flex items-center gap-1">
-          <Button asChild size="xs" variant="destructive">
-            <Link to={fixHref}>{fixLabel}</Link>
-          </Button>
+          {backupOnly ? null : (
+            <Button asChild size="xs" variant="destructive">
+              <Link to={fixHref}>{fixLabel}</Link>
+            </Button>
+          )}
           <Button asChild size="xs" variant="ghost">
             <Link to="/agents/all">Details</Link>
           </Button>
@@ -107,7 +146,7 @@ export function AiAccountHealthPill() {
   if (!problems.signature || !dismissed) return null;
   return (
     <button type="button" onClick={reopen} title="Show the AI account warning" data-testid="ai-account-health-pill">
-      <Badge variant="outline" className={cn(brandChipBadge.red, "cursor-pointer")}>
+      <Badge variant="outline" className={cn(onlyAgentsOnBackup(problems) ? brandChipBadge.amber : brandChipBadge.red, "cursor-pointer")}>
         <AlertTriangle />
         {pillLabel(problems)}
       </Badge>
