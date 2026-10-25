@@ -41,7 +41,7 @@ manifest digest for deployments and rollback.
 
 ## Docker Hub publication
 
-`docker.yml` runs after a push to `deploy`, or a manual dispatch on `deploy`.
+`publish-image.yml` runs after a push to `deploy`, or a manual dispatch on `deploy`.
 It verifies the triggering commit using the same `ci.yml` before building.
 Dispatching on another branch or from a different repository fails authorization.
 There is no application/infrastructure rollout in this workflow.
@@ -88,13 +88,12 @@ The source/version and database migration labels remain attached to the images.
 
 ### Initial rollout
 
-This repository originally had the PR and Docker workflows manually disabled.
-Enable `pr.yml` in Actions before the first validation push. After this change
-lands on `deploy`, enable the replacement `docker.yml` and dispatch it there.
-Do not enable the old Docker workflow on `deploy` before merging: that definition
-still publishes to GHCR. Once the PR check has completed, require its exact
-`CI required` check name in branch protection. Enabling a workflow is repository
-state, so committing its YAML alone does not perform that rollout step.
+This repository originally had its PR and legacy Docker workflows manually
+disabled. Enable `pr.yml` in Actions before the first validation push. The new
+`publish-image.yml` has its own workflow identity and activates on the merge
+push to `deploy`; leave the old `docker.yml` disabled. No manual publisher
+activation is required. Require the emitted `ci / CI required` check in branch
+protection and keep the existing review requirement.
 
 ### Local checks
 

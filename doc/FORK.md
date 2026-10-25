@@ -72,7 +72,7 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 
 - `pr.yml` calls this repository's `ci.yml`; all source checks use GitHub-hosted
   runners and require no publishing or provider credentials.
-- `docker.yml` verifies `deploy`, builds and smoke-tests native AMD64/ARM64
+- `publish-image.yml` verifies `deploy`, builds and smoke-tests native AMD64/ARM64
   production images, then publishes to Docker Hub with Frontegg credentials.
 - Unused upstream workflows are preserved in `.github/archive/workflows/`.
   Do not restore them to the active directory during an upstream merge.

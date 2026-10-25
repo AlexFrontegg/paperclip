@@ -9,12 +9,12 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (path) => readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8");
 const ci = read(".github/workflows/ci.yml");
 const pr = read(".github/workflows/pr.yml");
-const docker = read(".github/workflows/docker.yml");
+const docker = read(".github/workflows/publish-image.yml");
 const jobs = (source) => new Map([...source.split(/^jobs:\n/m)[1].matchAll(/^  ([a-z_][a-z_0-9]*):\n([\s\S]*?)(?=^  [a-z_][a-z_0-9]*:\n|(?![\s\S]))/gm)]
   .map(([, name, body]) => [name, body]));
 
 test("active workflows are repository-owned and verification receives no external credentials", () => {
-  assert.deepEqual(readdirSync(`${root}.github/workflows`).sort(), ["ci.yml", "docker.yml", "pr.yml"]);
+  assert.deepEqual(readdirSync(`${root}.github/workflows`).sort(), ["ci.yml", "pr.yml", "publish-image.yml"]);
   for (const source of [ci, pr, docker]) {
     assert.doesNotMatch(source, /uses: (?:paperclipai|AlexFrontegg)\/paperclip\/|runs-on\/fleet=|refs\/heads\/master|secrets:\s*inherit/);
   }

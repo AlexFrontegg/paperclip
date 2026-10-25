@@ -36,7 +36,7 @@ const ecsTaskDefinition = JSON.parse(read("docker", "ecs-task-definition.json"))
 };
 const reapingProbe = read("scripts", "assert-orphan-reaping.sh");
 const buildTest = read("scripts", "docker-build-test.sh");
-const dockerWorkflow = read(".github", "workflows", "docker.yml");
+const dockerWorkflow = read(".github", "workflows", "publish-image.yml");
 const imageSmoke = read("scripts", "ci", "docker-image-smoke.sh");
 
 /** Every `ENTRYPOINT [...]` line in a Dockerfile, in order. */

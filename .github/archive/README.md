@@ -8,7 +8,7 @@ The active entry points are:
 
 - `.github/workflows/pr.yml`: verify pull requests targeting `deploy`.
 - `.github/workflows/ci.yml`: shared, credential-free source verification.
-- `.github/workflows/docker.yml`: verify `deploy`, build the `production` image,
+- `.github/workflows/publish-image.yml`: verify `deploy`, build the `production` image,
   smoke-test each native architecture, and publish to Docker Hub.
 
 Historical workflow regression tests read the preserved snapshots explicitly.
