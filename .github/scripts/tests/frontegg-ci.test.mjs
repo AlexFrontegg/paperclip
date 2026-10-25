@@ -129,5 +129,9 @@ test("Docker Hub preflight rejects absent, public-by-accident, or unwritable des
   }
   await assert.rejects(checkDockerHubRepository({ ...input, image: "ghcr.io/frontegg/paperclip" }, fixture()));
   await assert.rejects(checkDockerHubRepository({ ...input, token: "" }, fixture()));
+  await assert.rejects(checkDockerHubRepository(input, async () => new Response("secret-must-not-appear")), (error) => {
+    assert.equal(error.message, "Docker Hub returned an invalid JSON response");
+    return true;
+  });
   assert.equal((docker.match(/run: node scripts\/ci\/dockerhub-repository.mjs/g) ?? []).length, 2);
 });

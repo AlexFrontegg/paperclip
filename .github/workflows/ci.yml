@@ -17,6 +17,11 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Lint active workflows
+        run: >-
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo
+          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          -shellcheck= .github/workflows/ci.yml .github/workflows/pr.yml .github/workflows/docker.yml
       - name: Check repository contracts
         run: |
           node scripts/check-node-version-policy.mjs

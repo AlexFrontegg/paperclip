@@ -26,6 +26,9 @@ runs:
     - name: Install frozen workspace dependencies
       shell: bash
       run: pnpm install --frozen-lockfile
+    - name: Set deterministic Git fixture defaults
+      shell: bash
+      run: git config --global init.defaultBranch master
     - name: Prepare workspace links and shared builds
       shell: bash
       run: |

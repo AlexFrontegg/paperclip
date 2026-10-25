@@ -82,6 +82,18 @@ The source/version and database migration labels remain attached to the images.
 
 ## Verification and maintenance
 
+### Initial rollout
+
+This repository originally had the PR and Docker workflows manually disabled.
+Enable `pr.yml` in Actions before the first validation push. After this change
+lands on `deploy`, enable the replacement `docker.yml` and dispatch it there.
+Do not enable the old Docker workflow on `deploy` before merging: that definition
+still publishes to GHCR. Once the PR check has completed, require its exact
+`CI required` check name in branch protection. Enabling a workflow is repository
+state, so committing its YAML alone does not perform that rollout step.
+
+### Local checks
+
 Run `node --test .github/scripts/tests/*.test.mjs` for workflow/helper regression
 tests. Run `actionlint .github/workflows/*.yml` for workflow syntax and expression
 checks. The image smoke can run locally against a stamped production build:
