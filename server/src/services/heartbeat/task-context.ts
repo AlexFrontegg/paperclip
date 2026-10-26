@@ -5,11 +5,11 @@ import type { PaperclipTurnContext } from "@paperclipai/adapter-utils/server-uti
 import { parseObject } from "../../adapters/utils.js";
 import { isConversation } from "../agent-conversations.js";
 import { chatCompletionInstruction } from "../chat-completion-delivery.js";
-import { slackUndeliveredFinalResponseGuidance } from "../connectors/slack/task-update-guidance.js";
+import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
 import { getConversationConfirmationContext } from "../conversation-confirmation-context.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
 import { getIssueContinuationSummaryDocument } from "../issue-continuation-summary.js";
-import { resolveChatOriginPublicationBindings, type issueService } from "../issues.js";
+import type { issueService } from "../issues.js";
 import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 import { redactQuarantinedBodyForHigherTrust, sanitizeQuarantinedCommentForHigherTrust } from "../source-trust.js";
 import { getTaskPlanContext } from "../task-plan-context.js";
@@ -198,16 +198,20 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
   const liveVoiceGuidance = issueContext?.chatAssignedAgentId === agent.id && issueContext.chatProvider === "speko"
     ? await liveVoiceExecutionGuidance(db, { companyId: agent.companyId, issueId: issueContext.id, agentId: agent.id })
     : null;
-  const conversationGuidance =
+  context.paperclipTaskCommunicationGuidance =
     issueContext?.chatAssignedAgentId === agent.id
       ? issueContext.chatCommunicationGuidance
       : null;
-  context.paperclipTaskCommunicationGuidance =
-    conversationGuidance &&
-    issueContext?.chatProvider === "slack" &&
-    (await resolveChatOriginPublicationBindings(db, agent.companyId, issueContext.id, run.id)).length === 0
-      ? `${conversationGuidance}\n\n${slackUndeliveredFinalResponseGuidance(issueContext.chatExternalThreadId)}`
-      : conversationGuidance;
+  const slackFinalResponseUndelivered =
+    issueContext?.chatAssignedAgentId === agent.id &&
+    issueContext.chatProvider === "slack" &&
+    (await resolveChatRunPresentationAuthorizationReason(db, {
+      companyId: agent.companyId,
+      issueId: issueContext.id,
+      runId: run.id,
+    })) === "internal_agent_write"
+      ? { externalThreadId: issueContext.chatExternalThreadId }
+      : null;
   const taskMarkdownInput = {
     conversationConfirmations: issueRef && isConversation(issueContext)
       ? await getConversationConfirmationContext({ db, companyId: agent.companyId, issueId: issueRef.id, agentId: agent.id })
@@ -231,6 +235,7 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
     slackCommand: issueContext?.chatAssignedAgentId === agent.id
       ? issueContext.chatSlackCommand
       : null,
+    slackFinalResponseUndelivered,
     nativeRunner: agent.adapterType === "paperclip_runner",
     interaction: {
       kind: readNonEmptyString(context.interactionKind),

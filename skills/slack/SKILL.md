@@ -79,8 +79,8 @@ and permissions when it executes. No separate Slack lifecycle or scheduler is ne
 On a Slack-linked task, human messages sent from Paperclip and your final response
 are mirrored into its Slack thread. Do not manually send the same final response
 again. When a Slack message did not start the run, for example a finished child task
-or a teammate's comment, the task's communication guidance says that the final
-response stays in Paperclip. Then send each update with `slack_post_message`.
+or a teammate's comment, the task context says that the final response stays in
+Paperclip. Then send each update with `slack_post_message`.
 Ordinary tasks and routines have no automatic Slack destination: perform the
 requested Slack send explicitly and report whether delivery was confirmed.
 
