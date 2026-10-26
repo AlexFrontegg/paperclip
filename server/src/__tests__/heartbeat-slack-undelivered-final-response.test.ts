@@ -125,6 +125,7 @@ describePostgres("Slack final response delivery in heartbeat guidance", () => {
       expect(String(context[key])).toContain("Paperclip delivers your final response to the originating Slack conversation");
       expect(String(context[key])).not.toContain(undeliveredNotice);
     }
+    expect((context.paperclipWake as Record<string, unknown> | undefined)?.slackFinalResponseUndelivered).toBeUndefined();
   }, 30_000);
 
   it("tells the agent to post with slack_post_message when a teammate comment starts the run", async () => {
@@ -138,5 +139,6 @@ describePostgres("Slack final response delivery in heartbeat guidance", () => {
     }
     expect(String(context.paperclipTaskCommunicationGuidance)).toContain(conversationGuidance);
     expect(String(context.paperclipTaskCommunicationGuidance)).not.toContain(undeliveredNotice);
+    expect(context.paperclipWake).toMatchObject({ slackFinalResponseUndelivered: true });
   }, 30_000);
 });

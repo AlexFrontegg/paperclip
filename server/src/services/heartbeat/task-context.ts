@@ -120,6 +120,16 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
         })
       : null;
   context.executionContinuation = executionContinuation;
+  const slackFinalResponseUndelivered =
+    issueContext?.chatAssignedAgentId === agent.id &&
+    issueContext.chatProvider === "slack" &&
+    (await resolveChatRunPresentationAuthorizationReason(db, {
+      companyId: agent.companyId,
+      issueId: issueContext.id,
+      runId: run.id,
+    })) === "internal_agent_write"
+      ? { externalThreadId: issueContext.chatExternalThreadId }
+      : null;
   const paperclipWakePayload = await buildPaperclipWakePayload({
     db,
     companyId: agent.companyId,
@@ -145,6 +155,7 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
     simplifiedEnglishInteractions:
       experimentalInstanceSettings.enableSimplifiedEnglishInteractions ===
       true,
+    slackFinalResponseUndelivered: slackFinalResponseUndelivered !== null,
   });
   if (paperclipWakePayload) {
     context[PAPERCLIP_WAKE_PAYLOAD_KEY] = paperclipWakePayload;
@@ -201,16 +212,6 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
   context.paperclipTaskCommunicationGuidance =
     issueContext?.chatAssignedAgentId === agent.id
       ? issueContext.chatCommunicationGuidance
-      : null;
-  const slackFinalResponseUndelivered =
-    issueContext?.chatAssignedAgentId === agent.id &&
-    issueContext.chatProvider === "slack" &&
-    (await resolveChatRunPresentationAuthorizationReason(db, {
-      companyId: agent.companyId,
-      issueId: issueContext.id,
-      runId: run.id,
-    })) === "internal_agent_write"
-      ? { externalThreadId: issueContext.chatExternalThreadId }
       : null;
   const taskMarkdownInput = {
     conversationConfirmations: issueRef && isConversation(issueContext)
