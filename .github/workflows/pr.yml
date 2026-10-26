@@ -10,4 +10,5 @@ concurrency:
   cancel-in-progress: true
 jobs:
   ci:
+    if: ${{ !github.event.pull_request.draft }}
     uses: ./.github/workflows/ci.yml

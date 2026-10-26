@@ -9,13 +9,16 @@ repository; it does not call upstream or AlexFrontegg reusable workflows.
 checks repository policies, TypeScript, builds, general and serialized Vitest
 partitions, native Runner TypeScript/Rust contracts, native server integrations,
 browser journeys with fixture providers, and Docker build-context integrity.
-It needs no Docker Hub, npm, cloud, or model-provider credentials.
+It needs no Docker Hub, npm, cloud, or model-provider credentials. Draft pull
+requests skip CI; marking a pull request ready for review runs it.
 
 `CI required` depends on every verification lane and rejects failures,
 cancellations, and skipped lanes. Configure branch protection for `deploy` to
 require the check emitted by `ci / required` (`CI required` in the job display).
 Use the exact check name shown by the first PR run. Keep the existing review
-requirement and assign Frontegg maintainers to `.github/**` in CODEOWNERS.
+requirement and also require code-owner review. A pull request runs the
+`ci.yml` from its own commit, so CODEOWNERS approval of `.github/**` and the CI
+scripts is what stops a pull request from weakening its own checks.
 
 Node 24.11 or newer, pnpm 9.15.4, and the Runner's `rust-toolchain.toml` are the
 runtime/toolchain baseline. GitHub-hosted Ubuntu 24.04 runners execute all active
@@ -77,6 +80,9 @@ Published tags:
 - `sha-<full commit SHA>`: the source commit built by this run.
 - `latest`: advanced only when the triggering commit is still the current
   `deploy` head. Publication runs are serialized and never cancel running builds.
+  GitHub keeps one waiting run per group, so a merge whose run is still waiting
+  when a newer merge lands gets no `sha-` tag. Rerun that workflow run if the
+  commit needs its own image.
 - `buildcache-amd64` and `buildcache-arm64`: internal BuildKit caches, not releases.
 
 The workflow summary reports the manifest digest. Pull or deploy that immutable

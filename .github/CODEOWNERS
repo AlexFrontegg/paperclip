@@ -11,6 +11,16 @@ doc/PUBLISHING.md @guy-frontegg @AlexFrontegg
 doc/RELEASE-AUTOMATION-SETUP.md @guy-frontegg @AlexFrontegg
 skills/** @guy-frontegg @AlexFrontegg
 
+# Scripts that decide what CI verifies and what the published image contains
+/Dockerfile @guy-frontegg @AlexFrontegg
+scripts/ci/** @guy-frontegg @AlexFrontegg
+scripts/check-*.mjs @guy-frontegg @AlexFrontegg
+scripts/run-vitest-stable*.mjs @guy-frontegg @AlexFrontegg
+scripts/e2e-shard.mjs @guy-frontegg @AlexFrontegg
+scripts/server-boot-smoke.sh @guy-frontegg @AlexFrontegg
+scripts/assert-orphan-reaping.sh @guy-frontegg @AlexFrontegg
+scripts/docker-entrypoint.sh @guy-frontegg @AlexFrontegg
+
 # Review configuration and repository rules
 /.greptile/ @guy-frontegg @AlexFrontegg
 /rules/ @guy-frontegg @AlexFrontegg

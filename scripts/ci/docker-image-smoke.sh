@@ -18,8 +18,8 @@ trap cleanup EXIT
 
 docker pull "$image"
 docker run --rm -i "$image" sh -s < scripts/assert-orphan-reaping.sh
+# Keep the image's authenticated mode: local_trusted refuses the image's 0.0.0.0 bind.
 container="$(docker run --detach --publish 127.0.0.1::3100 \
-  --env PAPERCLIP_DEPLOYMENT_MODE=local_trusted \
   --env PAPERCLIP_MIGRATION_AUTO_APPLY=true \
   --env PAPERCLIP_OPEN_ON_LISTEN=false \
   "$image")"

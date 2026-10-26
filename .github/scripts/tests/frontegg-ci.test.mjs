@@ -20,7 +20,20 @@ test("active workflows are repository-owned and verification receives no externa
   }
   for (const source of [ci, pr]) assert.doesNotMatch(source, /secrets\.|pull_request_target|contents: write|packages: write/);
   assert.match(pr, /branches: \[deploy\]/);
-  assert.match(pr, /uses: \.\/\.github\/workflows\/ci.yml/);
+  assert.match(pr, /if: \$\{\{ !github\.event\.pull_request\.draft \}\}\n\s+uses: \.\/\.github\/workflows\/ci.yml/);
+});
+
+test("the image smoke starts the server with a bind mode the server accepts", async () => {
+  const { validateConfiguredBindMode } = await import("../../../packages/shared/src/network-bind.ts");
+  const productionStage = read("Dockerfile").split(/^FROM base AS production$/m)[1];
+  const imageSetting = (name) => productionStage.match(new RegExp(`\\b${name}=(\\S+)`))[1];
+  const smokeMode = read("scripts/ci/docker-image-smoke.sh").match(/PAPERCLIP_DEPLOYMENT_MODE=(\w+)/)?.[1];
+  const errors = validateConfiguredBindMode({
+    deploymentMode: smokeMode ?? imageSetting("PAPERCLIP_DEPLOYMENT_MODE"),
+    deploymentExposure: imageSetting("PAPERCLIP_DEPLOYMENT_EXPOSURE"),
+    host: imageSetting("HOST"),
+  });
+  assert.deepEqual(errors, []);
 });
 
 test("the completion gate rejects failed, cancelled, skipped, and missing verification lanes", () => {
