@@ -2259,6 +2259,7 @@ export async function buildPaperclipWakePayload(input: {
   // Experimental: agents write user-interaction content in ASD-STE100
   // Simplified Technical English (rendered as a prompt directive downstream).
   simplifiedEnglishInteractions?: boolean;
+  slackFinalResponseUndelivered?: boolean;
 }) {
   const executionStage = parseObject(input.contextSnapshot.executionStage);
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
@@ -2653,6 +2654,7 @@ export async function buildPaperclipWakePayload(input: {
     reason: readNonEmptyString(input.contextSnapshot.wakeReason),
     executionContinuation: input.contextSnapshot.executionContinuation ?? null,
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
+    ...(input.slackFinalResponseUndelivered ? { slackFinalResponseUndelivered: true } : {}),
     attachmentOmissions,
     externalChatProvider,
     recovery:
