@@ -121,7 +121,7 @@ test("complete reporter pairs count without launcher intent, and long test names
 });
 
 test("trusted policy commands work with both current and pre-profile checkouts", () => {
-  const source = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../archive/workflows/pr-trusted.yml", import.meta.url), "utf8");
   const block = source.split("      - name: Select compatible Node test command\n")[1].split("\n      - name:")[0];
   const script = block.split("        run: |\n")[1].split("\n").map((line) => line.replace(/^ {10}/, "")).join("\n");
   const directory = mkdtempSync(path.join(tmpdir(), "ci-profile-legacy-"));
@@ -292,12 +292,12 @@ test("PR credential guard permits filenames but rejects secret expressions", () 
 });
 
 test("workflow exporter runs trusted code and keeps keys out of the PR jobs", () => {
-  const workflow = readFileSync(new URL("../../workflows/ci-profile.yml", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../../archive/workflows/ci-profile.yml", import.meta.url), "utf8");
   assert.match(workflow, /ref: \$\{\{ github.sha \}\}/);
   assert.match(workflow, /startsWith\(github.event.workflow_run.display_title/);
   assert.match(workflow, /environment: ci-profiling/);
   assert.doesNotMatch(workflow, /head_sha|secrets: inherit|contents: write|pull-requests: write|pnpm install/);
-  const pr = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const pr = readFileSync(new URL("../../archive/workflows/pr-trusted.yml", import.meta.url), "utf8");
   assert.equal(secretReference("run: node --test scripts/docker-compose-secrets.test.mjs"), false);
   for (const lookup of ["${{ secrets.PR_TOKEN }}", "${{ secrets['PR_TOKEN'] }}", "${{\n secrets.PR_TOKEN\n }}", "${{ toJSON(secrets) }}", "${{ secrets.HONEYCOMB_API_KEY }}"]) {
     assert.equal(secretReference(lookup), true);
@@ -334,7 +334,7 @@ test("workflow exporter runs trusted code and keeps keys out of the PR jobs", ()
   // upload-artifact excludes files inside dot-directories by default. Keep
   // this opt-in scoped to timing NDJSON, never the workspace or other secrets.
   assert.equal(pr.match(/path: \.ci-profile\/\*\.ndjson\n {10}include-hidden-files: true/g).length, 9);
-  const routing = readFileSync(new URL("../../workflows/ci-routing.yml", import.meta.url), "utf8");
+  const routing = readFileSync(new URL("../../archive/workflows/ci-routing.yml", import.meta.url), "utf8");
   assert.match(routing, /PROFILE_CI: \$\{\{ steps.profile.outputs.profile_ci \}\}/);
   assert.match(routing, /\/git\/ref\/heads\/master/);
   assert.match(routing, /authorize\.mjs\?ref=\$TRUSTED_PROFILE_SHA/);

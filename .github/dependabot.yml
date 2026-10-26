@@ -31,12 +31,12 @@ updates:
           - "version-update:semver-major"
 
   - package-ecosystem: github-actions
-    directory: "/"
+    # The composite setup action pins its own actions outside .github/workflows.
+    directories:
+      - "/"
+      - "/.github/actions/setup-paperclip"
     schedule:
       interval: weekly
       day: monday
       time: "06:00"
     open-pull-requests-limit: 5
-    ignore:
-      # This first-party workflow follows CODEOWNERS-protected master.
-      - dependency-name: "paperclipai/paperclip/.github/workflows/pr-trusted.yml"

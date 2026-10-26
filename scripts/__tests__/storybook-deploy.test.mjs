@@ -109,7 +109,7 @@ test("requires CODEOWNER environment reviewers with administrator bypass disable
   ]) await assert.rejects(authorize(fixture({ environment })), /must require CODEOWNER reviewers/);
 });
 test("workflow keeps branch build read-only and reauthorizes the protected deploy", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/storybook-deploy.yml", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../../.github/archive/workflows/storybook-deploy.yml", import.meta.url), "utf8");
   const [build, deploy] = workflow.split("  build:")[1].split("  deploy:");
   assert.doesNotMatch(build, /pages: write|id-token: write|secrets\./);
   assert.match(build, /permissions: \{\}/);

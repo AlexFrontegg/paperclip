@@ -1,0 +1,178 @@
+name: Publish Docker Hub image
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: frontegg-docker-deploy
+  cancel-in-progress: false
+env:
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'frontegg/paperclip' }}
+  DOCKERHUB_VISIBILITY: ${{ vars.DOCKERHUB_VISIBILITY || 'private' }}
+jobs:
+  authorize:
+    name: Authorize publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require this repository's deploy branch
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          test "$REPOSITORY" = frontegg/paperclip
+          test "$REF" = refs/heads/deploy
+          case "$EVENT" in push|workflow_dispatch) ;; *) exit 1 ;; esac
+
+  verify:
+    needs: authorize
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build and smoke-test (${{ matrix.arch }})
+    needs: [authorize, verify]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, platform: linux/amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify the existing Docker Hub destination
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKER_HUB_ACTION_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKER_HUB_ACTION_PASSWORD }}
+        run: node scripts/ci/dockerhub-repository.mjs
+      - name: Reserve disk space on the hosted image builder
+        run: |
+          # Both matrix entries are disposable GitHub-hosted Ubuntu runners.
+          # The Rust build, installed providers, and multi-stage image need
+          # more space than the default runner's preinstalled SDKs leave free.
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/lib/android /opt/ghc
+          df -h .
+          available_kb="$(df -Pk . | awk 'NR == 2 {print $4}')"
+          if (( available_kb < 30 * 1024 * 1024 )); then
+            echo 'The image builder needs at least 30 GiB free; select a larger hosted runner.' >&2
+            exit 1
+          fi
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_ACTION_USER }}
+          password: ${{ secrets.DOCKER_HUB_ACTION_PASSWORD }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Compute build metadata
+        id: metadata
+        run: |
+          echo "version=frontegg-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+          echo "migration=$(find packages/db/src/migrations -maxdepth 1 -name '*.sql' -printf '%f\n' | LC_ALL=C sort | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "migration-count=$(find packages/db/src/migrations -maxdepth 1 -name '*.sql' | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+      - name: Build the production image by digest
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: production
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            PAPERCLIP_BUILD_COMMIT=${{ github.sha }}
+            PAPERCLIP_BUILD_VERSION=${{ steps.metadata.outputs.version }}
+            CLI_TOOLS_CACHE_EPOCH=${{ steps.metadata.outputs.epoch }}
+          outputs: type=image,name=${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=min
+          sbom: true
+          cache-from: type=registry,ref=${{ env.DOCKERHUB_IMAGE }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.DOCKERHUB_IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.metadata.outputs.version }}
+            io.github.paperclipai.schema.last-migration=${{ steps.metadata.outputs.migration }}
+            io.github.paperclipai.schema.migration-count=${{ steps.metadata.outputs.migration-count }}
+      - name: Verify the exact image that will be published
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: bash scripts/ci/docker-image-smoke.sh "$DOCKERHUB_IMAGE@$IMAGE_DIGEST" "$GITHUB_SHA"
+      - name: Export the verified digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$IMAGE_DIGEST" > "$RUNNER_TEMP/digests/${{ matrix.arch }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified image tags
+    needs: [authorize, verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Recheck Docker Hub destination before tagging
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKER_HUB_ACTION_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKER_HUB_ACTION_PASSWORD }}
+        run: node scripts/ci/dockerhub-repository.mjs
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: verified-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_ACTION_USER }}
+          password: ${{ secrets.DOCKER_HUB_ACTION_PASSWORD }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Publish both verified architectures
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          images=()
+          for arch in amd64 arm64; do
+            digest="$(cat "$RUNNER_TEMP/digests/$arch")"
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            images+=("$DOCKERHUB_IMAGE@$digest")
+          done
+          tag="$DOCKERHUB_IMAGE:sha-$GITHUB_SHA"
+          docker buildx imagetools create --tag "$tag" "${images[@]}"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -er '.digest')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          # A newer deploy commit may have arrived during the build. Keep its
+          # channel from being moved backward; every run still gets a SHA tag.
+          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/deploy" --jq .object.sha)"
+          if [[ "$current" == "$GITHUB_SHA" ]]; then
+            docker buildx imagetools create --tag "$DOCKERHUB_IMAGE:latest" "$DOCKERHUB_IMAGE@$digest"
+          else
+            echo 'A newer deploy commit exists; leaving latest unchanged.'
+          fi
+          {
+            echo "Image: \`$tag\`"
+            echo "Deploy or roll back by digest: \`$DOCKERHUB_IMAGE@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

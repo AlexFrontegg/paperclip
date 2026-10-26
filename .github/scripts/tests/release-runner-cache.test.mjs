@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 
-const workflow = readFileSync(new URL("../../workflows/release-verify.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../../archive/workflows/release-verify.yml", import.meta.url), "utf8");
 const runner = workflow.split("  verify_paperclip_runner:")[1].split("  build:")[0];
 
 test("Runner dependency caching selects the package's pinned compiler before computing its key", () => {

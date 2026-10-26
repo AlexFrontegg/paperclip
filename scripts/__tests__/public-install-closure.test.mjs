@@ -49,7 +49,7 @@ test('the warm-up refuses to run without the cache the verifier will read', () =
 });
 
 test('the Build lane warms the cache before pnpm build and hands the same directory to the verifier', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/pr-trusted.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../../.github/archive/workflows/pr-trusted.yml', import.meta.url), 'utf8');
   const build = workflow.slice(workflow.indexOf('\n  build:\n'), workflow.indexOf('\n  verify_serialized_server:\n'));
   const position = fragment => { const index = build.indexOf(fragment); assert.notEqual(index, -1, `Build job must contain ${fragment}`); return index; };
   const warm = position('PAPERCLIP_PUBLIC_INSTALL_NPM_CACHE="$RUNNER_TEMP/public-install-npm-cache" node scripts/warm-public-install-npm-cache.mjs');

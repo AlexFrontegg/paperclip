@@ -10,7 +10,7 @@ import { CACHED_PATHS, HASHED_INPUTS, REQUIRED, RUNNER_PACKAGE, computeScope, ma
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const script = path.join(repoRoot, "scripts/runner-release-crate-cache.mjs");
-const readWorkflow = (name) => readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
+const readWorkflow = (name) => readFileSync(path.join(repoRoot, ".github/archive/workflows", name), "utf8");
 const prWorkflow = readWorkflow("pr-trusted.yml");
 const releaseWorkflow = readWorkflow("release-verify.yml");
 

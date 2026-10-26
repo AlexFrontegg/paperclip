@@ -19,7 +19,7 @@ const repoRoot = path.resolve(
 );
 
 function readWorkflow(name) {
-  return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
+  return readFileSync(path.join(repoRoot, ".github/archive/workflows", name), "utf8");
 }
 
 test("Docker Hub mirrors apply to both image builders without widening publication access", () => {
@@ -622,7 +622,7 @@ test("Runner eval workflows pin actions and gate paid live execution", () => {
   const paidWorkflowNameSet = new Set(paidWorkflowNames);
   const providerSecretReference =
     /secrets(?:\.(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|XAI_API_KEY|GROK_AUTH_JSON|DAYTONA_API_KEY)\b|\[['"](?:OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|XAI_API_KEY|GROK_AUTH_JSON|DAYTONA_API_KEY)['"]\])/g;
-  for (const name of readdirSync(path.join(repoRoot, ".github/workflows"))) {
+  for (const name of readdirSync(path.join(repoRoot, ".github/archive/workflows"))) {
     if (!/\.ya?ml$/.test(name)) continue;
     const workflow = readWorkflow(name);
     if ([...workflow.matchAll(providerSecretReference)].length > 0) {

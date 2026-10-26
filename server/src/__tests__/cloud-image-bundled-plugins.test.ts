@@ -16,7 +16,7 @@ import { BUNDLED_PLUGIN_CATALOG } from "../services/bundled-plugins.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
-const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker.yml"), "utf8");
+const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "publish-image.yml"), "utf8");
 
 function parseList(source: string, pattern: RegExp, label: string): string[] {
   const match = source.match(pattern);
@@ -70,10 +70,9 @@ describe("cloud image bundled plugins", () => {
     // image build always finishes — a newer push only supersedes the pending
     // slot instead of killing the build that is already publishing.
     expect(workflow).toMatch(/^concurrency:$/m);
-    // Pin the per-ref group key: without it the block could keep
-    // cancel-in-progress: false yet lose the group that scopes serialization
-    // to a single ref, silently changing which builds queue behind each other.
-    expect(workflow).toContain("group: docker-${{ github.ref }}");
+    // All deploy publications share a lane so native manifest/tag promotion
+    // cannot race across different commits.
+    expect(workflow).toContain("group: frontegg-docker-deploy");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).not.toContain("cancel-in-progress: true");
   });

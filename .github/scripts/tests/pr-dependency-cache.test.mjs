@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const workflow = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../../archive/workflows/pr-trusted.yml", import.meta.url), "utf8");
 const jobs = [...workflow.matchAll(/^  ([a-z_][a-z_0-9]*):\n([\s\S]*?)(?=^  [a-z_][a-z_0-9]*:\n|$(?![\s\S]))/gm)];
 const installers = jobs.filter(([, , body]) => body.includes("pnpm install --frozen-lockfile"));
 

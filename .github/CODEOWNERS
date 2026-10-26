@@ -1,23 +1,33 @@
-# Replace @cryppadotta if a different maintainer or team should own release infrastructure.
+# Frontegg maintainers own this fork's CI, release infrastructure, and policies.
 
-.github/** @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/ci-profile/** @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/release*.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/release-*.mjs @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/create-github-release.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-scripts/rollback-latest.sh @cryppadotta @devinfoley @nickyleach @forgottendev
-doc/RELEASING.md @cryppadotta @devinfoley @nickyleach @forgottendev @tonio-alucema @scotttong
-doc/PUBLISHING.md @cryppadotta @devinfoley @nickyleach @forgottendev
-doc/RELEASE-AUTOMATION-SETUP.md @cryppadotta @devinfoley @nickyleach @forgottendev
-skills/** @cryppadotta @devinfoley @nickyleach @forgottendev
+.github/** @guy-frontegg @AlexFrontegg
+scripts/ci-profile/** @guy-frontegg @AlexFrontegg
+scripts/release*.sh @guy-frontegg @AlexFrontegg
+scripts/release-*.mjs @guy-frontegg @AlexFrontegg
+scripts/create-github-release.sh @guy-frontegg @AlexFrontegg
+scripts/rollback-latest.sh @guy-frontegg @AlexFrontegg
+doc/RELEASING.md @guy-frontegg @AlexFrontegg
+doc/PUBLISHING.md @guy-frontegg @AlexFrontegg
+doc/RELEASE-AUTOMATION-SETUP.md @guy-frontegg @AlexFrontegg
+skills/** @guy-frontegg @AlexFrontegg
+
+# Scripts that decide what CI verifies and what the published image contains
+/Dockerfile @guy-frontegg @AlexFrontegg
+scripts/ci/** @guy-frontegg @AlexFrontegg
+scripts/check-*.mjs @guy-frontegg @AlexFrontegg
+scripts/run-vitest-stable*.mjs @guy-frontegg @AlexFrontegg
+scripts/e2e-shard.mjs @guy-frontegg @AlexFrontegg
+scripts/server-boot-smoke.sh @guy-frontegg @AlexFrontegg
+scripts/assert-orphan-reaping.sh @guy-frontegg @AlexFrontegg
+scripts/docker-entrypoint.sh @guy-frontegg @AlexFrontegg
 
 # Review configuration and repository rules
-/.greptile/ @cryppadotta @devinfoley @nickyleach @forgottendev
-/rules/ @cryppadotta @devinfoley @nickyleach @forgottendev
+/.greptile/ @guy-frontegg @AlexFrontegg
+/rules/ @guy-frontegg @AlexFrontegg
 
 # Package files — dependency changes require review
 # package.json matches recursively at all depths (covers root + all workspaces)
-package.json @cryppadotta @devinfoley @nickyleach @forgottendev
-pnpm-lock.yaml @cryppadotta @devinfoley @nickyleach @forgottendev
-pnpm-workspace.yaml @cryppadotta @devinfoley @nickyleach @forgottendev
-.npmrc @cryppadotta @devinfoley @nickyleach @forgottendev
+package.json @guy-frontegg @AlexFrontegg
+pnpm-lock.yaml @guy-frontegg @AlexFrontegg
+pnpm-workspace.yaml @guy-frontegg @AlexFrontegg
+.npmrc @guy-frontegg @AlexFrontegg
