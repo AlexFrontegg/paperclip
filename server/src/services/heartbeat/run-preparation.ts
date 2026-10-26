@@ -2900,6 +2900,7 @@ export function createHeartbeatRunPreparation(db: Db) {
     return db
       .select({
         chatCommunicationGuidance: chatConversations.communicationGuidance,
+        chatExternalThreadId: chatConversations.externalThreadId,
         chatAssignedAgentId: chatEndpoints.assignedAgentId,
         chatProvider: chatEndpoints.provider,
         // Select only the public command, never the rest of setup state.
