@@ -9,24 +9,18 @@ import {
 import {
   registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext,
 } from "../adapters/index.js";
-import { slackUndeliveredFinalResponseGuidance } from "../services/connectors/slack/task-update-guidance.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const conversationGuidance = "## Communication in Slack\nConversation guidance canary.";
-const undeliveredGuidance = slackUndeliveredFinalResponseGuidance("slack:C-ORIGIN:1700000000.000100");
-
-describe("Slack guidance for a final response that stays in Paperclip", () => {
-  it("names the originating channel and thread", () => {
-    expect(undeliveredGuidance).toContain("slack_post_message");
-    expect(undeliveredGuidance).toContain("(channel C-ORIGIN, thread_ts 1700000000.000100)");
-  });
-
-  it("omits an empty thread and an unknown destination", () => {
-    expect(slackUndeliveredFinalResponseGuidance("slack:D-ORIGIN:")).toContain("(channel D-ORIGIN).");
-    expect(slackUndeliveredFinalResponseGuidance(null)).toContain("originating Slack conversation. Send");
-  });
-});
+const undeliveredNotice = "A Slack message did not start this run";
+const destination = "(channel C-ORIGIN, thread_ts 1700000000.000100)";
+const markdownKeys = [
+  "paperclipTaskMarkdown",
+  "paperclipTaskMarkdownCompact",
+  "paperclipTaskMarkdownAssignment",
+  "paperclipTaskMarkdownAssignmentCompact",
+];
 
 const postgresSupport = await getEmbeddedPostgresTestSupport();
 const describePostgres = postgresSupport.supported ? describe : describe.skip;
@@ -117,7 +111,7 @@ describePostgres("Slack final response delivery in heartbeat guidance", () => {
     await heartbeat.drainActiveRunExecutions();
     const input = captured.get(run!.id);
     expect(input).toBeDefined();
-    return String(input!.context.paperclipTaskCommunicationGuidance);
+    return input!.context;
   }
 
   it("keeps delivery to Paperclip for a turn that a Slack message started", async () => {
@@ -126,16 +120,23 @@ describePostgres("Slack final response delivery in heartbeat guidance", () => {
     await db.insert(issueComments).values({ id: commentId, companyId: f.companyId, issueId: f.issueId, authorType: "user", authorUserId: f.userId, body: "Please plan this change." });
     await db.insert(chatDeliveries).values({ id: deliveryId, companyId: f.companyId, endpointId: f.endpointId, conversationId: f.conversationId, principalId: f.principalId, providerEventId: commentId, deduplicationKey: commentId, eventKind: "message", normalizedEvent: {}, state: "processed", attempts: 1, processedAt: new Date() });
     await db.insert(chatMessageLinks).values({ companyId: f.companyId, endpointId: f.endpointId, conversationId: f.conversationId, deliveryId, commentId, providerMessageId: commentId, direction: "inbound" });
-    const guidance = await wake(f, commentId, "chat:slack", { requestedByActorType: "user", requestedByActorId: f.userId });
-    expect(guidance).toContain(conversationGuidance);
-    expect(guidance).not.toContain(undeliveredGuidance);
+    const context = await wake(f, commentId, "chat:slack", { requestedByActorType: "user", requestedByActorId: f.userId });
+    for (const key of markdownKeys) {
+      expect(String(context[key])).toContain("Paperclip delivers your final response to the originating Slack conversation");
+      expect(String(context[key])).not.toContain(undeliveredNotice);
+    }
   }, 30_000);
 
   it("tells the agent to post with slack_post_message when a teammate comment starts the run", async () => {
     const f = await seed();
     const commentId = randomUUID();
     await db.insert(issueComments).values({ id: commentId, companyId: f.companyId, issueId: f.issueId, authorType: "agent", authorAgentId: f.teammateId, body: "The plan is ready for approval." });
-    const guidance = await wake(f, commentId, "issue.comment", { requestedByActorType: "agent", requestedByActorId: f.teammateId });
-    expect(guidance).toContain(`${conversationGuidance}\n\n${undeliveredGuidance}`);
+    const context = await wake(f, commentId, "issue.comment", { requestedByActorType: "agent", requestedByActorId: f.teammateId });
+    for (const key of markdownKeys) {
+      expect(String(context[key])).toContain(undeliveredNotice);
+      expect(String(context[key])).toContain(destination);
+    }
+    expect(String(context.paperclipTaskCommunicationGuidance)).toContain(conversationGuidance);
+    expect(String(context.paperclipTaskCommunicationGuidance)).not.toContain(undeliveredNotice);
   }, 30_000);
 });
