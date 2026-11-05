@@ -1,7 +1,16 @@
+import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
+import { providerFailureFromError } from "../../vendor/paperclip-runner/index.js";
+import { nativeTaskSessionPublicationHandled } from "../native-runtime/native-task-session-publication.js";
+import { settledResponsePublicationSql } from "../native-runtime/native-response-publication-receipt.js";
+import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
+import { PROJECT_ACCESS_DENIED, ProjectAccessDeniedError } from "../project-access-denial.js";
+import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
-import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspaceGitScanCode } from "./retries.js";
+import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspacePreparationCode } from "./retries.js";
+import { RemoteWorkspacePreparationTimeoutError } from "../remote-workspace-transport.js";
+import { findReusableSandboxResumeError } from "../reusable-sandbox-resume-error.js";
 import { type RunSessionOutcome, resolveNextSessionState, normalizeUsageTotals, resolveCacheAdjustedCostUsd, resolveLedgerBiller, resolveLedgerCostStatus, normalizeLedgerBillingType } from "./run-state.js";
 import { readGitConnectionFailure } from "../git-connection-failure.js";
 import { CONFIGURATION_INCOMPLETE_FAILURE_CODE, ConfigurationIncompleteFailure } from "./run-preparation.js";
@@ -9,6 +18,7 @@ import { isWorkspaceValidationFailedRun, isWorkspaceValidationFailure, attachPap
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { cancellationResultJson, controllerLeaseLossCancellation, readRunCancellation } from "../run-cancellation.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, LegacyControllerLeaseLostError } from "../legacy-controller-lease.js";
+import { reviewedChatBindingDenialResultJson } from "../reviewed-chat-binding-diagnostics.js";
 import { accountRunCost } from "../run-cost-accounting.js";
 import { isConversation, settleConversationTurn } from "../agent-conversations.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
@@ -19,13 +29,15 @@ import { HttpError } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
 import { parseObject } from "../../adapters/utils.js";
-import { CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON, isExternalChatPresentationContext, mergeHeartbeatRunResultJson, resolveHeartbeatRunResponse, type RunPresentationDecision } from "../heartbeat-run-summary.js";
+import { CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON, isChatOriginPublicationCandidate, isExternalChatPresentationContext, mergeHeartbeatRunResultJson, resolveHeartbeatRunResponse, type RunPresentationDecision } from "../heartbeat-run-summary.js";
 import { normalizeMaxTurnStopReason } from "../heartbeat-stop-metadata.js";
 import { CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-stop.js";
 import { logActivity } from "../activity-log.js";
 import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagnostic, type UnresolvedWorkspaceBaseRefError } from "../workspace-runtime.js";
 import { runnerGoalService } from "../runner-goals.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
+import { hasChatRunOwnedProviderInteraction } from "../chat-interaction-arbitration.js";
+import { readAcceptedTaskContinuationSummary } from "../heartbeat-run-summary.js";
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
@@ -147,6 +159,7 @@ export interface FailHeartbeatRunSetupInput {
 }
 
 function nonRetryablePreflightFailureCode(error: unknown): string | null {
+  if (error instanceof ProjectAccessDeniedError) return PROJECT_ACCESS_DENIED;
   if (error instanceof ChatControlRecoveryUnresolvedError)
     return CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE;
   if (
@@ -345,6 +358,20 @@ function controllerLeaseLossResultJson(signal: AbortSignal) {
     : {};
 }
 
+/** Persist the resolved presentation and wake dependents in its committing transaction. */
+export async function recordRunPresentationDecision(db: Db, input: {
+  companyId: string; runId: string; issueId?: string; decision: RunPresentationDecision;
+}) {
+  await db.transaction(async tx => {
+    await notifyChatRunMilestones(tx, { companyId: input.companyId, runId: input.runId, issueId: input.issueId });
+    await tx.update(heartbeatRuns).set({
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ presentationDecision: input.decision })}::jsonb
+        || ${typeof input.decision.commentId === "string" ? settledResponsePublicationSql() : sql`'{}'::jsonb`}`,
+      updatedAt: new Date(),
+    }).where(eq(heartbeatRuns.id, input.runId));
+  });
+}
+
 export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunCompletionDependencies) {
   const {
     getRun,
@@ -465,6 +492,59 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               recordedResponsibleUserDenialCode ??
               "adapter_failed")
             : null;
+
+    async function persistSessionState(finalizedRun: Run) {
+      await updateRuntimeState(
+        agent,
+        finalizedRun,
+        adapterResult,
+        { legacySessionId: nextSessionState.legacySessionId },
+        normalizedUsage,
+      );
+      if (!taskKey) return;
+      // A turn on one lane makes the other lane's session for this task stale, so that lane resumes fresh with the
+      // handoff. Only a run with positive evidence that no provider work started leaves it alone.
+      const dispatch = readRunAdapterDispatch(finalizedRun);
+      const startedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
+      const otherLaneAdapterType = dispatch?.lane === "fallback"
+        ? dispatch.primaryAdapterType
+        : readUsageLimitFallbackConfig(storedAgent.runtimeConfig)?.adapterType;
+      if (!startedNoWork && otherLaneAdapterType && otherLaneAdapterType !== agent.adapterType) {
+        await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: otherLaneAdapterType });
+      }
+      if (nativeTaskSessionPublicationHandled(finalizedRun.runnerProfileJson, {
+        runId: finalizedRun.id,
+        companyId: finalizedRun.companyId,
+        agentId: agent.id,
+        taskKey,
+        adapterType: agent.adapterType,
+      })) return;
+      if (
+        adapterResult.clearSession ||
+        (!nextSessionState.params && !nextSessionState.displayId)
+      ) {
+        await clearTaskSessions(agent.companyId, agent.id, {
+          taskKey,
+          adapterType: agent.adapterType,
+          expectedRunId: finalizedRun.id,
+        });
+      } else {
+        await upsertTaskSession({
+          companyId: agent.companyId,
+          agentId: agent.id,
+          adapterType: agent.adapterType,
+          taskKey,
+          sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
+            nextSessionState.params,
+            configuredModel,
+            sessionConfigMetadata,
+          ),
+          sessionDisplayId: nextSessionState.displayId,
+          lastRunId: finalizedRun.id,
+          lastError: runErrorMessage,
+        });
+      }
+    }
 
     let logSummary: {
       bytes: number | null;
@@ -637,7 +717,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage) ?? null,
             ),
 
-            usageJson: { ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) },
+            usageJson: preserveAcceptedRunUsageProjectionSql({ ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) }),
             finishedAt:
               persistedRunWrite.run.finishedAt ?? finalRunPatch.finishedAt,
             updatedAt: new Date(),
@@ -688,6 +768,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     );
 
     const finalizedRun = persistedRun ?? (await getRun(run.id));
+    const settleAgent = () => finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
+      keepIdleOnFailure:
+        outcome === "failed" &&
+        ((finalizedRun
+          ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota"
+          : runErrorCode === "provider_quota") ||
+          isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+    });
     if (finalizedRun) {
       await appendRunEvent(finalizedRun, {
         eventType: "lifecycle",
@@ -720,6 +809,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
       const livenessRun = finalizedRun;
       await measureRunPhase("completion.summary", () => refreshContinuationSummaryForRun(livenessRun, agent));
+      if (await pendingCaseHandoffForRun(db, livenessRun.id, livenessRun.companyId)) {
+        // The returning agent must resume its own settled session with the
+        // configuration metadata used for this run. Persist before release,
+        // which can make a same-agent successor eligible immediately.
+        await persistSessionState(livenessRun);
+        await releaseIssueExecutionAndPromote(livenessRun, { suppressImmediateRecovery: true });
+        await settleAgent();
+        return;
+      }
       const skipRunIssueComment =
         parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
       let resolvedPresentationDecision: RunPresentationDecision | null =
@@ -738,11 +836,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             livenessRun.id,
             livenessRun.companyId,
           ));
-        const externalChatPresentationCandidate =
-          isExternalChatPresentationContext(livenessRun.contextSnapshot) ||
-          parseObject(livenessRun.contextSnapshot).source === "tool_action_review" ||
-          String(parseObject(livenessRun.contextSnapshot).source ?? "").startsWith("issue.comment") ||
-          parseObject(livenessRun.contextSnapshot).source === "issue.update";
+        const externalChatPresentationCandidate = isChatOriginPublicationCandidate(livenessRun.contextSnapshot);
         const externalChatPresentationAuthorization =
           issueId && externalChatPresentationCandidate
             ? await measureRunPhase("response.authorize", () => resolveChatRunPresentationAuthorizationReason(db, {
@@ -757,6 +851,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         );
         const resolved = resolveHeartbeatRunResponse({
           resultJson: persistedResultJson,
+          interactionOwnsResponse: Boolean(issueId && readAcceptedTaskContinuationSummary(persistedResultJson) &&
+            await hasChatRunOwnedProviderInteraction(db, { companyId: livenessRun.companyId, issueId, runId: livenessRun.id })),
           conversationTurnFinished: isConversation(issueContext) && livenessRun.status === "succeeded"
             && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
           existingComment: existingRunComment,
@@ -840,13 +936,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           };
         }
 
-        await db
-          .update(heartbeatRuns)
-          .set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ presentationDecision })}::jsonb`,
-            updatedAt: new Date(),
-          })
-          .where(eq(heartbeatRuns.id, livenessRun.id));
+        await recordRunPresentationDecision(db, { companyId: livenessRun.companyId,
+          runId: livenessRun.id, issueId: issueId ?? undefined, decision: presentationDecision });
         await appendRunEvent(livenessRun, {
           eventType: "run.presentation.resolved",
           stream: "system",
@@ -994,63 +1085,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     }
 
     if (finalizedRun) {
-      await updateRuntimeState(
-        agent,
-        finalizedRun,
-        adapterResult,
-        {
-          legacySessionId: nextSessionState.legacySessionId,
-        },
-        normalizedUsage,
-      );
-      if (taskKey) {
-        if (
-          adapterResult.clearSession ||
-          (!nextSessionState.params && !nextSessionState.displayId)
-        ) {
-          await clearTaskSessions(agent.companyId, agent.id, {
-            taskKey,
-            adapterType: agent.adapterType,
-            expectedRunId: finalizedRun.id,
-          });
-        } else {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
-            taskKey,
-            sessionParamsJson:
-              attachPaperclipSessionMetadataToSessionParams(
-                nextSessionState.params,
-                configuredModel,
-                sessionConfigMetadata,
-              ),
-            sessionDisplayId: nextSessionState.displayId,
-            lastRunId: finalizedRun.id,
-            lastError: runErrorMessage,
-          });
-        }
-        // A turn on one lane makes the other lane's session for this task stale, so that lane resumes fresh with the
-        // handoff. Only a run with positive evidence that no provider work started leaves it alone.
-        const dispatch = readRunAdapterDispatch(finalizedRun);
-        const startedNoWork = adapterResult.executionRecovery?.kind === "bootstrap";
-        const otherLaneAdapterType = dispatch?.lane === "fallback"
-          ? dispatch.primaryAdapterType
-          : readUsageLimitFallbackConfig(storedAgent.runtimeConfig)?.adapterType;
-        if (!startedNoWork && otherLaneAdapterType && otherLaneAdapterType !== agent.adapterType) {
-          await clearTaskSessions(agent.companyId, agent.id, { taskKey, adapterType: otherLaneAdapterType });
-        }
-      }
+      await persistSessionState(finalizedRun);
     }
-    await finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
-      keepIdleOnFailure:
-        outcome === "failed" &&
-        ((finalizedRun
-          ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota"
-          : runErrorCode === "provider_quota") ||
-          isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
-      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-    });
+    await settleAgent();
   }
 
   async function failRun(input: FailHeartbeatRunInput) {
@@ -1061,9 +1098,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     // A process adapter may throw while its owned Stop is joining the
     // child. Let the cancellation write settle before attempting failure.
     await processRunCancellationSettlements.get(run.id)?.settled;
+    const providerFailure = providerFailureFromError(err);
+    const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
     const message = redactCurrentUserText(
       identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
-      await getCurrentUserRedactionOptions(),
+      currentUserRedactionOptions,
     );
     const workspaceValidationFailure = isWorkspaceValidationFailure(err)
       ? err
@@ -1145,6 +1184,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         errorMessage: message,
         resultJson: {
           ...parseObject(stopSnapshot?.resultJson),
+          ...(providerFailure ? { providerFailure: { ...providerFailure,
+            message: redactCurrentUserText(identityRedactor.redact(providerFailure.message), currentUserRedactionOptions) } } : {}),
           ...requiredWorkspaceRestoreEvidence,
           ...(workspaceValidationFailure?.resultJson ??
             configurationIncompleteFailure?.resultJson ??
@@ -1184,6 +1225,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     }
 
     const failedRun = failedRunWrite.run;
+    const settleAgent = () => finalizeAgentStatus(agent.id, "failed", message, {
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+      keepIdleOnFailure:
+        Boolean(nonRetryablePreflightFailureCode(err)) ||
+        isWorkspaceSyncConflictFailure(message),
+    });
     await setWakeupStatus(run.wakeupRequestId, "failed", {
       finishedAt: new Date(),
       error: message,
@@ -1213,6 +1260,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         );
       }
       await measureRunPhase("completion.summary", () => refreshContinuationSummaryForRun(livenessRun, agent));
+      if (await pendingCaseHandoffForRun(db, livenessRun.id, livenessRun.companyId)) {
+        await releaseIssueExecutionAndPromote(livenessRun, { suppressImmediateRecovery: true });
+        await settleAgent();
+        return;
+      }
       if (
         !isWorkspaceValidationFailedRun(livenessRun) &&
         !isConfigurationIncompleteFailedRun(livenessRun)
@@ -1277,12 +1329,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
     }
 
-    await finalizeAgentStatus(agent.id, "failed", message, {
-      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
-      keepIdleOnFailure:
-        Boolean(nonRetryablePreflightFailureCode(err)) ||
-        isWorkspaceSyncConflictFailure(message),
-    });
+    await settleAgent();
   }
 
   async function failRunSetup(input: FailHeartbeatRunSetupInput) {
@@ -1295,11 +1342,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       signal.reason instanceof LegacyControllerLeaseLostError;
     // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
     // The inner catch did not fire, so we must record the failure here.
+    const providerFailure = providerFailureFromError(outerErr);
+    const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
     const message = redactCurrentUserText(
       identityRedactor.redact(outerErr instanceof Error
         ? outerErr.message
         : "Unknown setup failure"),
-      await getCurrentUserRedactionOptions(),
+      currentUserRedactionOptions,
     );
     // A missing secret/env binding is a known pre-dispatch configuration gap,
     // not an opaque setup crash. Surface it with its own errorCode so the
@@ -1330,8 +1379,18 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const nonRetryablePreflightCode =
       nonRetryablePreflightFailureCode(outerErr);
     const workspaceGitScanFailure = isWorkspaceGitScanError(outerErr) ? outerErr : null;
+    const remoteWorkspacePreparationTimeout = !providerDispatchStarted && run.runtimeMode === "legacy"
+      && run.nativeSessionId === null && run.runnerInstanceId === null && outerErr instanceof RemoteWorkspacePreparationTimeoutError
+      ? outerErr : null;
+    // A preserved sandbox that could not be resumed before provider dispatch
+    // is retried with the same bounded bootstrap budget. The retry resumes the
+    // same recorded lease; it never creates a replacement or a second executor.
+    const reusableSandboxResumeFailure = !providerDispatchStarted && run.runtimeMode === "legacy"
+      && run.nativeSessionId === null && run.runnerInstanceId === null ? findReusableSandboxResumeError(outerErr) : null;
     const setupFailureErrorCode =
       (controllerLeaseLost ? CONTROLLER_LEASE_LOST_FAILURE_CODE : null) ??
+      remoteWorkspacePreparationTimeout?.code ??
+      reusableSandboxResumeFailure?.code ??
       workspaceGitScanFailure?.code ??
       workspaceValidationSetupFailure?.code ??
       configurationIncompleteSetupFailure?.code ??
@@ -1351,11 +1410,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     // action, so it is persisted even when the agent lookup failed and the
     // agent-scoped stop metadata cannot be merged in.
     const setupFailureDetails =
+      (outerErr instanceof ProjectAccessDeniedError
+        ? { projectAccessDenied: { projectId: outerErr.projectId } } : null) ??
       (workspaceGitScanFailure ? {
         workspaceGitScan: {
           code: workspaceGitScanFailure.code,
           phase: "workspace_setup",
-          retryable: isTransientWorkspaceGitScanCode(workspaceGitScanFailure.code),
+          retryable: isTransientWorkspacePreparationCode(workspaceGitScanFailure.code),
         },
       } : null) ??
       workspaceValidationSetupFailure?.resultJson ??
@@ -1375,12 +1436,17 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const connectionFailure = readGitConnectionFailure(outerErr);
     const setupFailureResultJson = {
       ...setupFailureDetails,
+      ...(providerFailure ? { providerFailure: { ...providerFailure,
+        message: redactCurrentUserText(identityRedactor.redact(providerFailure.message), currentUserRedactionOptions) } } : {}),
       ...(connectionFailure ? { connectionFailure } : {}),
       // A lease lost during setup surfaces as the thrown abort reason, or as
       // the signal's reason when a setup step threw a different error after it.
       ...controllerLeaseLossEvidence(outerErr),
       ...controllerLeaseLossResultJson(signal),
-      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      ...reviewedChatBindingDenialResultJson(outerErr),
+      ...(!providerDispatchStarted
+        ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+        : {}),
     };
     const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
       error: message,
@@ -1401,7 +1467,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : setupFailureResultJson
           ? { resultJson: setupFailureResultJson }
           : {}),
-    }, { error: outerErr, phase: "setup", secretValues: readFailureReportSecrets() }).catch(() => ({ run: null, updated: false as const }));
+    }, { error: outerErr, phase: "setup", secretValues: readFailureReportSecrets() }, { setupFailure: true }).catch(() => ({ run: null, updated: false as const }));
     if (!setupFailureWrite.updated) {
       logger.info(
         {
@@ -1460,7 +1526,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         ).catch(() => undefined);
         if (
           !isWorkspaceValidationFailedRun(livenessRun) &&
-          !isConfigurationIncompleteFailedRun(livenessRun)
+          !isConfigurationIncompleteFailedRun(livenessRun) &&
+          livenessRun.errorCode !== PROJECT_ACCESS_DENIED
         ) {
           await finalizeIssueCommentPolicy(livenessRun, failedAgent).catch(
             () => undefined,
@@ -1473,8 +1540,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        if (!fallbackHandled) {
-          await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+        if (!fallbackHandled && livenessRun.errorCode !== PROJECT_ACCESS_DENIED) {
+          await (isTransientWorkspacePreparationCode(livenessRun.errorCode)
             ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
             : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
           ).catch((retryError) => {

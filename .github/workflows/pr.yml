@@ -13,6 +13,6 @@ permissions:
 
 jobs:
   ci:
-    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
+    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci' || github.event.label.name == 'full-ci'
     # Pinned to deploy so CI matches the fork's code and a PR cannot change its own checks.
     uses: AlexFrontegg/paperclip/.github/workflows/pr-trusted.yml@deploy

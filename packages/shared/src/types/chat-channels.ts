@@ -232,6 +232,8 @@ export interface ChatEndpointSetupState {
   testSkipped?: boolean;
   /** Set only after the provider has delivered a signed callback challenge. */
   webhookVerifiedAt?: string | null;
+  /** Nonsecret generation used to resume a requested signing-secret rotation. */
+  credentialRotationId?: string | null;
   authorizationUrl?: string | null;
   providerUrl?: string | null;
   command?: string | null;
@@ -248,6 +250,7 @@ export interface ChatEndpointSetupState {
 
 export interface ChatEndpointSetupSecret {
   webhookSecret: string;
+  credentialRotationId?: string;
 }
 
 export type ChannelPublicationMode = "automatic" | "explicit";
@@ -412,6 +415,14 @@ export interface SafeExternalChatCard {
   title: string;
   body?: string;
   actions?: SafeExternalChatCardAction[];
+  /** A compact choice whose opaque option tokens use the normal action ledger. */
+  selection?: {
+    actionId: string;
+    label: string;
+    multiple?: boolean;
+    submitLabel?: string;
+    options: Array<{ actionId: string; label: string; description?: string; selected?: boolean }>;
+  };
 }
 
 export interface SafeChatPublicationPayload {
