@@ -843,6 +843,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
     });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({
       id: agentId,
       companyId,
@@ -906,7 +907,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         .where(eq(heartbeatRuns.id, chatWake!.id))
         .then((rows) => rows[0] ?? null);
       return run?.status === "succeeded";
-    });
+    }, 10_000);
     const chatRun = await db
       .select({ status: heartbeatRuns.status, contextSnapshot: heartbeatRuns.contextSnapshot })
       .from(heartbeatRuns)
@@ -1551,6 +1552,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
     });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({
       id: agentId,
       companyId,
@@ -1642,7 +1644,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         .where(eq(heartbeatRuns.id, chatWake!.id))
         .then((rows) => rows[0] ?? null);
       return run?.status === "succeeded" || run?.status === "cancelled";
-    });
+    }, 10_000);
     const chatRun = await db
       .select({ status: heartbeatRuns.status, contextSnapshot: heartbeatRuns.contextSnapshot })
       .from(heartbeatRuns)

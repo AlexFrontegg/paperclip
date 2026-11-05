@@ -1085,7 +1085,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       issueNumber: 1,
       identifier: `${company!.issuePrefix}-1`,
     });
-    const primaryBackAt = new Date(Date.now() + 1_500);
+    const primaryBackAt = new Date(Date.now() + 8_000);
     await activeFallback(agent, primaryBackAt.toISOString());
     codexErrorCode = "provider_quota";
     claudeHitsLimit = false;

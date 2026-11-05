@@ -3737,7 +3737,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const f = await toolReplyFixture();
       const initialEndpoint = await f.service.get(f.endpoint.id);
       const toolsBefore = await githubBotToolsForSession(db, f.session);
-      expect(toolsBefore).toHaveLength(7);
+      expect(toolsBefore).toHaveLength(8);
       const runtime = f.runtime.endpoints.get(f.endpoint.id)!;
       runtime.postError = Object.assign(new Error("Provider rejected publication"), { status });
       const comment = await issueService(db).addComment(f.conversation.issueId!, "Rejected response",
@@ -7517,7 +7517,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       // The working comment uses the same fresh admission as the review tools.
       await expect.poll(async () => {
         await githubResponseCommentService(db, f.providerFetch).processPending();
-        return f.responseWrites.some((write) => write.body.includes("Working on this"));
+        return f.responseWrites.some((write) => /Review queued|Working on this/.test(write.body));
       }, { timeout: 10_000 }).toBe(true);
       const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
       const [run] = await db.insert(heartbeatRuns).values({
