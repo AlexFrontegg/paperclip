@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
-import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
@@ -76,11 +76,11 @@ const sharedAnthropicBinding = { provider: "anthropic", method: "subscription", 
 const sharedOpenAiBinding = { provider: "openai", method: "api_key", mode: "shared", connectionId: randomUUID(), grantId: randomUUID() };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
 const claudeFallback = { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fallback-test" }, switchBack: "on_reset" };
-const outage = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
+const outage: Failure = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
 
-type Failure = { errorCode: string; errorFamily?: string };
+type Failure = { errorCode: string; errorFamily?: NonNullable<AdapterExecutionResult["errorFamily"]> };
 
-function failedExecution(failure: Failure) {
+function failedExecution(failure: Failure): AdapterExecutionResult {
   const family = failure.errorFamily ? { errorFamily: failure.errorFamily } : {};
   return {
     exitCode: 1,
@@ -1085,7 +1085,7 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
       issueNumber: 1,
       identifier: `${company!.issuePrefix}-1`,
     });
-    const primaryBackAt = new Date(Date.now() + 1_500);
+    const primaryBackAt = new Date(Date.now() + 8_000);
     await activeFallback(agent, primaryBackAt.toISOString());
     codexErrorCode = "provider_quota";
     claudeHitsLimit = false;

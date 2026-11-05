@@ -15,15 +15,15 @@ Hook points:
 - `heartbeat/retries.ts`: `scheduleBoundedRetryForRun` switches to the fallback on a quota or repeated outage failure, and picks Codex's transient retry mode from the failed run's claimed adapter; `handleUsageLimitFallbackAccountFailure`; `deferredUsageLimitFallbackRetries`.
 - `heartbeat/queue.ts`: the claim stores `adapterDispatch` from `resolveAdapterDispatchForClaim`.
 - `heartbeat/scheduling.ts`: a quota recovery monitor lets the other lane take the attempt.
-- `heartbeat/run-completion.ts`: account failures go to the fallback handler; a turn on either lane clears the other lane's task session.
+- `heartbeat/run-completion.ts`: account failures go to the fallback handler; a turn on either lane clears the other lane's task session (inside upstream's `persistSessionState`, so it also covers the case-handoff path).
 - `heartbeat/run-control.ts`: release waits for a deferred fallback retry; Stop sends SIGINT by the claimed adapter.
 - `heartbeat/run-state.ts`: `dispatchedAdapterType` in run lists; a session reset clears the fallback's sessions and keeps the fallback state.
 - `heartbeat/session-preparation.ts`, `heartbeat/execution-configuration.ts`, `execution-workspace-policy.ts` (`withoutFallbackEngineOverrides`).
-- `recovery/service.ts`: a quota wait can move the work to the fallback now.
-- `satisfied-connection-intents.ts` (`isAssigneeAiSignIn`, `pendingCardsCoveredByFallback`): while the next run uses the fallback (`nextRunUsesFallback`), the primary's AI sign-in card does not hold the task. Callers: the retry gate and queued-run check in `connectionContinuationPendingResponse` and `modules/run-dispatch/adapters/postgres.ts`; the legacy follow-up in `recovery/disposition-repair.ts` (`collectDispositionRepairSourceState`); the native follow-up in `heartbeat/run-lifecycle.ts` (`handleSuccessfulRunHandoff`).
+- `recovery/service.ts`: a quota wait can move the work to the fallback now (the quota-retry helper runs inside upstream's recovery transaction).
+- `satisfied-connection-intents.ts` (`isAssigneeAiSignIn`, `pendingCardsCoveredByFallback`): while the next run uses the fallback (`nextRunUsesFallback`), the primary's AI sign-in card does not hold the task. Callers: the retry gate and queued-run check in `connectionContinuationPendingResponse` and `modules/run-dispatch/adapters/postgres.ts`; the legacy follow-up in `recovery/disposition-repair.ts` (`collectDispositionRepairSourceState` and `readDispositionRepairDurableWaitingState`); the native follow-up in `heartbeat/run-lifecycle.ts` (`handleSuccessfulRunHandoff`).
 - `lib/agent-records.ts` and `services/agent-hiring.ts`: a hire installs the fallback AI connection.
 - `routes/agents.ts`, `services/agents.ts`, `services/activity.ts`, `services/connection-intents.ts`, `routes/openapi.ts`.
-- UI: `UsageLimitFallbackField.tsx`, `AgentConfigForm.tsx` (`label` prop on the model and effort pickers), `lib/agent-config-patch.ts`, `pages/AgentDetail.tsx`, `api/agents.ts`.
+- UI: `UsageLimitFallbackField.tsx`, `AgentConfigForm.tsx` (`label` prop on the model and effort pickers), `lib/agent-config-patch.ts`, `pages/AgentDetail.tsx`, `components/run-log/LogViewer.tsx` (`run.dispatchedAdapterType ?? adapterType`), `api/agents.ts`.
 
 Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `server/src/__tests__/agent-usage-limit-fallback-routes.test.ts`, `server/src/__tests__/satisfied-connection-intents.test.ts`, `packages/shared/src/usage-limit-fallback.test.ts`, `ui/src/components/UsageLimitFallbackField.test.tsx`, `ui/src/lib/agent-config-patch.test.ts`.
 
@@ -37,14 +37,14 @@ Proving tests: `server/src/__tests__/heartbeat-usage-limit-fallback.test.ts`, `s
 
 - **Own GitHub App sign-in:** `deploymentOAuthClient` in `packages/shared/src/types/app-definition.ts` and `app-definitions/github.json`, which offers only personal accounts for this method. Test: `packages/shared/src/app-definitions.test.ts`.
 - **Reviewed authors:** listed teammates without a Paperclip account get automatic reviews, and can mention or reply to the bot in pull request conversations. Their runs use only the bot's GitHub connection.
-- **Read-only bot token for `gh`:** bot-only runs without a dedicated agent account get a short-lived installation token from the bot's GitHub App with read permissions only (`githubBotReadOnlyToken` in `chat-github-client.ts`, used by `github-operation-credentials.ts`; run source `bot`). A refused token exports nothing.
+- **Read-only bot token for `gh`:** bot-only runs without a dedicated agent account get a short-lived installation token from the bot's GitHub App with read permissions only (`githubBotReadOnlyToken` in `chat-github-client.ts`, used by `github-operation-credentials.ts`; run source `bot`). A refused token exports nothing. The bot-scope check finds the run's issue with upstream's `boundRunIssueId(run)`, so a run bound only by `heartbeat_runs.issue_id` is limited to the bot too.
 - **Read-only GitHub for this agent:** the bot setting `agentReadOnlyGitHub` gives every run of the bot's agent only the bot's read-only token for git and `gh` (`githubReadOnlyAgentBotConnection` in `chat-github-tools.ts`, `resolveRunGitHubIdentitySelection` in `github-operation-credentials.ts`, called from `heartbeat/execution-configuration.ts`).
-- **Resolve fixed findings:** the `resolve_finding` bot tool replies in and resolves the bot's own inline threads at the current head, behind the "Resolve fixed findings" setting. `GITHUB_PUBLICATION_TOOL_NAMES` in `chat-github-reviews.ts` lists the tools whose retries report the saved receipt; `tool-gateway.ts` uses it too.
+- **Resolve fixed findings:** the `resolve_finding` bot tool replies in and resolves the bot's own inline threads at the current head, behind the "Resolve fixed findings" setting. `GITHUB_PUBLICATION_TOOL_NAMES` in `chat-github-reviews.ts` lists the tools whose retries report the saved receipt; `tool-gateway.ts` uses it too, and upstream's recovery fence for operations with an unknown outcome exempts `resolve_finding` like the other publication tools.
 - Hook points: `chat-github-review-policy.ts`, `chat-github-events.ts`, `chat-github-reviews.ts`, `chat-github-tools.ts`, `chat-github-management.ts`, `chat-github-response-comments.ts`, `chat-github-client.ts`, `github-operation-credentials.ts`, `chat-channels/github/*`, `chat-channels/inbound/*`, `chat-channels/provider-effects.ts`, `heartbeat/execution-configuration.ts` (bot-only GitHub), `native-runtime/chat-attachment-reuse.ts`, `packages/shared/src/{types,validators}/chat-github.ts`, UI `pages/apps/chat/GitHubBotConfiguration.tsx`.
 - Proving tests: `server/src/__tests__/chat-channels.integration.test.ts`, `server/src/__tests__/heartbeat-reviewed-chat-binding.integration.test.ts`, `server/src/services/chat-github-review-policy.test.ts`, `packages/shared/src/validators/chat-github.test.ts`, `ui/src/pages/apps/chat/GitHubAccessEditor.test.tsx`.
 - Docs: `doc/connections/GITHUB-REVIEW-BOT.md`, `maps/*/chat-channels.md`.
 
-The upstream-layout versions of the four GitHub features are kept on branch `ports/github-bot` (upstream master plus the port commits). Take these files from that branch when an upstream merge conflicts in them.
+Branch `ports/github-bot` holds the first upstream-layout ports of the four GitHub features. It predates later fork changes (#17, #22, #31), so `deploy`'s versions are the fork's truth; use the branch only as a reference.
 
 ## Chat messages wake blocked tasks
 
@@ -61,14 +61,13 @@ Long base64 blobs in run logs no longer make the secret patterns scan in quadrat
 ## Remote MCP client credentials
 
 A custom remote MCP connection can sign in with OAuth client credentials and renew its token with a refresh token fallback.
-- Hook points: `packages/shared/src/validators/tool-access.ts`, `server/src/services/tool-access.ts`, `server/src/routes/tool-access.ts`, UI `features/connections/ConnectionSetupFlow.tsx` and `pages/apps/generic-mcp-connect.ts`.
+- Hook points: `packages/shared/src/validators/tool-access.ts`; upstream split `server/src/services/tool-access.ts` into `server/src/services/tool-access/**`: `oauth/client.ts` (`renewOAuthToken`), `oauth/metadata.ts` (`usesOAuthClientCredentials`), `oauth/connection-refresh.ts`, `oauth/grant-refresh.ts`, `oauth/credential-store.ts`, `oauth/client-settings.ts` (`appWithDeploymentOAuthClient`, built on upstream's `oauthClientConfig`), `catalog/discovery.ts` (`oauth_client_credentials_rejected`), `catalog/failures.ts`; `server/src/routes/tool-access.ts`; UI `features/connections/ConnectionSetupFlow.tsx` and `pages/apps/generic-mcp-connect.ts`.
 - Proving tests: `server/src/__tests__/generic-mcp-connection.test.ts`, `server/src/__tests__/tool-access-service.test.ts`, `packages/shared/src/validators/tool-access.test.ts`, `ui/src/pages/apps/generic-mcp-connect.test.ts`, `ui/src/pages/apps/AppsConnect.test.tsx`.
 - Docs: `doc/connections/GENERIC-REMOTE-MCP.md`.
 
 ## Upstream fixes taken early
 
-- Upstream #17216 (`042051904`): Codex shell commands see the secrets assigned to the agent, such as `GITHUB_TOKEN`. Our version leaves out upstream's telemetry keys (#16874, not merged yet). On the next sync, take upstream's version of these files.
-- Fork change on top of it: `codexShellEnvironmentKeys` also passes the run's `PAPERCLIP_GITHUB_BROKER_TOKEN` (and `PAPERCLIP_GITHUB_BRIDGE_TOKEN`) when Paperclip set it. Upstream keeps every `PAPERCLIP_GITHUB_*` name out of Codex shells, so Paperclip's `gh`/`git` launchers report `capability_missing` and managed GitHub (the read-only review bot token) fails on Codex. Keep this on the next sync until upstream passes the capability another way. Proving test: `packages/adapter-utils/src/codex-shell-environment.test.ts`.
+- None at the moment. The 2026-11 sync took upstream's Codex shell environment (#17216), which now passes `PAPERCLIP_GITHUB_BROKER_TOKEN` and `PAPERCLIP_GITHUB_BRIDGE_TOKEN` itself, so the fork's carry was dropped. Proving test kept: `packages/adapter-utils/src/codex-shell-environment.test.ts`.
 
 ## Building the labs image
 
@@ -82,7 +81,7 @@ A custom remote MCP connection can sign in with OAuth client credentials and ren
 ## Merging an upstream release
 
 1. Branch from `deploy` and merge the upstream tag.
-2. For the GitHub bot files, take `ports/github-bot`'s version (rebase that branch on the tag first).
+2. For the GitHub bot files, combine upstream's changes with `deploy`'s fork versions (`ports/github-bot` is only a reference).
 3. For the fallback, keep upstream's code and re-apply the hook points above.
 4. Type-check `server` and `ui`, and compare with upstream's own errors at the tag. The server type check skips `src/__tests__`, so a broken test merge shows up only when the test runs.
 5. Run every proving test file above in full, not filtered by test name.
