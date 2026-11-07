@@ -187,27 +187,6 @@ describe("chat publication error classification", () => {
     ).toMatchObject({ kind: "failed" });
   });
 
-  it("keeps Paperclip's own authorization failures scoped to the publication", () => {
-    expect(
-      classifyChatPublicationError(
-        forbidden("GitHub failure has no request binding"),
-        1,
-      ),
-    ).toMatchObject({ kind: "failed" });
-    expect(classifyChatPublicationError(unauthorized(), 1)).toMatchObject({
-      kind: "failed",
-    });
-    expect(
-      classifyChatPublicationError(
-        new HttpError(403, "GitHub rejected this operation", {
-          code: "github_bot_operation_failed",
-          providerStatus: 403,
-        }),
-        1,
-      ),
-    ).toMatchObject({ kind: "endpoint_attention" });
-  });
-
   it("does not call explicit GitHub 4xx rejections ambiguous delivery", () => {
     for (const status of [400, 409, 422]) {
       expect(

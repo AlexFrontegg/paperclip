@@ -412,14 +412,14 @@ describeEmbeddedPostgres("connectionIntentService", () => {
             purpose: "tool",
           }),
           expect.objectContaining({
-            key: "copilot-token",
-            purpose: "ai",
-            setupPath: expect.stringContaining("/apps/connect?source=github"),
-          }),
-          expect.objectContaining({
             key: "own-oauth",
             label: "Use your own GitHub App",
             auth: "oauth",
+          }),
+          expect.objectContaining({
+            key: "copilot-token",
+            purpose: "ai",
+            setupPath: expect.stringContaining("/apps/connect?source=github"),
           }),
         ],
       }),
