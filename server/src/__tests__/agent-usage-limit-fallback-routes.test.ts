@@ -170,7 +170,7 @@ describeEmbeddedPostgres("usage-limit fallback agent config routes", () => {
     await db.update(agents).set({ runtimeConfig: { usageLimitFallback: codexFallback } }).where(eq(agents.id, f.agentId));
     const response = await patch(f.app, f.agentId, { adapterType: "gemini_local", adapterConfig: {} });
     expect(response.status).toBe(422);
-    expect(JSON.stringify(response.body)).toMatch(/supported only for claude_local and codex_local/);
+    expect(JSON.stringify(response.body)).toMatch(/supported only for Claude Code and Codex agents/);
   });
 
   it("lets a board user return the agent to its primary right away", async () => {

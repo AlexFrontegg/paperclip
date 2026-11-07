@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentHarnessType } from "./agent-runner.js";
 import { aiConnectionBindingSchema, type AiConnectionBinding } from "./ai-connections.js";
 import type { AiRuntimeConnectionBinding } from "./ai-connection-router.js";
 
@@ -158,19 +159,24 @@ export function sameAiConnectionBinding(left: AiConnectionBinding | null | undef
   return sameJsonValue(left, right);
 }
 
-/** Explains why a fallback cannot be used with this primary, or returns null when it can. */
+/**
+ * Explains why a fallback cannot be used with this primary, or returns null when it can.
+ * A Paperclip Runner primary counts as the Claude Code or Codex agent it runs; its fallback runs on that adapter directly.
+ */
 export function usageLimitFallbackConfigProblem(input: {
   primaryAdapterType: string;
+  primaryAdapterConfig?: Record<string, unknown>;
   primaryAiConnection?: AiRuntimeConnectionBinding;
   fallback: UsageLimitFallbackConfig;
 }): string | null {
-  if (!isUsageLimitFallbackAdapterType(input.primaryAdapterType)) {
-    return `Usage-limit fallback is supported only for ${USAGE_LIMIT_FALLBACK_ADAPTER_TYPES.join(" and ")} agents`;
+  const primaryHarness = agentHarnessType(input.primaryAdapterType, input.primaryAdapterConfig);
+  if (!isUsageLimitFallbackAdapterType(primaryHarness)) {
+    return `Usage-limit fallback is supported only for Claude Code and Codex agents, directly or on the Paperclip Runner`;
   }
   if (input.primaryAiConnection?.mode === "router") {
     return "Usage-limit fallback is not available for an agent on a connection pool: the pool already moves tasks between accounts";
   }
-  if (input.fallback.adapterType === input.primaryAdapterType && sameAiConnectionBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
+  if (input.fallback.adapterType === primaryHarness && sameAiConnectionBinding(input.fallback.aiConnection, input.primaryAiConnection)) {
     return "The fallback must use a different adapter or a different AI account than the primary";
   }
   if (input.primaryAiConnection && !input.fallback.aiConnection) {

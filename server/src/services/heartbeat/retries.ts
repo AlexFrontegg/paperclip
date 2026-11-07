@@ -42,6 +42,7 @@ import {
   agentWakeupRequests,
   executionWorkspaces,
   heartbeatRuns,
+  issueRecoveryActions,
   issues,
 } from "@paperclipai/db";
 import {
@@ -52,7 +53,17 @@ import { logger } from "../../middleware/logger.js";
 import { parseObject } from "../../adapters/utils.js";
 import { logActivity } from "../activity-log.js";
 import { isUsageLimitFallbackStateActive, readUsageLimitFallbackConfig, type UsageLimitFallbackReason } from "@paperclipai/shared";
-import { activateUsageLimitFallback, isRunAiAccountFailure, readAgentUsageLimitFallbackState, readRunAdapterDispatch, runUsageLimitLane, suspendUsageLimitFallback, type UsageLimitFallbackActivation } from "../usage-limit-fallback.js";
+import {
+  activateUsageLimitFallback,
+  isRunAiAccountFailure,
+  readAgentUsageLimitFallbackState,
+  readRunAdapterDispatch,
+  readRunnerUsageLimit,
+  runUsageLimitLane,
+  suspendUsageLimitFallback,
+  USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS,
+  type UsageLimitFallbackActivation,
+} from "../usage-limit-fallback.js";
 import { readContinuationAttempt } from "../recovery/index.js";
 import { withRecoveryContext } from "../recovery/status-only-context.js";
 import {
@@ -457,15 +468,55 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     }
   }
 
-  /** A run whose own AI account failed: a broken fallback is suspended, and a signed-out primary moves to the fallback. */
+  /**
+   * A run whose own AI account failed: a broken fallback is suspended, and a signed-out primary moves to the fallback.
+   * Also a Paperclip Runner turn that stopped on a usage limit, which the Runner leaves to the fallback.
+   */
   async function handleUsageLimitFallbackAccountFailure(
     failedRun: typeof heartbeatRuns.$inferSelect,
     storedAgent: typeof agents.$inferSelect,
   ): Promise<boolean> {
+    const runnerUsageLimit = runUsageLimitLane(failedRun) === "primary"
+      ? readRunnerUsageLimit(failedRun.errorCode, parseObject(failedRun.resultJson).providerFailure)
+      : null;
+    if (runnerUsageLimit) return switchToFallbackForRunnerUsageLimit(failedRun, storedAgent, runnerUsageLimit.retryNotBefore);
     if (!isRunAiAccountFailure(failedRun)) return false;
     return runUsageLimitLane(failedRun) === "fallback"
       ? suspendBrokenUsageLimitFallback(failedRun, storedAgent)
       : switchToFallbackForSignedOutPrimary(failedRun, storedAgent);
+  }
+
+  /** The Runner left a task that hit its usage limit to the fallback instead of blocking it, so the fallback takes the next turn. */
+  async function switchToFallbackForRunnerUsageLimit(
+    failedRun: typeof heartbeatRuns.$inferSelect,
+    storedAgent: typeof agents.$inferSelect,
+    retryNotBefore: Date | null,
+  ): Promise<boolean> {
+    if (!readUsageLimitFallbackConfig(storedAgent.runtimeConfig) || await runnerBlockedTaskForBoard(failedRun)) return false;
+    const now = new Date();
+    const activation = await activateUsageLimitFallback(db, {
+      agent: storedAgent,
+      run: failedRun,
+      reason: "provider_quota",
+      retryNotBefore,
+      now,
+    });
+    await recordUsageLimitFallbackActivation(failedRun, storedAgent, activation, now);
+    // The task is no longer blocked, so a fallback that cannot start after all waits for the primary's reset.
+    const primaryBackAt = retryNotBefore?.getTime() ?? now.getTime() + USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS;
+    return scheduleUsageLimitFallbackRetry(failedRun, storedAgent, {
+      now,
+      delayMs: activation.activated ? 0 : Math.max(0, primaryBackAt - now.getTime()),
+    });
+  }
+
+  async function runnerBlockedTaskForBoard(run: typeof heartbeatRuns.$inferSelect): Promise<boolean> {
+    const [boardRecovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, run.companyId),
+      eq(issueRecoveryActions.ownerType, "board"),
+      sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+    )).limit(1);
+    return Boolean(boardRecovery);
   }
 
   /** The sign-in card still asks a person to reconnect the primary; the work continues on the fallback meanwhile. */

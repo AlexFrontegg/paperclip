@@ -24,6 +24,7 @@ import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-wo
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
 import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
+import { usageLimitFallbackCanTakeOverRunnerTurn } from "../usage-limit-fallback.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
@@ -10702,6 +10703,16 @@ async function executePaperclipNativeSessionWithinScope(
         failureCode,
         agentId: input.execution.binding.agentId,
       });
+      // A usage limit the agent's fallback can take over is left to it instead of blocking the task for a person.
+      const handedToUsageLimitFallback = phase === "terminal_failure"
+        && recoveryEvidence.recoveryMode !== "ambiguous_state"
+        && input.runnerExecutionTarget?.kind !== "remote"
+        && await usageLimitFallbackCanTakeOverRunnerTurn(input.db, {
+          runId: input.execution.binding.runId,
+          failureCode: sourceFailureCode,
+          providerFailure,
+          now,
+        }).catch(() => false);
       const { exhausted } = recoveryProjection;
       const integrityFailure =
         sourceFailureCode === "native_event_replay_conflict";
@@ -10969,7 +10980,7 @@ async function executePaperclipNativeSessionWithinScope(
           (!failureTask.checkoutRunId ||
             failureTask.checkoutRunId === input.execution.binding.runId);
         let failureBlockStatusVersion: number | undefined;
-        if (stillOwnsTask && recoveryProjection.issueStatus) {
+        if (stillOwnsTask && recoveryProjection.issueStatus && !handedToUsageLimitFallback) {
           const projected = await issueService(tx as unknown as Db).update(
             input.execution.binding.issueId,
             { status: recoveryProjection.issueStatus },
@@ -10988,7 +10999,7 @@ async function executePaperclipNativeSessionWithinScope(
             .set({ executionRunId: null, checkoutRunId: null, updatedAt: now })
             .where(eq(issues.id, input.execution.binding.issueId));
         }
-        if (!stillOwnsTask) return;
+        if (!stillOwnsTask || handedToUsageLimitFallback) return;
         await issueRecoveryActionService(
           tx as unknown as Db,
         ).upsertSourceScoped({

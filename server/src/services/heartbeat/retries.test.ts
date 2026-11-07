@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { activityLog, agentRuntimeState, agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -13,6 +13,7 @@ import { createHeartbeatRunState } from "./run-state.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import * as extracted from "./retries.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
+import { effectiveAgentForRun, readAgentUsageLimitFallbackState, resolveAdapterDispatchForClaim } from "../usage-limit-fallback.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -203,6 +204,9 @@ describePostgres("heartbeat retry module database wiring", () => {
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await database?.cleanup(); });
 
   afterEach(async () => {
+    await db.delete(issueRecoveryActions);
+    await db.delete(activityLog);
+    await db.delete(agentRuntimeState);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -249,6 +253,79 @@ describePostgres("heartbeat retry module database wiring", () => {
     expect(result.outcome).toBe("scheduled");
     const [successor] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, run.id)));
     expect(successor.contextSnapshot).toMatchObject({ codexTransientFallbackMode: "same_session" });
+  });
+
+  describe("a Paperclip Runner turn that stopped on a usage limit", () => {
+    async function runnerFixture(failure: { errorCode: string; providerFailure?: Record<string, unknown> }) {
+      const { companyId, agent, issue, run } = await fixture();
+      const [runnerAgent] = await db.update(agents).set({
+        adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-6-astra" },
+        runtimeConfig: { usageLimitFallback: { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fable-5-1" } } },
+      }).where(eq(agents.id, agent.id)).returning();
+      const [failedRun] = await db.update(heartbeatRuns).set({
+        runtimeMode: "native",
+        errorCode: failure.errorCode,
+        resultJson: failure.providerFailure ? { providerFailure: failure.providerFailure } : {},
+      }).where(eq(heartbeatRuns.id, run.id)).returning();
+      return { companyId, agent: runnerAgent, issue, run: failedRun };
+    }
+
+    async function retryOf(companyId: string, runId: string) {
+      return db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, runId)));
+    }
+
+    it("switches to the fallback and schedules the next turn on Claude Code right away", async () => {
+      const { companyId, agent, run } = await runnerFixture({ errorCode: "native_provider_usage_limit" });
+      const before = Date.now();
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({
+        reason: "provider_quota",
+        sourceRunId: run.id,
+        primaryAdapterType: "paperclip_runner",
+        fallbackAdapterType: "claude_local",
+      });
+      const [successor] = await retryOf(companyId, run.id);
+      expect(successor).toMatchObject({ status: "scheduled_retry" });
+      expect(successor.scheduledRetryAt!.getTime()).toBeLessThan(before + 60_000);
+      const dispatch = await resolveAdapterDispatchForClaim(db, agent, successor, new Date());
+      expect(dispatch).toMatchObject({ adapterType: "claude_local", lane: "fallback", primaryAdapterType: "paperclip_runner" });
+      const fallbackAgent = effectiveAgentForRun(agent, { runnerProfileJson: { adapterDispatch: dispatch } });
+      expect(fallbackAgent.adapterType).toBe("claude_local");
+      expect(fallbackAgent.adapterConfig).toEqual({ model: "claude-fable-5-1" });
+    });
+
+    it("keeps Claude's reset time from its typed usage-limit failure", async () => {
+      const retryAt = "2030-04-22T18:00:00.000Z";
+      const { agent, run } = await runnerFixture({
+        errorCode: "native_provider_terminal_failed",
+        providerFailure: { category: "quota_exhausted", retryAt },
+      });
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
+      expect((await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil).toBe(retryAt);
+    });
+
+    it.each([
+      ["another typed provider failure", { errorCode: "native_provider_terminal_failed", providerFailure: { category: "authentication" } }],
+      ["a model rejection", { errorCode: "native_provider_model_rejected" }],
+    ])("does nothing for %s", async (_label, failure) => {
+      const { companyId, agent, run } = await runnerFixture(failure);
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(false);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+      expect(await retryOf(companyId, run.id)).toEqual([]);
+    });
+
+    it("leaves a task the Runner blocked for a person to that person", async () => {
+      const { companyId, agent, issue, run } = await runnerFixture({ errorCode: "native_provider_usage_limit" });
+      await db.insert(issueRecoveryActions).values({
+        companyId, sourceIssueId: issue.id, kind: "active_run_watchdog", ownerType: "board",
+        cause: "native_provider_usage_limit", fingerprint: run.id, evidence: { runId: run.id },
+        nextAction: "Restore model provider usage capacity, then explicitly retry the task.",
+      });
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(false);
+      expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
+      expect(await retryOf(companyId, run.id)).toEqual([]);
+    });
   });
 
   it.each([false, true])("records a workspace wait only for the deferral's workspace (task moved after cancel: %s)", async (moved) => {

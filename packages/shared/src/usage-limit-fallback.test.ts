@@ -225,7 +225,32 @@ describe("usageLimitFallbackConfigProblem", () => {
   });
 
   it("rejects a primary adapter outside the allow-list", () => {
-    expect(usageLimitFallbackConfigProblem({ primaryAdapterType: "paperclip_runner", fallback: codexFallback })).toMatch(/supported only/);
+    expect(usageLimitFallbackConfigProblem({ primaryAdapterType: "gemini_local", fallback: codexFallback })).toMatch(/supported only/);
+  });
+
+  it.each([
+    [{ provider: "acpx", acpxAgent: "claude" }, codexFallback],
+    [{ provider: "codex" }, { ...codexFallback, adapterType: "claude_local" as const, adapterConfig: {} }],
+  ])("accepts a Paperclip Runner primary running Claude Code or Codex (%o)", (primaryAdapterConfig, fallback) => {
+    expect(usageLimitFallbackConfigProblem({ primaryAdapterType: "paperclip_runner", primaryAdapterConfig, fallback })).toBeNull();
+  });
+
+  it("rejects a Paperclip Runner primary running another agent", () => {
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "paperclip_runner",
+      primaryAdapterConfig: { provider: "acpx", acpxAgent: "pi" },
+      fallback: codexFallback,
+    })).toMatch(/supported only/);
+  });
+
+  it("rejects a fallback on the same account as the Claude Code a Paperclip Runner primary runs", () => {
+    const fallback = { ...codexFallback, adapterType: "claude_local" as const, adapterConfig: {}, aiConnection: sharedClaudeBinding };
+    expect(usageLimitFallbackConfigProblem({
+      primaryAdapterType: "paperclip_runner",
+      primaryAdapterConfig: { provider: "acpx", acpxAgent: "claude" },
+      primaryAiConnection: sharedClaudeBinding,
+      fallback,
+    })).toMatch(/different adapter or a different AI account/);
   });
 
   it("requires a fallback account when the primary uses a managed account", () => {

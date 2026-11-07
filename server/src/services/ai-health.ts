@@ -106,6 +106,7 @@ export function aiHealthService(db: Db) {
         id: agents.id,
         adapterType: agents.adapterType,
         model: sql<unknown>`${agents.adapterConfig} -> 'model'`,
+        runnerHarness: sql<Record<string, unknown>>`jsonb_strip_nulls(jsonb_build_object('provider', ${agents.adapterConfig} -> 'provider', 'acpxAgent', ${agents.adapterConfig} -> 'acpxAgent'))`,
         aiConnection: sql<unknown>`${agents.runtimeConfig} -> 'aiConnection'`,
         usageLimitFallback: sql<unknown>`${agents.runtimeConfig} -> 'usageLimitFallback'`,
       })
@@ -156,7 +157,7 @@ export function aiHealthService(db: Db) {
 
     const views = agentRows.map((agent) => {
       const runtimeConfig = { aiConnection: agent.aiConnection, usageLimitFallback: agent.usageLimitFallback };
-      const setup = { adapterType: agent.adapterType, runtimeConfig };
+      const setup = { adapterType: agent.adapterType, adapterConfig: agent.runnerHarness, runtimeConfig };
       const fallback = readUsageLimitFallbackConfig(runtimeConfig);
       const primaryAccount = trackAccount(managedBinding(agent.aiConnection));
       const fallbackAccount = fallback ? trackAccount(managedBinding(fallback.aiConnection)) : null;

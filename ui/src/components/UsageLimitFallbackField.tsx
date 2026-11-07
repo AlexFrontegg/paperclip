@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  agentHarnessType,
   isUsageLimitFallbackAdapterType,
   isUsageLimitFallbackStateActive,
   readUsageLimitFallbackState,
@@ -73,7 +74,9 @@ export function UsageLimitFallbackField({
   const [modelOpen, setModelOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const enabled = value?.enabled === true;
-  const fallbackAdapterType = value?.adapterType ?? defaultFallbackAdapter(primaryAdapterType);
+  // A Paperclip Runner agent counts as the Claude Code or Codex agent it runs.
+  const primaryHarness = agentHarnessType(primaryAdapterType, primaryAdapterConfig);
+  const fallbackAdapterType = value?.adapterType ?? defaultFallbackAdapter(primaryHarness);
   const fallbackModel = typeof value?.adapterConfig?.model === "string" ? value.adapterConfig.model : "";
   const { data: models = [] } = useQuery({
     queryKey: queryKeys.agents.adapterModels(companyId, fallbackAdapterType, environmentId ?? null),
@@ -81,7 +84,7 @@ export function UsageLimitFallbackField({
     enabled: enabled,
   });
 
-  if (!isUsageLimitFallbackAdapterType(primaryAdapterType)) {
+  if (!isUsageLimitFallbackAdapterType(primaryHarness)) {
     if (!enabled || !value) return null;
     // Keep a way to turn off a fallback that the new primary adapter cannot use, or saving would be blocked.
     return (
@@ -106,7 +109,7 @@ export function UsageLimitFallbackField({
     switchBack: "on_reset",
     switchWhenUnavailable: true,
   };
-  const primaryLabel = getAdapterDisplay(primaryAdapterType).label;
+  const primaryLabel = getAdapterDisplay(primaryHarness).label;
   const permissionDefaults = usageLimitFallbackPermissionDefaults(primaryAdapterConfig, fallbackAdapterType);
   const sameAdapter = fallbackAdapterType === primaryAdapterType;
   const effortKey = effortKeyFor(fallbackAdapterType);
@@ -168,7 +171,7 @@ export function UsageLimitFallbackField({
                 </SelectContent>
               </Select>
             </Field>
-            {fallbackAdapterType === primaryAdapterType && primaryAiConnection?.mode === "responsible_user" && (
+            {fallbackAdapterType === primaryHarness && primaryAiConnection?.mode === "responsible_user" && (
               <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="usage-limit-fallback-shares-default">
                 The primary already uses your default account. Choose a shared account for the fallback: connecting a new account here makes it your default, which moves the primary too.
               </p>

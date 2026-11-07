@@ -80,11 +80,16 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
   };
 }
 
-type AgentSetup = Pick<AgentRow, "adapterType" | "runtimeConfig">;
+type AgentSetup = Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig">;
 
 export function fallbackConfigProblem(agent: AgentSetup, fallback: UsageLimitFallbackConfig): string | null {
   const primaryAiConnection = aiRuntimeConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
-  return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
+  return usageLimitFallbackConfigProblem({
+    primaryAdapterType: agent.adapterType,
+    primaryAdapterConfig: agent.adapterConfig,
+    primaryAiConnection,
+    fallback,
+  });
 }
 
 function primaryAiAccount(agent: AgentSetup): AiConnectionBinding | null {
@@ -155,6 +160,44 @@ export function isRunAiAccountFailure(run: Pick<RunRow, "errorCode" | "resultJso
   const resultJson = isRecord(run.resultJson) ? run.resultJson : {};
   const configurationIncomplete = isRecord(resultJson.configurationIncomplete) ? resultJson.configurationIncomplete : {};
   return configurationIncomplete.reason === "ai_connection_unavailable";
+}
+
+const RUNNER_USAGE_LIMIT_CATEGORIES = ["quota_exhausted", "rate_limit"];
+
+/**
+ * A Paperclip Runner turn that stopped on the provider's usage limit, with the reset time when the provider gave one.
+ * Codex reports its own code; Claude reports a typed provider failure, where a rate limit that ended the turn counts too.
+ */
+export function readRunnerUsageLimit(errorCode: string | null | undefined, providerFailure: unknown): { retryNotBefore: Date | null } | null {
+  const failure = isRecord(providerFailure) ? providerFailure : {};
+  const usageLimit = errorCode === "native_provider_usage_limit"
+    || (errorCode === "native_provider_terminal_failed" && RUNNER_USAGE_LIMIT_CATEGORIES.includes(String(failure.category)));
+  if (!usageLimit) return null;
+  const retryAt = typeof failure.retryAt === "string" ? new Date(failure.retryAt) : null;
+  return { retryNotBefore: retryAt && Number.isFinite(retryAt.getTime()) ? retryAt : null };
+}
+
+/** Whether the agent's fallback can take over a Runner turn that stopped on a usage limit, so the Runner need not block the task. */
+export async function usageLimitFallbackCanTakeOverRunnerTurn(db: Db, input: {
+  runId: string;
+  failureCode: string;
+  providerFailure: unknown;
+  now: Date;
+}): Promise<boolean> {
+  const usageLimit = readRunnerUsageLimit(input.failureCode, input.providerFailure);
+  if (!usageLimit) return false;
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+  if (!run) return false;
+  const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
+  if (!agent) return false;
+  const check = await checkUsageLimitFallbackActivation(db, {
+    agent,
+    run,
+    reason: "provider_quota",
+    retryNotBefore: usageLimit.retryNotBefore,
+    now: input.now,
+  });
+  return "fallback" in check;
 }
 
 export async function readAgentUsageLimitFallbackState(db: Db, agentId: string): Promise<UsageLimitFallbackState | null> {
@@ -298,32 +341,47 @@ export type UsageLimitFallbackActivation =
   | { activated: true; state: UsageLimitFallbackState }
   | { activated: false; reason: string };
 
-/**
- * Turns the fallback on after a primary-lane failure: a usage limit, or, when the fallback is set to
- * also switch on it, an outage or a signed-out account. A later end time already active is kept.
- */
-export async function activateUsageLimitFallback(db: Db, input: {
+type UsageLimitFallbackActivationInput = {
   agent: AgentRow;
   run: RunRow;
   reason?: UsageLimitFallbackReason;
   retryNotBefore: Date | null;
   now: Date;
-}): Promise<UsageLimitFallbackActivation> {
+};
+
+/** Whether the fallback can take over after this failure. Read-only, so a caller can decide before anything switches. */
+async function checkUsageLimitFallbackActivation(
+  db: Db,
+  input: UsageLimitFallbackActivationInput,
+): Promise<{ fallback: UsageLimitFallbackConfig } | { problem: string }> {
   const { agent, run, now } = input;
   const reason = input.reason ?? "provider_quota";
-  if (runUsageLimitLane(run) === "fallback") return { activated: false, reason: "already_on_fallback" };
-  if (reason === "provider_quota" && !input.retryNotBefore && isProviderCapacityFailure(run)) return { activated: false, reason: "provider_capacity" };
+  if (runUsageLimitLane(run) === "fallback") return { problem: "already_on_fallback" };
+  if (reason === "provider_quota" && !input.retryNotBefore && isProviderCapacityFailure(run)) return { problem: "provider_capacity" };
   const fallback = readUsageLimitFallbackConfig(agent.runtimeConfig);
-  if (!fallback || (reason !== "provider_quota" && !fallback.switchWhenUnavailable)) return { activated: false, reason: "not_configured" };
-  const problem = fallbackConfigProblem(agent, fallback);
-  if (problem) return { activated: false, reason: problem };
+  if (!fallback || (reason !== "provider_quota" && !fallback.switchWhenUnavailable)) return { problem: "not_configured" };
+  const configProblem = fallbackConfigProblem(agent, fallback);
+  if (configProblem) return { problem: configProblem };
   const existing = await readAgentUsageLimitFallbackState(db, agent.id);
   if (existing?.suspendedReason && isUsageLimitFallbackStateActive(existing, now)) {
-    return { activated: false, reason: `fallback_suspended:${existing.suspendedReason}` };
+    return { problem: `fallback_suspended:${existing.suspendedReason}` };
   }
   if (!await fallbackAiConnectionSelectable(db, agent, fallback, run.responsibleUserId ?? null)) {
-    return { activated: false, reason: "fallback_ai_connection_unavailable" };
+    return { problem: "fallback_ai_connection_unavailable" };
   }
+  return { fallback };
+}
+
+/**
+ * Turns the fallback on after a primary-lane failure: a usage limit, or, when the fallback is set to
+ * also switch on it, an outage or a signed-out account. A later end time already active is kept.
+ */
+export async function activateUsageLimitFallback(db: Db, input: UsageLimitFallbackActivationInput): Promise<UsageLimitFallbackActivation> {
+  const check = await checkUsageLimitFallbackActivation(db, input);
+  if ("problem" in check) return { activated: false, reason: check.problem };
+  const { fallback } = check;
+  const { agent, run, now } = input;
+  const reason = input.reason ?? "provider_quota";
   // Only an account marked signed out can be watched for a reconnect; otherwise the primary is retried on a timer.
   const waitForReconnect = reason === "primary_signed_out"
     && await primaryAccountSignedOut(db, agent, run.responsibleUserId ?? null) === true;
