@@ -24,7 +24,7 @@ import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-wo
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
 import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
-import { usageLimitFallbackCanTakeOverRunnerTurn } from "../usage-limit-fallback.js";
+import { RUNNER_USAGE_LIMIT_HANDOFF_KEY, usageLimitFallbackCanTakeOverRunnerTurn } from "../usage-limit-fallback.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
@@ -10705,6 +10705,7 @@ async function executePaperclipNativeSessionWithinScope(
       });
       // A usage limit the agent's fallback can take over is left to it instead of blocking the task for a person.
       const handedToUsageLimitFallback = phase === "terminal_failure"
+        && !ownershipUnverified
         && recoveryEvidence.recoveryMode !== "ambiguous_state"
         && input.runnerExecutionTarget?.kind !== "remote"
         && await usageLimitFallbackCanTakeOverRunnerTurn(input.db, {
@@ -10954,6 +10955,7 @@ async function executePaperclipNativeSessionWithinScope(
             error: message,
             resultJson: sql`(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) - 'remoteRunnerRecovery')
               || ${JSON.stringify(remoteRunnerRecovery ? { remoteRunnerRecovery } : {})}::jsonb
+              || ${JSON.stringify(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true } : {})}::jsonb
               || ${providerFailure ? sql`jsonb_build_object('providerFailure', coalesce(${heartbeatRuns.resultJson}->'providerFailure', ${JSON.stringify(providerFailure)}::jsonb))` : sql`'{}'::jsonb`}`,
             errorCode: ownershipUnverified
               ? NATIVE_OWNERSHIP_UNVERIFIED_ERROR_CODE

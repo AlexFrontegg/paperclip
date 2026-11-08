@@ -1,3 +1,6 @@
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const DAY_MS = 24 * 60 * 60_000;
+
 /**
  * Reads a provider's "try again at 4:30 PM (America/Chicago)" or
  * "resets 2am (UTC)" wording as the next matching wall-clock instant after
@@ -5,13 +8,14 @@
  */
 export function parseProviderQuotaClockReset(error: string, now: Date) {
   const match = error.match(
-    /(?:try again at|resets?(?:\s+at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+    /(?:try again at|resets?(?:\s+at)?)\s+(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
   if (!match) return null;
 
-  const hourValue = Number.parseInt(match[1] ?? "", 10);
-  const minute = Number.parseInt(match[2] ?? "0", 10);
-  const meridiem = (match[3] ?? "").toLowerCase();
+  const [, monthName, dayText, yearText] = match;
+  const hourValue = Number.parseInt(match[4] ?? "", 10);
+  const minute = Number.parseInt(match[5] ?? "0", 10);
+  const meridiem = (match[6] ?? "").toLowerCase();
   if (!Number.isInteger(hourValue)) return null;
   if (
     meridiem ? hourValue < 1 || hourValue > 12 : hourValue < 0 || hourValue > 23
@@ -21,8 +25,17 @@ export function parseProviderQuotaClockReset(error: string, now: Date) {
 
   let hour = meridiem ? hourValue % 12 : hourValue;
   if (meridiem === "p") hour += 12;
-  const timeZone = (match[4] ?? match[5])?.trim();
+  const timeZone = (match[7] ?? match[8])?.trim();
+  const monthIndex = MONTHS.indexOf(monthName?.toLowerCase() ?? "");
+  const day = Number(dayText);
+  // A named day, "resets Nov 12 at 6:49am (UTC)", is in the year given, else this year, or the next once over a day past.
+  const namedDay = (resetInYear: (year: number) => Date, currentYear: number) => {
+    if (yearText) return resetInYear(Number(yearText));
+    const thisYear = resetInYear(currentYear);
+    return thisYear.getTime() < now.getTime() - DAY_MS ? resetInYear(currentYear + 1) : thisYear;
+  };
   if (!timeZone) {
+    if (monthName) return namedDay((year) => new Date(Date.UTC(year, monthIndex, day, hour, minute)), now.getUTCFullYear());
     const retryAt = new Date(now);
     retryAt.setUTCHours(hour, minute, 0, 0);
     if (retryAt.getTime() <= now.getTime())
@@ -46,15 +59,14 @@ export function parseProviderQuotaClockReset(error: string, now: Date) {
           .map((part) => [part.type, part.value]),
       );
     const nowParts = wallClock(now);
-    const buildRetryAt = (dayOffset: number) => {
+    const buildRetryAt = (
+      dayOffset: number,
+      year = Number(nowParts.year),
+      targetMonthIndex = Number(nowParts.month) - 1,
+      targetDayOfMonth = Number(nowParts.day),
+    ) => {
       const targetDay = new Date(
-        Date.UTC(
-          Number(nowParts.year),
-          Number(nowParts.month) - 1,
-          Number(nowParts.day) + dayOffset,
-          hour,
-          minute,
-        ),
+        Date.UTC(year, targetMonthIndex, targetDayOfMonth + dayOffset, hour, minute),
       );
       let candidate = targetDay;
       const targetMs = targetDay.getTime();
@@ -73,6 +85,7 @@ export function parseProviderQuotaClockReset(error: string, now: Date) {
       }
       return candidate;
     };
+    if (monthName) return namedDay((year) => buildRetryAt(0, year, monthIndex, day), Number(nowParts.year));
     const sameDay = buildRetryAt(0);
     return sameDay.getTime() > now.getTime() ? sameDay : buildRetryAt(1);
   } catch {

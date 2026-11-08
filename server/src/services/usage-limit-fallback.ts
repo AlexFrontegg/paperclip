@@ -162,30 +162,26 @@ export function isRunAiAccountFailure(run: Pick<RunRow, "errorCode" | "resultJso
   return configurationIncomplete.reason === "ai_connection_unavailable";
 }
 
-const RUNNER_USAGE_LIMIT_CATEGORIES = ["quota_exhausted", "rate_limit"];
+/** A Runner turn stopped on the account's usage limit; a rate limit clears within minutes, so it does not count. */
+export function isRunnerUsageLimit(failureCode: string, providerFailure: { category: string } | null): boolean {
+  return failureCode === "native_provider_usage_limit" && providerFailure?.category !== "rate_limit";
+}
 
-/**
- * A Paperclip Runner turn that stopped on the provider's usage limit, with the reset time when the provider gave one.
- * Codex reports its own code; Claude reports a typed provider failure, where a rate limit that ended the turn counts too.
- */
-export function readRunnerUsageLimit(errorCode: string | null | undefined, providerFailure: unknown): { retryNotBefore: Date | null } | null {
-  const failure = isRecord(providerFailure) ? providerFailure : {};
-  const usageLimit = errorCode === "native_provider_usage_limit"
-    || (errorCode === "native_provider_terminal_failed" && RUNNER_USAGE_LIMIT_CATEGORIES.includes(String(failure.category)));
-  if (!usageLimit) return null;
-  const retryAt = typeof failure.retryAt === "string" ? new Date(failure.retryAt) : null;
-  return { retryNotBefore: retryAt && Number.isFinite(retryAt.getTime()) ? retryAt : null };
+/** Set on a Runner run whose task was left to the fallback instead of blocked, so the failure handler switches on the same decision. */
+export const RUNNER_USAGE_LIMIT_HANDOFF_KEY = "usageLimitFallbackHandoff";
+
+export function runnerTurnHandedToFallback(run: Pick<RunRow, "resultJson">): boolean {
+  return isRecord(run.resultJson) && run.resultJson[RUNNER_USAGE_LIMIT_HANDOFF_KEY] === true;
 }
 
 /** Whether the agent's fallback can take over a Runner turn that stopped on a usage limit, so the Runner need not block the task. */
 export async function usageLimitFallbackCanTakeOverRunnerTurn(db: Db, input: {
   runId: string;
   failureCode: string;
-  providerFailure: unknown;
+  providerFailure: { category: string } | null;
   now: Date;
 }): Promise<boolean> {
-  const usageLimit = readRunnerUsageLimit(input.failureCode, input.providerFailure);
-  if (!usageLimit) return false;
+  if (!isRunnerUsageLimit(input.failureCode, input.providerFailure)) return false;
   const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
   if (!run) return false;
   const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
@@ -194,7 +190,7 @@ export async function usageLimitFallbackCanTakeOverRunnerTurn(db: Db, input: {
     agent,
     run,
     reason: "provider_quota",
-    retryNotBefore: usageLimit.retryNotBefore,
+    retryNotBefore: null,
     now: input.now,
   });
   return "fallback" in check;

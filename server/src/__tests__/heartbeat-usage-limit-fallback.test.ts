@@ -531,6 +531,38 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(retry.scheduledRetryAt!.toISOString()).toBe(primaryBackAt);
   });
 
+  it("runs the fallback while the primary's provider limit holds only the primary's work", async () => {
+    const agent = await seedAgent();
+    const limitedAt = new Date(Date.now() - 60_000);
+    await db.insert(heartbeatRuns).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "failed",
+      runtimeMode: "native",
+      errorCode: "native_provider_usage_limit",
+      startedAt: new Date(limitedAt.getTime() - 60_000),
+      finishedAt: limitedAt,
+      resultJson: { providerFailure: {
+        schema: "paperclip.provider-failure.v1", provider: "anthropic", phase: "turn", category: "quota_exhausted",
+        message: "ACP agent reported a terminal limit failure.\nYou've hit your session limit", retryability: "requires_action",
+      } },
+    });
+    await activeFallback(agent);
+    claudeHitsLimit = false;
+
+    const onFallback = await waitForRun((await heartbeat.invoke(agent.id, "automation", {}, "system"))!.id);
+    expect(dispatchOf(onFallback)?.lane).toBe("fallback");
+    expect(onFallback.status).toBe("succeeded");
+
+    await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", new Date());
+    const onPrimary = await waitForRun((await heartbeat.invoke(agent.id, "automation", {}, "system"))!.id);
+    expect(dispatchOf(onPrimary)?.lane).not.toBe("fallback");
+    expect(onPrimary).toMatchObject({ status: "cancelled", errorCode: "provider_limit_wait" });
+    expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local"]);
+  });
+
   it("drops a fallback account attribution copied into a primary run", async () => {
     const agent = await seedAgent();
     claudeHitsLimit = false;

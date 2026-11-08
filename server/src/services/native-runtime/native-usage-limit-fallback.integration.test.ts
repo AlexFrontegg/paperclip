@@ -11,7 +11,7 @@ import {
   issues,
   nativeRunFinalizations,
 } from "@paperclipai/db";
-import type { ControlPlanePort, NativeExecutionInputV1, PrpEvent } from "@paperclipai/paperclip-runner";
+import type { ControlPlanePort, NativeExecutionInputV1, PrpEvent, ProviderFailure } from "@paperclipai/paperclip-runner";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 
 const provider = vi.hoisted(() => ({ execute: vi.fn() }));
@@ -21,21 +21,58 @@ vi.mock("../../vendor/paperclip-runner/index.js", async (importOriginal) => ({
 }));
 
 import { NativeProviderTerminalFailure } from "../../vendor/paperclip-runner/index.js";
+import { createPostgresWakeQueueAdapter } from "../../modules/wake-queue/adapters/postgres.js";
+import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 import { executePaperclipNativeSession } from "./native-session-executor.js";
 import { buildNativeCompletionContract } from "./completion-contracts.js";
 import { prepareNativeHeartbeatRun } from "./prepare-native-run.js";
 
 type Harness = "codex" | "claude";
+type RunnerTerminal = { harness: Harness; error: Record<string, unknown> & { providerFailure: ProviderFailure } };
 
-const claudeUsageLimit = {
-  schema: "paperclip.provider-failure.v1",
-  provider: "anthropic",
-  phase: "turn",
-  category: "quota_exhausted",
-  message: "Claude usage limit reached",
-  retryAt: "2030-04-22T18:00:00.000Z",
-  retryability: "requires_action",
-} as const;
+// The acpx sidecar's terminal for the titles the real Claude Code 2.1.286 printed.
+function claudeTerminal(category: ProviderFailure["category"], title: string): RunnerTerminal {
+  const message = "ACP agent reported a terminal limit failure.";
+  return {
+    harness: "claude",
+    error: {
+      message,
+      code: "RUNTIME",
+      providerFailure: {
+        schema: "paperclip.provider-failure.v1",
+        provider: "anthropic",
+        phase: "turn",
+        category,
+        message: `${message}\n${title}`,
+        retryability: category === "quota_exhausted" ? "requires_action" : "unknown",
+      },
+    },
+  };
+}
+
+const codexUsageLimitMessage = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:31 PM.";
+const terminals = {
+  codexUsageLimit: {
+    harness: "codex",
+    error: {
+      codexErrorInfo: "usageLimitExceeded",
+      message: codexUsageLimitMessage,
+      providerFailure: {
+        schema: "paperclip.provider-failure.v1",
+        provider: "openai",
+        phase: "turn",
+        category: "quota_exhausted",
+        message: codexUsageLimitMessage,
+        providerCode: "usageLimitExceeded",
+        retryability: "requires_action",
+      },
+    },
+  },
+  claudeWeeklyLimit: claudeTerminal("quota_exhausted", "You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)"),
+  claudeApiKeyRateLimit: claudeTerminal("rate_limit", "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later."),
+  claudeMaxTurns: claudeTerminal("unknown", "Reached maximum number of turns (5)"),
+  claudeMaxBudget: claudeTerminal("unknown", "Reached maximum budget ($1)"),
+} satisfies Record<string, RunnerTerminal>;
 
 const runnerSetups: Record<Harness, {
   adapterConfig: Record<string, unknown>;
@@ -72,15 +109,15 @@ describe("a Paperclip Runner usage limit and the agent's usage-limit fallback", 
     await temporary?.cleanup();
   });
 
-  async function failRunnerTurnOnUsageLimit(harness: Harness, withFallback: boolean) {
-    const setup = runnerSetups[harness];
+  async function failRunnerTurn(terminal: RunnerTerminal, withFallback: boolean) {
+    const setup = runnerSetups[terminal.harness];
     const agentId = randomUUID();
     const issueId = randomUUID();
     const runId = randomUUID();
     await db.insert(agents).values({
       id: agentId,
       companyId,
-      name: `Runner ${harness} ${withFallback ? "with" : "without"} fallback`,
+      name: `Runner ${terminal.harness} ${withFallback ? "with" : "without"} fallback`,
       status: "active",
       adapterType: "paperclip_runner",
       adapterConfig: setup.adapterConfig,
@@ -142,7 +179,7 @@ describe("a Paperclip Runner usage limit and the agent's usage-limit fallback", 
       backendKind: "mock" as const,
       sourceInstanceId: native.runnerInstanceId,
     };
-    const codexUsageLimitEvent: PrpEvent = {
+    const turnFailed: PrpEvent = {
       schema: "paperclip.prp.event.v1",
       runId,
       normalizedSessionId: native.normalizedSessionId,
@@ -155,15 +192,14 @@ describe("a Paperclip Runner usage limit and the agent's usage-limit fallback", 
       schemaVersion: 1,
       priority: 0,
       emittedAt: new Date().toISOString(),
-      payload: { status: "failed", error: { codexErrorInfo: "usageLimitExceeded", message: "Usage limit reached" } },
+      payload: { status: "failed", error: terminal.error },
     };
+    // Like the Runner: the committed turn.failed event, then the terminal failure it raises from it.
     provider.execute.mockReset().mockImplementation(async (options: { controlPlane: ControlPlanePort }) => {
       await options.controlPlane.openRun(openInput);
-      if (harness === "claude") {
-        throw new NativeProviderTerminalFailure("billing_error", false, "Claude usage limit reached", claudeUsageLimit);
-      }
-      await options.controlPlane.appendEvent(codexUsageLimitEvent);
-      throw new Error("provider turn stopped");
+      await options.controlPlane.appendEvent(turnFailed);
+      const code = typeof terminal.error.code === "string" ? terminal.error.code : "provider_turn_failed";
+      throw new NativeProviderTerminalFailure(code, false, String(terminal.error.message), terminal.error.providerFailure);
     });
     await expect(executePaperclipNativeSession({
       db,
@@ -175,27 +211,79 @@ describe("a Paperclip Runner usage limit and the agent's usage-limit fallback", 
       },
     })).rejects.toThrow();
 
+    return { runId, issueId, agentId, ...await readOutcome(runId, issueId) };
+  }
+
+  async function readOutcome(runId: string, issueId: string) {
     const [failedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
     const recoveryCards = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
     return { failedRun, task, recoveryCards };
   }
 
-  it.each(["codex", "claude"] as const)("leaves the task to the fallback instead of blocking it (%s on the Runner)", async (harness) => {
-    const { failedRun, task, recoveryCards } = await failRunnerTurnOnUsageLimit(harness, true);
-    expect(failedRun.status).toBe("failed");
-    expect(failedRun.errorCode).toBe(harness === "codex" ? "native_provider_usage_limit" : "native_provider_terminal_failed");
-    if (harness === "claude") {
-      expect(failedRun.resultJson?.providerFailure).toMatchObject({ category: "quota_exhausted", retryAt: claudeUsageLimit.retryAt });
-    }
+  async function releaseRun(runId: string) {
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, {
+        resolveResponsibleUserId: async () => null,
+        getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+        resolveSessionBeforeForWakeup: async () => null,
+      }),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+    return release({ companyId, runId, now: new Date(), suppressImmediateRecovery: true });
+  }
+
+  it.each([
+    ["Codex's usage limit", terminals.codexUsageLimit],
+    ["Claude's weekly limit", terminals.claudeWeeklyLimit],
+  ])("leaves the task to the fallback instead of blocking it (%s)", async (_label, terminal) => {
+    const { failedRun, task, recoveryCards } = await failRunnerTurn(terminal, true);
+    expect(failedRun).toMatchObject({ status: "failed", errorCode: "native_provider_usage_limit" });
+    expect(failedRun.resultJson).toMatchObject({ usageLimitFallbackHandoff: true, providerFailure: terminal.error.providerFailure });
     expect(task.status).toBe("in_progress");
     expect(task.executionRunId).toBeNull();
     expect(recoveryCards).toEqual([]);
   });
 
-  it.each(["codex", "claude"] as const)("still blocks the task for a person when the agent has no fallback (%s on the Runner)", async (harness) => {
-    const { task, recoveryCards } = await failRunnerTurnOnUsageLimit(harness, false);
+  it.each([
+    ["Codex's usage limit", terminals.codexUsageLimit],
+    ["Claude's weekly limit", terminals.claudeWeeklyLimit],
+  ])("still blocks the task for a person when the agent has no fallback (%s)", async (_label, terminal) => {
+    const { failedRun, task, recoveryCards } = await failRunnerTurn(terminal, false);
+    expect(failedRun.resultJson).not.toHaveProperty("usageLimitFallbackHandoff");
     expect(task.status).toBe("blocked");
-    expect(recoveryCards).toEqual([expect.objectContaining({ ownerType: "board" })]);
+    expect(recoveryCards).toEqual([expect.objectContaining({ ownerType: "board", cause: "native_provider_usage_limit" })]);
+  });
+
+  it.each([
+    ["a rate limit", terminals.claudeApiKeyRateLimit, "native_provider_usage_limit"],
+    ["the turn limit", terminals.claudeMaxTurns, "native_provider_terminal_failed"],
+    ["the budget limit", terminals.claudeMaxBudget, "native_provider_terminal_failed"],
+  ])("blocks the task as upstream does for %s, even with a fallback", async (_label, terminal, errorCode) => {
+    const { failedRun, task, recoveryCards } = await failRunnerTurn(terminal, true);
+    expect(failedRun.errorCode).toBe(errorCode);
+    expect(failedRun.resultJson).not.toHaveProperty("usageLimitFallbackHandoff");
+    expect(task.status).toBe("blocked");
+    expect(recoveryCards).toEqual([expect.objectContaining({ ownerType: "board", cause: errorCode })]);
+  });
+
+  it("blocks a handed-over task for a person when its release finds no fallback retry", async () => {
+    const { runId, issueId } = await failRunnerTurn(terminals.claudeWeeklyLimit, true);
+    await releaseRun(runId);
+    const { task, recoveryCards } = await readOutcome(runId, issueId);
+    expect(task.status).toBe("blocked");
+    expect(recoveryCards).toEqual([expect.objectContaining({ ownerType: "board", status: "active" })]);
+  });
+
+  it("keeps a handed-over task for the fallback retry its release finds", async () => {
+    const { runId, issueId, agentId } = await failRunnerTurn(terminals.claudeWeeklyLimit, true);
+    await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "scheduled_retry", retryOfRunId: runId, invocationSource: "automation",
+      triggerDetail: "system", scheduledRetryAt: new Date(), contextSnapshot: { issueId },
+    });
+    expect((await releaseRun(runId)).outcome.kind).toBe("released");
+    const { task, recoveryCards } = await readOutcome(runId, issueId);
+    expect(task.status).toBe("in_progress");
+    expect(recoveryCards).toEqual([]);
   });
 });

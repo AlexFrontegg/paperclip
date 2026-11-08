@@ -66,6 +66,8 @@ export async function agentProviderLimitCooldown(db: Db, input: {
       eq(heartbeatRuns.agentId, input.agentId),
       gte(heartbeatRuns.startedAt, new Date(now - NATIVE_PROVIDER_LIMIT_WINDOW_MS)),
       ...(input.runId ? [ne(heartbeatRuns.id, input.runId)] : []),
+      // A usage-limit fallback run used another account, so neither its limit nor its success is the primary's.
+      sql`coalesce(${heartbeatRuns.runnerProfileJson} #>> '{adapterDispatch,lane}', 'primary') <> 'fallback'`,
       or(
         eq(heartbeatRuns.status, "succeeded"),
         inArray(heartbeatRuns.errorCode, PROVIDER_LIMIT_ERROR_CODES),

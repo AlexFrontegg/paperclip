@@ -2087,7 +2087,8 @@ export function heartbeatService(
         await finalizeAgentStatus(agent.id, "cancelled");
         return;
       }
-      if (await deferRunForProviderLimit(run, agent, {
+      // A usage-limit fallback run uses another account, so the primary's provider limit does not hold it.
+      if (runUsageLimitLane(run) !== "fallback" && await deferRunForProviderLimit(run, agent, {
         resumingAdmittedRun: !!runOptions.nativeLeaseOwner,
         conversation: isConversation(conversationIdentity),
       })) return;
