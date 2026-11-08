@@ -29,7 +29,7 @@ Goals:
 Non-goals (v1):
 
 - Fallback chains longer than one hop.
-- `paperclip_runner` (native runner) as primary or fallback.
+- `paperclip_runner` (native runner) as the fallback. A Runner primary running Claude Code or Codex is supported; see FORK.md "Paperclip Runner agents".
 - Carrying a provider's private session across providers (not possible; see §6).
 - Fixing the quota classification bugs listed in §9 (separate PRs).
 

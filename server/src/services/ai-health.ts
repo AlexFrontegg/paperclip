@@ -92,7 +92,7 @@ export function aiHealthService(db: Db) {
         inArray(heartbeatRuns.agentId, [...activations.keys()]),
         gte(heartbeatRuns.startedAt, earliest),
         isNotNull(heartbeatRuns.finishedAt),
-        sql`${heartbeatRuns.runnerProfileJson} -> 'adapterDispatch' ->> 'lane' = 'fallback'`,
+        sql`${heartbeatRuns.runnerProfileJson} #>> '{adapterDispatch,lane}' = 'fallback'`,
       ))
       .orderBy(heartbeatRuns.agentId, desc(heartbeatRuns.finishedAt));
     return new Set(latestRuns

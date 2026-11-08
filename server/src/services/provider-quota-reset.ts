@@ -1,14 +1,15 @@
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-const DAY_MS = 24 * 60 * 60_000;
+const HALF_YEAR_MS = 182 * 24 * 60 * 60_000;
 
 /**
  * Reads a provider's "try again at 4:30 PM (America/Chicago)" or
  * "resets 2am (UTC)" wording as the next matching wall-clock instant after
- * `now`. A clock without a time zone is read as UTC.
+ * `now`; a named day, "resets Nov 12 at 6:49am (UTC)", is its nearest
+ * occurrence and can be in the past. A clock without a time zone is read as UTC.
  */
 export function parseProviderQuotaClockReset(error: string, now: Date) {
   const match = error.match(
-    /(?:try again at|resets?(?:\s+at)?)\s+(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+    /(?:try again at|resets?(?:\s+at)?)\s+(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?,?\s+(?:at\s+)?)?(\d{1,2})(?!\d)(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
   if (!match) return null;
 
@@ -28,11 +29,11 @@ export function parseProviderQuotaClockReset(error: string, now: Date) {
   const timeZone = (match[7] ?? match[8])?.trim();
   const monthIndex = MONTHS.indexOf(monthName?.toLowerCase() ?? "");
   const day = Number(dayText);
-  // A named day, "resets Nov 12 at 6:49am (UTC)", is in the year given, else this year, or the next once over a day past.
+  // A named day is in the year given, else this year, or the next once this year's is half a year past.
   const namedDay = (resetInYear: (year: number) => Date, currentYear: number) => {
     if (yearText) return resetInYear(Number(yearText));
     const thisYear = resetInYear(currentYear);
-    return thisYear.getTime() < now.getTime() - DAY_MS ? resetInYear(currentYear + 1) : thisYear;
+    return thisYear.getTime() < now.getTime() - HALF_YEAR_MS ? resetInYear(currentYear + 1) : thisYear;
   };
   if (!timeZone) {
     if (monthName) return namedDay((year) => new Date(Date.UTC(year, monthIndex, day, hour, minute)), now.getUTCFullYear());

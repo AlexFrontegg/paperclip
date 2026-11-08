@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
-import { readProviderFailure, type ProviderFailure } from "@paperclipai/shared";
+import { agentRuntimeState, heartbeatRuns, type Db } from "@paperclipai/db";
+import { readProviderFailure, USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY, type ProviderFailure } from "@paperclipai/shared";
 import { logger } from "../../middleware/logger.js";
 import { infrastructureRetryDelayMs, PROVIDER_LIMIT_DEFAULT_COOLDOWN_MS } from "../system-recovery-state.js";
 import { parseProviderQuotaClockReset } from "../provider-quota-reset.js";
@@ -68,6 +68,8 @@ export async function agentProviderLimitCooldown(db: Db, input: {
       ...(input.runId ? [ne(heartbeatRuns.id, input.runId)] : []),
       // A usage-limit fallback run used another account, so neither its limit nor its success is the primary's.
       sql`coalesce(${heartbeatRuns.runnerProfileJson} #>> '{adapterDispatch,lane}', 'primary') <> 'fallback'`,
+      // "Return to primary" vouches that the primary's earlier limit is over.
+      sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.updatedAt}) > coalesce((select (${agentRuntimeState.stateJson} ->> ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY})::timestamptz from ${agentRuntimeState} where ${agentRuntimeState.agentId} = ${input.agentId}), '-infinity'::timestamptz)`,
       or(
         eq(heartbeatRuns.status, "succeeded"),
         inArray(heartbeatRuns.errorCode, PROVIDER_LIMIT_ERROR_CODES),

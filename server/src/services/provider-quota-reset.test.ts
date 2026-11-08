@@ -27,8 +27,19 @@ describe("parseProviderQuotaClockReset", () => {
       .toBe("2026-11-12T06:49:00.000Z");
   });
 
+  it("keeps a named day read late in its own year instead of a year ahead", () => {
+    const dayLater = new Date("2026-11-13T10:00:00Z");
+    expect(parseProviderQuotaClockReset(limitFailure("You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)"), dayLater)?.toISOString())
+      .toBe("2026-11-12T06:49:00.000Z");
+  });
+
   it("does not read a turn or budget limit as a reset", () => {
     expect(parseProviderQuotaClockReset(limitFailure("Reached maximum number of turns (5)"), failedAt)).toBeNull();
     expect(parseProviderQuotaClockReset(limitFailure("Reached maximum budget ($1)"), failedAt)).toBeNull();
+  });
+
+  it("does not read a dated reset without a clock time as an hour of its year", () => {
+    expect(parseProviderQuotaClockReset(limitFailure("You've hit your weekly limit · resets Nov 9, 2026"), failedAt)).toBeNull();
+    expect(parseProviderQuotaClockReset("You've hit your usage limit. Try again at Nov 9th, 2026.", failedAt)).toBeNull();
   });
 });

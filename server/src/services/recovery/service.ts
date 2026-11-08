@@ -646,7 +646,7 @@ export function classifyAdapterFailureForRecovery(
   }
 
   const parsedClockReset = parseProviderQuotaClockReset(error, now);
-  if (parsedClockReset) {
+  if (parsedClockReset && parsedClockReset > now) {
     return {
       kind: "provider_quota",
       retryAt: parsedClockReset,
