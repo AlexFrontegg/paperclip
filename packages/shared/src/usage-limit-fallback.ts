@@ -83,6 +83,10 @@ export const usageLimitFallbackStateSchema = z.object({
 export type UsageLimitFallbackState = z.infer<typeof usageLimitFallbackStateSchema>;
 
 export const USAGE_LIMIT_FALLBACK_STATE_KEY = "usageLimitFallback";
+/** When "Return to primary" was pressed; the primary's limit evidence from before it no longer counts. */
+export const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
+/** Marks a Runner run, and its native coordinator, whose task the executor left to the usage-limit fallback. */
+export const RUNNER_USAGE_LIMIT_HANDOFF_KEY = "usageLimitFallbackHandoff";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -159,10 +163,7 @@ export function sameAiConnectionBinding(left: AiConnectionBinding | null | undef
   return sameJsonValue(left, right);
 }
 
-/**
- * Explains why a fallback cannot be used with this primary, or returns null when it can.
- * A Paperclip Runner primary counts as the Claude Code or Codex agent it runs; its fallback runs on that adapter directly.
- */
+/** Explains why a fallback cannot be used with this primary, or returns null; a Runner primary counts as the harness it runs. */
 export function usageLimitFallbackConfigProblem(input: {
   primaryAdapterType: string;
   primaryAdapterConfig?: Record<string, unknown>;
@@ -171,7 +172,7 @@ export function usageLimitFallbackConfigProblem(input: {
 }): string | null {
   const primaryHarness = agentHarnessType(input.primaryAdapterType, input.primaryAdapterConfig);
   if (!isUsageLimitFallbackAdapterType(primaryHarness)) {
-    return `Usage-limit fallback is supported only for Claude Code and Codex agents, directly or on the Paperclip Runner`;
+    return "Usage-limit fallback is supported only for Claude Code and Codex agents, directly or on the Paperclip Runner";
   }
   if (input.primaryAiConnection?.mode === "router") {
     return "Usage-limit fallback is not available for an agent on a connection pool: the pool already moves tasks between accounts";

@@ -13,7 +13,8 @@ import { createHeartbeatRunState } from "./run-state.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import * as extracted from "./retries.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
-import { effectiveAgentForRun, readAgentUsageLimitFallbackState, resolveAdapterDispatchForClaim } from "../usage-limit-fallback.js";
+import type { ProviderFailure } from "@paperclipai/shared";
+import { effectiveAgentForRun, handRunnerTurnToUsageLimitFallback, readAgentUsageLimitFallbackState, resolveAdapterDispatchForClaim, suspendUsageLimitFallback } from "../usage-limit-fallback.js";
 import { agentProviderLimitCooldown } from "../native-runtime/native-startup-retry.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -256,13 +257,14 @@ describePostgres("heartbeat retry module database wiring", () => {
     expect(successor.contextSnapshot).toMatchObject({ codexTransientFallbackMode: "same_session" });
   });
 
-  describe("a Paperclip Runner turn that stopped on a usage limit", () => {
-    const codexUsageLimit = {
+  describe("a Paperclip Runner turn the executor left to the usage-limit fallback", () => {
+    const codexUsageLimit: ProviderFailure = {
       schema: "paperclip.provider-failure.v1", provider: "openai", phase: "turn", category: "quota_exhausted",
       message: "You've hit your usage limit. Try again at 11:31 PM.", providerCode: "usageLimitExceeded", retryability: "requires_action",
     };
 
-    async function runnerFixture(failure: { resultJson: Record<string, unknown>; finishedAt?: Date; contextSnapshot?: Record<string, unknown> }) {
+    // The state the executor leaves: the fallback on, the run failed with the hand-off mark, and the task's execution lock cleared.
+    async function runnerFixture(failure: { providerFailure: ProviderFailure; handedOff: boolean; finishedAt?: Date; contextSnapshot?: Record<string, unknown> }) {
       const { companyId, agent, issue, run } = await fixture();
       const [runnerAgent] = await db.update(agents).set({
         adapterType: "paperclip_runner",
@@ -270,14 +272,20 @@ describePostgres("heartbeat retry module database wiring", () => {
         runtimeConfig: { usageLimitFallback: { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fable-5-1" } } },
       }).where(eq(agents.id, agent.id)).returning();
       const finishedAt = failure.finishedAt ?? new Date();
+      if (failure.handedOff) {
+        expect(await handRunnerTurnToUsageLimitFallback(db, {
+          runId: run.id, failureCode: "native_provider_usage_limit", providerFailure: failure.providerFailure, now: finishedAt,
+        })).toBe(true);
+      }
       const [failedRun] = await db.update(heartbeatRuns).set({
         runtimeMode: "native",
         errorCode: "native_provider_usage_limit",
         startedAt: new Date(finishedAt.getTime() - 60_000),
         finishedAt,
-        resultJson: failure.resultJson,
+        resultJson: { providerFailure: failure.providerFailure, ...(failure.handedOff ? { usageLimitFallbackHandoff: true } : {}) },
         contextSnapshot: { issueId: issue.id, ...failure.contextSnapshot },
       }).where(eq(heartbeatRuns.id, run.id)).returning();
+      await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, issue.id));
       return { companyId, agent: runnerAgent, issue, run: failedRun };
     }
 
@@ -285,8 +293,8 @@ describePostgres("heartbeat retry module database wiring", () => {
       return db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, runId)));
     }
 
-    it("switches to the fallback and schedules the next turn on Claude Code right away", async () => {
-      const { companyId, agent, run } = await runnerFixture({ resultJson: { providerFailure: codexUsageLimit, usageLimitFallbackHandoff: true } });
+    it("schedules the next turn on Claude Code right away and records the switch", async () => {
+      const { companyId, agent, run } = await runnerFixture({ providerFailure: codexUsageLimit, handedOff: true });
       const before = Date.now();
       expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
       expect(await readAgentUsageLimitFallbackState(db, agent.id)).toMatchObject({
@@ -303,6 +311,8 @@ describePostgres("heartbeat retry module database wiring", () => {
       const fallbackAgent = effectiveAgentForRun(agent, { runnerProfileJson: { adapterDispatch: dispatch } });
       expect(fallbackAgent.adapterType).toBe("claude_local");
       expect(fallbackAgent.adapterConfig).toEqual({ model: "claude-fable-5-1" });
+      expect(await db.select({ action: activityLog.action }).from(activityLog).where(eq(activityLog.runId, run.id)))
+        .toEqual([{ action: "agent.usage_limit_fallback_activated" }]);
     });
 
     it("keeps the fallback until the reset the provider-limit hold reads from Claude's dated weekly title", async () => {
@@ -311,29 +321,38 @@ describePostgres("heartbeat retry module database wiring", () => {
       const resetDay = resetAt.toLocaleString("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
       const resetClock = resetAt.toLocaleString("en-US", { timeZone: "UTC", hour: "numeric", minute: "2-digit", hour12: true })
         .replace(/\s/g, "").toLowerCase();
-      const weeklyLimit = {
+      const weeklyLimit: ProviderFailure = {
         schema: "paperclip.provider-failure.v1", provider: "anthropic", phase: "turn", category: "quota_exhausted",
         message: `ACP agent reported a terminal limit failure.\nYou've hit your weekly limit · resets ${resetDay} at ${resetClock} (UTC)`,
         retryability: "requires_action",
       };
-      const { agent, run } = await runnerFixture({ finishedAt: failedAt, resultJson: { providerFailure: weeklyLimit, usageLimitFallbackHandoff: true } });
-      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
+      const { agent, run } = await runnerFixture({ finishedAt: failedAt, providerFailure: weeklyLimit, handedOff: true });
       expect((await readAgentUsageLimitFallbackState(db, agent.id))?.activeUntil).toBe(resetAt.toISOString());
       const hold = await agentProviderLimitCooldown(db, { companyId: run.companyId, agentId: agent.id, now: new Date() });
       expect(hold?.resetAt.toISOString()).toBe(resetAt.toISOString());
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
     });
 
     it("gives the fallback's turn an attempt of its own after the task used its retries", async () => {
       const { companyId, agent, run } = await runnerFixture({
-        resultJson: { providerFailure: codexUsageLimit, usageLimitFallbackHandoff: true },
+        providerFailure: codexUsageLimit,
+        handedOff: true,
         contextSnapshot: { executionRetryAccounting: { version: 1, failureRetries: extracted.BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS, maxTurnContinuations: 0 } },
       });
       expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
       expect(await retryOf(companyId, run.id)).toEqual([expect.objectContaining({ status: "scheduled_retry" })]);
     });
 
+    it("waits for the primary's reset when the fallback was suspended before its turn", async () => {
+      const { companyId, agent, run } = await runnerFixture({ providerFailure: codexUsageLimit, handedOff: true });
+      const suspended = await suspendUsageLimitFallback(db, agent.id, "claude_auth_required", new Date());
+      expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(true);
+      const [successor] = await retryOf(companyId, run.id);
+      expect(successor.scheduledRetryAt!.toISOString()).toBe(suspended!.activeUntil);
+    });
+
     it("leaves a usage limit the Runner blocked for a person to that person", async () => {
-      const { companyId, agent, run } = await runnerFixture({ resultJson: { providerFailure: codexUsageLimit } });
+      const { companyId, agent, run } = await runnerFixture({ providerFailure: codexUsageLimit, handedOff: false });
       expect(await boundRetries().retries.handleUsageLimitFallbackAccountFailure(run, agent)).toBe(false);
       expect(await readAgentUsageLimitFallbackState(db, agent.id)).toBeNull();
       expect(await retryOf(companyId, run.id)).toEqual([]);

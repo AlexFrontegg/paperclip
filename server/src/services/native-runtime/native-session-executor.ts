@@ -24,7 +24,7 @@ import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-wo
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
 import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
-import { RUNNER_USAGE_LIMIT_HANDOFF_KEY, usageLimitFallbackCanTakeOverRunnerTurn } from "../usage-limit-fallback.js";
+import { handRunnerTurnToUsageLimitFallback, RUNNER_USAGE_LIMIT_HANDOFF_KEY } from "../usage-limit-fallback.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
@@ -10703,17 +10703,20 @@ async function executePaperclipNativeSessionWithinScope(
         failureCode,
         agentId: input.execution.binding.agentId,
       });
-      // A usage limit the agent's fallback can take over is left to it instead of blocking the task for a person.
-      const handedToUsageLimitFallback = phase === "terminal_failure"
+      // The fallback takes over a Runner usage limit; the Runner's own checkpointed failed terminal is the only ambiguity allowed.
+      const usageLimitFallbackActivated = phase === "terminal_failure"
         && !ownershipUnverified
-        && recoveryEvidence.recoveryMode !== "ambiguous_state"
+        && (recoveryEvidence.recoveryMode !== "ambiguous_state" || error instanceof NativeProviderTerminalFailure)
         && input.runnerExecutionTarget?.kind !== "remote"
-        && await usageLimitFallbackCanTakeOverRunnerTurn(input.db, {
+        && await handRunnerTurnToUsageLimitFallback(input.db, {
           runId: input.execution.binding.runId,
           failureCode: sourceFailureCode,
           providerFailure,
           now,
-        }).catch(() => false);
+        }).catch((handOffError: unknown) => {
+          logger.warn({ err: handOffError, runId: input.execution.binding.runId }, "usage-limit fallback hand-off failed; the task is blocked as usual");
+          return false;
+        });
       const { exhausted } = recoveryProjection;
       const integrityFailure =
         sourceFailureCode === "native_event_replay_conflict";
@@ -10742,6 +10745,14 @@ async function executePaperclipNativeSessionWithinScope(
             ),
           )
           .for("update");
+        const stillOwnsTask =
+          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
+          ["in_progress", "in_review"].includes(failureTask.status) &&
+          (!failureTask.executionRunId ||
+            failureTask.executionRunId === input.execution.binding.runId) &&
+          (!failureTask.checkoutRunId ||
+            failureTask.checkoutRunId === input.execution.binding.runId);
+        const handedToUsageLimitFallback = usageLimitFallbackActivated && stillOwnsTask;
         await notifyExecutionRunWork(tx, { companyId: input.execution.binding.companyId });
         await notifyNativeFinalizationWork(tx, input.execution.binding);
         const updated = await tx
@@ -10773,9 +10784,12 @@ async function executePaperclipNativeSessionWithinScope(
               providerEventsExist: recoveryEvidence.providerEventsExist,
               checkpointExists: recoveryEvidence.checkpointExists,
               ...(providerCooldownAt ? { providerCooldownAt: providerCooldownAt.toISOString() } : {}),
+              ...(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true } : {}),
               recoveryOwner: recoveryProjection.recoveryOwner,
               nextAction:
-                sourceFailureCode === "native_permission_declined"
+                handedToUsageLimitFallback
+                  ? "The agent's usage-limit fallback continues this task until the primary account's limit resets."
+                  : sourceFailureCode === "native_permission_declined"
                   ? "Provider permission was declined. Inspect the task and give explicit direction before starting further provider work. Automatic recovery is stopped."
                   : sourceFailureCode === "native_provider_approval_required"
                   ? "Approval required. Review the operation and update the agent's permission setting before retrying. This runner has no interactive approval handler."
@@ -10955,8 +10969,8 @@ async function executePaperclipNativeSessionWithinScope(
             error: message,
             resultJson: sql`(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) - 'remoteRunnerRecovery')
               || ${JSON.stringify(remoteRunnerRecovery ? { remoteRunnerRecovery } : {})}::jsonb
-              || ${JSON.stringify(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true } : {})}::jsonb
-              || ${providerFailure ? sql`jsonb_build_object('providerFailure', coalesce(${heartbeatRuns.resultJson}->'providerFailure', ${JSON.stringify(providerFailure)}::jsonb))` : sql`'{}'::jsonb`}`,
+              || ${providerFailure ? sql`jsonb_build_object('providerFailure', coalesce(${heartbeatRuns.resultJson}->'providerFailure', ${JSON.stringify(providerFailure)}::jsonb))` : sql`'{}'::jsonb`}
+              || ${JSON.stringify(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true, ...(providerFailure ? { providerFailure } : {}) } : {})}::jsonb`,
             errorCode: ownershipUnverified
               ? NATIVE_OWNERSHIP_UNVERIFIED_ERROR_CODE
               : sourceFailureCode,
@@ -10974,13 +10988,6 @@ async function executePaperclipNativeSessionWithinScope(
         ) {
           terminalRunToReport = updatedRun;
         }
-        const stillOwnsTask =
-          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
-          ["in_progress", "in_review"].includes(failureTask.status) &&
-          (!failureTask.executionRunId ||
-            failureTask.executionRunId === input.execution.binding.runId) &&
-          (!failureTask.checkoutRunId ||
-            failureTask.checkoutRunId === input.execution.binding.runId);
         let failureBlockStatusVersion: number | undefined;
         if (stillOwnsTask && recoveryProjection.issueStatus && !handedToUsageLimitFallback) {
           const projected = await issueService(tx as unknown as Db).update(

@@ -10,7 +10,7 @@ import {
   nativeRunFinalizations,
   type Db,
 } from "@paperclipai/db";
-import type { ExecutionProjection } from "@paperclipai/shared";
+import { RUNNER_USAGE_LIMIT_HANDOFF_KEY, type ExecutionProjection } from "@paperclipai/shared";
 import { EXECUTION_CONTROL_DEADLINE_MS } from "./execution-control-deadline.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
@@ -299,6 +299,7 @@ export function projectExecution(
   )
     return set("finishing", "Finishing");
   if (successorRunId) return set("completed", "Continued in another run");
+  if (detail[RUNNER_USAGE_LIMIT_HANDOFF_KEY] === true && !recoveryAction) return set("completed", "Continued on usage-limit fallback");
   if (run.status === "scheduled_retry" && run.scheduledRetryReason === "ai_connection_busy") {
     projection.nextAction = "Waiting for the AI subscription's current execution to finish; the scheduled check will revalidate access.";
     return set("retry_scheduled", "Waiting for AI subscription");
