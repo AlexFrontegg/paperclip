@@ -3278,6 +3278,7 @@ export function agentRoutes(
     if (!fallback.enabled) return { fallback };
     const problem = usageLimitFallbackConfigProblem({
       primaryAdapterType: input.primaryAdapterType,
+      primaryAdapterConfig: input.primaryAdapterConfig,
       primaryAiConnection: input.primaryAiConnection,
       fallback,
     });

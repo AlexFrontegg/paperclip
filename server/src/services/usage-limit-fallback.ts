@@ -7,10 +7,13 @@ import {
   isUsageLimitFallbackStateActive,
   readUsageLimitFallbackConfig,
   readUsageLimitFallbackState,
+  RUNNER_USAGE_LIMIT_HANDOFF_KEY,
   sameAiConnectionBinding,
   usageLimitFallbackConfigProblem,
+  USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY,
   USAGE_LIMIT_FALLBACK_STATE_KEY,
   type AiConnectionBinding,
+  type ProviderFailure,
   type UsageLimitFallbackConfig,
   type UsageLimitFallbackLane,
   type UsageLimitFallbackReason,
@@ -19,6 +22,9 @@ import {
 import { AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { isAiAuthenticationFailure } from "./ai-auth-failure.js";
 import { aiConnectionService } from "./ai-connections.js";
+import { agentProviderLimitCooldown } from "./native-runtime/native-startup-retry.js";
+
+export { RUNNER_USAGE_LIMIT_HANDOFF_KEY, USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY };
 
 /** Same wait recovery uses when a provider gives no reset time. */
 export const USAGE_LIMIT_FALLBACK_DEFAULT_WINDOW_MS = 60 * 60 * 1000;
@@ -80,11 +86,16 @@ export function effectiveAgentForRun(agent: AgentRow, run: Pick<RunRow, "runnerP
   };
 }
 
-type AgentSetup = Pick<AgentRow, "adapterType" | "runtimeConfig">;
+type AgentSetup = Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig">;
 
 export function fallbackConfigProblem(agent: AgentSetup, fallback: UsageLimitFallbackConfig): string | null {
   const primaryAiConnection = aiRuntimeConnectionBindingSchema.safeParse((agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection).data;
-  return usageLimitFallbackConfigProblem({ primaryAdapterType: agent.adapterType, primaryAiConnection, fallback });
+  return usageLimitFallbackConfigProblem({
+    primaryAdapterType: agent.adapterType,
+    primaryAdapterConfig: agent.adapterConfig,
+    primaryAiConnection,
+    fallback,
+  });
 }
 
 function primaryAiAccount(agent: AgentSetup): AiConnectionBinding | null {
@@ -157,12 +168,48 @@ export function isRunAiAccountFailure(run: Pick<RunRow, "errorCode" | "resultJso
   return configurationIncomplete.reason === "ai_connection_unavailable";
 }
 
+/** A Runner turn stopped on the account's usage limit; a rate limit clears within minutes, so it does not count. */
+function isRunnerUsageLimit(failureCode: string, providerFailure: ProviderFailure | null): boolean {
+  return failureCode === "native_provider_usage_limit" && providerFailure?.category !== "rate_limit";
+}
+
+export function runnerTurnHandedToFallback(run: Pick<RunRow, "resultJson">): boolean {
+  return isRecord(run.resultJson) && run.resultJson[RUNNER_USAGE_LIMIT_HANDOFF_KEY] === true;
+}
+
+/** Turns the fallback on for a Runner turn that stopped on the usage limit, with the window this failure reports at its time. */
+export async function handRunnerTurnToUsageLimitFallback(db: Db, input: {
+  runId: string;
+  failureCode: string;
+  providerFailure: ProviderFailure | null;
+  now: Date;
+}): Promise<boolean> {
+  if (!isRunnerUsageLimit(input.failureCode, input.providerFailure)) return false;
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+  if (!run) return false;
+  const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
+  if (!agent) return false;
+  const primaryLimit = await agentProviderLimitCooldown(db, {
+    companyId: run.companyId,
+    agentId: run.agentId,
+    runId: run.id,
+    failure: input.providerFailure,
+    now: input.now,
+  });
+  const activation = await activateUsageLimitFallback(db, {
+    agent,
+    run,
+    reason: "provider_quota",
+    retryNotBefore: primaryLimit?.resetAt ?? null,
+    now: input.now,
+  });
+  return activation.activated;
+}
+
 export async function readAgentUsageLimitFallbackState(db: Db, agentId: string): Promise<UsageLimitFallbackState | null> {
   const [row] = await db.select({ stateJson: agentRuntimeState.stateJson }).from(agentRuntimeState).where(eq(agentRuntimeState.agentId, agentId));
   return readUsageLimitFallbackState(row?.stateJson);
 }
-
-export const USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY = "usageLimitFallbackReturnedAt";
 
 /** "Return to primary": ends the fallback and remembers when, so recovery does not switch again for an older failure. */
 export async function returnUsageLimitFallbackToPrimary(db: Db, agentId: string, now: Date): Promise<void> {
