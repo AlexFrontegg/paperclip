@@ -21,7 +21,8 @@ import type {
   ToolGatewayDescriptor,
   ToolGatewaySession,
 } from "./tool-gateway.js";
-import { runContextSnapshotString } from "./tool-access-policy.js";
+import { boundRunIssueIdSql } from "./run-task-binding.js";
+import { chatRunSourceMessageId } from "./chat-channels/run-origin.js";
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -349,8 +350,7 @@ export async function githubBotConnectionIdsForRun(
 ): Promise<Set<string>> {
   const [run] = await db
     .select({
-      issueId: heartbeatRuns.nativeIssueId,
-      snapshotIssueId: runContextSnapshotString("issueId"),
+      issueId: boundRunIssueIdSql(),
     })
     .from(heartbeatRuns)
     .where(
@@ -360,7 +360,7 @@ export async function githubBotConnectionIdsForRun(
         eq(heartbeatRuns.id, runId),
       ),
     );
-  const issueId = run?.issueId ?? run?.snapshotIssueId;
+  const issueId = run?.issueId;
   if (typeof issueId !== "string") return new Set();
   const rows = await db
     .select({
@@ -427,21 +427,7 @@ export async function githubGuestBotConnectionForSession(
   >,
 ): Promise<string | null> {
   if (!session.runId || !session.agentId || !session.issueId) return null;
-  const [run] = await db
-    .select({
-      wakeCommentId: runContextSnapshotString("wakeCommentId"),
-      // Read only the ids; the full snapshot can carry task text.
-      wakeCommentIds: sql<unknown>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds') = 'array' then ${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds' end`,
-    })
-    .from(heartbeatRuns)
-    .where(
-      and(
-        eq(heartbeatRuns.companyId, session.companyId),
-        eq(heartbeatRuns.agentId, session.agentId),
-        eq(heartbeatRuns.id, session.runId),
-      ),
-    );
-  const sponsoredFlag = sql`${chatDeliveries.normalizedEvent}->'githubAuthority'->>'guest' = 'true'`;
+  const sponsoredFlag = sql`${chatDeliveries.normalizedEvent} -> 'githubAuthority' ->> 'guest' = 'true'`;
   const firstSource = (condition: SQL) =>
     db
       .select({
@@ -472,9 +458,34 @@ export async function githubGuestBotConnectionForSession(
         ),
       )
       .limit(1);
+  const [sponsoredSource] = await firstSource(sponsoredFlag);
+  if (!sponsoredSource) return null;
+  const [run] = await db
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      responsibleUserId: heartbeatRuns.responsibleUserId,
+      activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
+      nativeIssueId: heartbeatRuns.nativeIssueId,
+      issueId: boundRunIssueIdSql(),
+      contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('wakeCommentId', ${heartbeatRuns.contextSnapshot}->'wakeCommentId')`,
+      // Read only the ids; the full snapshot can carry task text.
+      wakeCommentIds: sql<unknown>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds') = 'array' then ${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds' end`,
+    })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.companyId, session.companyId),
+        eq(heartbeatRuns.agentId, session.agentId),
+        eq(heartbeatRuns.id, session.runId),
+      ),
+    );
+  if (!run) return null;
+  const sourceMessageId = await chatRunSourceMessageId(db, run, { allowLegacyWakeComment: true, provider: "github" });
   const wakeCommentIds = [
     ...new Set(
-      [...(Array.isArray(run?.wakeCommentIds) ? run.wakeCommentIds : []), run?.wakeCommentId].filter(
+      [sourceMessageId, run.contextSnapshot?.wakeCommentId, ...(Array.isArray(run.wakeCommentIds) ? run.wakeCommentIds : [])].filter(
         (id): id is string => typeof id === "string" && id.length > 0,
       ),
     ),
@@ -487,6 +498,5 @@ export async function githubGuestBotConnectionForSession(
     if (wakeSource) return null;
   }
   // A run without its own GitHub request inherits any sponsored request on this task.
-  const [sponsoredSource] = await firstSource(sponsoredFlag);
-  return sponsoredSource?.connectionId ?? null;
+  return sponsoredSource.connectionId;
 }

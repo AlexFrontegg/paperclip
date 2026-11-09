@@ -1,7 +1,10 @@
+import { AGENT_OBSERVABILITY_ENV_KEYS } from "./agent-observability.js";
+
 const SECRET_NAME = /key|secret|token/i;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROVIDER_ONLY_KEYS: ReadonlySet<string> = new Set([
   "OPENAI_API_KEY", "CODEX_API_KEY", "PAPERCLIP_AI_PROVIDER_KEY",
+  ...AGENT_OBSERVABILITY_ENV_KEYS,
 ]);
 const IDENTITY_KEYS = ["PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY"];
 // Paperclip's gh and git launchers in the shell fetch the run's GitHub credential with this capability.

@@ -16,6 +16,7 @@ import {
 import { recordResponsibleUserDenialOnActiveRun } from "../services/responsible-user-denial-run-outcomes.js";
 import { isExpectedMcpConnectionFailure } from "../services/mcp-connection-failure.js";
 import { isEndedDbPoolError } from "../database-retry.js";
+import { ToolGatewayHttpError } from "../services/tool-gateway.js";
 
 export interface ErrorContext {
   error: {
@@ -88,10 +89,14 @@ function sanitizeSecretSensitiveResponse(
 }
 
 /** Report a server-side crash to every error sink. */
-function reportCrash(error: Error, reportToSentry = true): void {
+function reportCrash(error: Error, req: Request, reportToSentry = true): void {
   const tc = getTelemetryClient();
   if (tc) trackErrorHandlerCrash(tc, { errorCode: error.name });
-  if (reportToSentry) captureException(error);
+  if (reportToSentry) {
+    if (req.actor?.type === "agent" && req.actor.runId && req.actor.companyId && req.actor.agentId) {
+      captureException(error, { runId: req.actor.runId, companyId: req.actor.companyId, agentId: req.actor.agentId });
+    } else captureException(error);
+  }
 }
 
 /** Set by the orderly shutdown just before it ends the database pools. */
@@ -131,12 +136,27 @@ function recordResponsibleUserDenialFromHttpError(
   });
 }
 
+/**
+ * The tool gateway rejects requests with its own error type. A route that lets
+ * one reach this handler (such as approving a tool review from a task card)
+ * would otherwise turn an expected rejection, for example a 409 asking for a
+ * new review, into a 500 crash report. Gateway server failures stay on the
+ * crash path so their provider text is not exposed.
+ */
+function clientToolGatewayErrorAsHttpError(err: unknown): unknown {
+  if (!(err instanceof ToolGatewayHttpError) || err.status < 400 || err.status >= 500) return err;
+  const mapped = new HttpError(err.status, err.message, { ...err.details, code: err.reasonCode });
+  mapped.stack = err.stack;
+  return mapped;
+}
+
 export function errorHandler(
-  err: unknown,
+  thrown: unknown,
   req: Request,
   res: Response,
   _next: NextFunction,
 ) {
+  const err = clientToolGatewayErrorAsHttpError(thrown);
   if (err instanceof AgentLifecycleConflict) { res.status(409).json({ error: err.message }); return; }
   if (err instanceof HttpError) {
     const details =
@@ -186,7 +206,7 @@ export function errorHandler(
             },
         reportableError,
       );
-      reportCrash(reportableError, !isExpectedMcpConnectionFailure(err));
+      reportCrash(reportableError, req, !isExpectedMcpConnectionFailure(err));
     }
     const secretSensitiveServerError =
       err.status >= 500 &&
@@ -305,7 +325,7 @@ export function errorHandler(
     reportableError,
   );
 
-  reportCrash(reportableError);
+  reportCrash(reportableError, req);
 
   res.status(500).json({
     error: "Internal server error",
