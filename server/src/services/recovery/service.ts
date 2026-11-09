@@ -2631,7 +2631,7 @@ export function recoveryService(
     latestRun: LatestIssueRun;
     providerRetryAt: Date;
     now: Date;
-  }, database: DbOrTransaction = db): Promise<{ retryAt: Date; note: string | null }> {
+  }, database: DbOrTransaction = db, publications?: ActivityPublication[]): Promise<{ retryAt: Date; note: string | null }> {
     const fallback = input.latestRun
       ? await usageLimitFallbackRecoveryRetryAt(database as unknown as Db, {
         agentId: input.agentId,
@@ -2657,7 +2657,7 @@ export function recoveryService(
       entityType: "agent",
       entityId: input.agentId,
       details: { ...fallback.activated, source: "recovery.provider_quota_wait" },
-    });
+    }, publications);
     return { retryAt: fallback.retryAt, note };
   }
 
@@ -2666,7 +2666,7 @@ export function recoveryService(
     latestRun: LatestIssueRun;
     actionId: string;
     agentId: string;
-  }, database: DbOrTransaction = db) {
+  }, database: DbOrTransaction = db, publications?: ActivityPublication[]) {
     const existing = await database
       .select()
       .from(heartbeatRuns)
@@ -2690,7 +2690,7 @@ export function recoveryService(
       latestRun: input.latestRun,
       providerRetryAt: readProviderQuotaRetryAt(input.latestRun, now),
       now,
-    }, database);
+    }, database, publications);
     return database.transaction(async (tx) => {
       await notifyScheduledRetryDispatch(tx, { companyId: input.issue.companyId });
       const wakeup = await tx
@@ -4104,7 +4104,7 @@ export function recoveryService(
         latestRun: input.latestRun,
         actionId: recoveryAction.id,
         agentId: recoveryAction.returnOwnerAgentId,
-      }, tx);
+      }, tx, publications);
     }
     const blockerIds = await existingUnresolvedBlockerIssueIds(
       input.issue.companyId,
