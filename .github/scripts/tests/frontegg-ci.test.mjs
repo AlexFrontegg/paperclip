@@ -36,6 +36,11 @@ test("the image smoke starts the server with a bind mode the server accepts", as
   assert.deepEqual(errors, []);
 });
 
+test("the authenticated image smoke supplies a per-run auth secret", () => {
+  const smoke = read("scripts/ci/docker-image-smoke.sh");
+  assert.match(smoke, /--env BETTER_AUTH_SECRET="\$\(openssl rand -hex 32\)"/);
+});
+
 test("the completion gate rejects failed, cancelled, skipped, and missing verification lanes", () => {
   const all = jobs(ci);
   const required = all.get("required");
