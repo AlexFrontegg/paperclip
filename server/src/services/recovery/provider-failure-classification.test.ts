@@ -105,6 +105,19 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  it("waits the default backoff when it reads a dated reset after that reset has passed", () => {
+    const now = new Date("2026-11-13T10:00:00.000Z");
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "provider_quota",
+      error: "You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)",
+      resultJson: { errorFamily: "provider_quota", retryNotBefore: "2026-11-12T06:49:00.000Z" },
+    }, now)).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+      parsedResetTime: false,
+    });
+  });
+
   it("treats timezone-less provider reset clocks as UTC", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     const classification = classifyAdapterFailureForRecovery({
