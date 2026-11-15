@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import {
@@ -9,13 +10,14 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { forbidden } from "../errors.js";
-import { captureRunIdentity } from "./run-identity.js";
+import { captureRunIdentity, type RunIdentityContext } from "./run-identity.js";
 import {
   buildGitAuthInvocation,
   resolveManagedGitHubCredential,
   resolveManagedGitHubIdentitySelection,
 } from "./git-credentials.js";
 import { secretService } from "./secrets.js";
+import { boundRunIssueId } from "./run-task-binding.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
 import {
@@ -134,6 +136,18 @@ export async function resolveRunGitHubIdentitySelection(
   return botScoped ? { ...selection, configured: true } : selection;
 }
 
+async function saveGitHubSummary(
+  db: Db,
+  context: RunIdentityContext,
+  summary: GitHubCredentialSummary,
+) {
+  if (isDeepStrictEqual(context.github, JSON.parse(JSON.stringify(summary)))) return;
+  await db
+    .update(runIdentityContexts)
+    .set({ github: summary })
+    .where(eq(runIdentityContexts.id, context.id));
+}
+
 /** No company secrets or ambient credentials are consulted by this path. */
 export async function resolveGitHubOperationCredentials(
   db: Db,
@@ -144,7 +158,7 @@ export async function resolveGitHubOperationCredentials(
   },
   fetchImpl: typeof fetch = fetch,
 ) {
-  const { run, context } = await captureRunIdentity(db, input);
+  const { run, context } = await captureRunIdentity(db, input, { readScope: "github_credentials" });
   if (!context) throw forbidden("This run predates managed GitHub credentials");
   let summary: GitHubCredentialSummary;
   let env: Record<string, string> = {};
@@ -158,10 +172,7 @@ export async function resolveGitHubOperationCredentials(
       reason:
         "GitHub credentials are not available to low-trust or unverified executions; use authorized read-only tools.",
     };
-    await db
-      .update(runIdentityContexts)
-      .set({ github: summary })
-      .where(eq(runIdentityContexts.id, context.id));
+    await saveGitHubSummary(db, context, summary);
     return {
       identityContextId: context.id,
       revision: context.revision,
@@ -171,8 +182,7 @@ export async function resolveGitHubOperationCredentials(
   }
   try {
     // Read the task the same way as the export check, so no run escapes the bot scope.
-    const runIssueId = run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId ?? run.nativeIssueId;
-    const issueId = typeof runIssueId === "string" ? runIssueId : null;
+    const issueId = boundRunIssueId(run);
     // The bot's switch outranks the agent's own account, which may be able to write.
     const readOnlyConnectionId = await githubReadOnlyAgentBotConnection(db, input);
     // A run started for a guest or reviewed author may use only the agent's own account,
@@ -230,11 +240,7 @@ export async function resolveGitHubOperationCredentials(
       reason: "GitHub credentials are temporarily unavailable",
     };
   }
-  if (context)
-    await db
-      .update(runIdentityContexts)
-      .set({ github: summary })
-      .where(eq(runIdentityContexts.id, context.id));
+  if (context) await saveGitHubSummary(db, context, summary);
   return {
     identityContextId: context?.id ?? null,
     revision: context?.revision ?? null,
