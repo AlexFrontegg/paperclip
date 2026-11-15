@@ -182,6 +182,22 @@ it("does not infer quota from the historical generic terminal-limit error", () =
 });
 
 it.each([
+  ["You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)", "2026-11-12T06:49:00.000Z"],
+  ["You've hit your session limit · resets Nov 10 at 1:48am (America/New_York)", "2026-11-10T06:48:00.000Z"],
+])("waits for the dated reset in Claude Code's own limit title: %s", (title, retryNotBefore) => {
+  expect(classifyClaudeTerminalSessionFailure({ category: "limit", title }, now))
+    .toEqual({ errorCode: "provider_quota", errorFamily: "provider_quota", retryNotBefore });
+});
+
+it.each([
+  "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later.",
+  "This Claude turn reached its configured limit.",
+  "This Claude session reached its configured budget.",
+])("keeps Claude Code's other limit titles out of quota: %s", (title) => {
+  expect(classifyClaudeTerminalSessionFailure({ category: "limit", title }, now)).toBeNull();
+});
+
+it.each([
   "Failed to authenticate. API Error: 401 Invalid bearer token",
   "OAuth token has expired. Please obtain a new token or refresh your existing token.",
   "Authentication required. Please run claude login.",

@@ -503,7 +503,7 @@ function nextClockTimeInTimeZone(input: {
   return retryAt;
 }
 
-function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: string | null): Date | null {
+function parseClaudeClock(clockText: string): { hour: number; minute: number } | null {
   const normalized = clockText.trim().replace(/\s+/g, " ");
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
@@ -515,23 +515,46 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
 
   let hour24 = hour12 % 12;
   if ((match[3] ?? "").toLowerCase() === "p") hour24 += 12;
+  return { hour: hour24, minute };
+}
+
+function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: string | null): Date | null {
+  const clock = parseClaudeClock(clockText);
+  if (!clock) return null;
 
   if (timeZoneHint) {
     const explicitRetryAt = nextClockTimeInTimeZone({
       now,
-      hour: hour24,
-      minute,
+      ...clock,
       timeZoneHint,
     });
     if (explicitRetryAt) return explicitRetryAt;
   }
 
   const retryAt = new Date(now);
-  retryAt.setHours(hour24, minute, 0, 0);
+  retryAt.setHours(clock.hour, clock.minute, 0, 0);
   if (retryAt.getTime() <= now.getTime()) {
     retryAt.setDate(retryAt.getDate() + 1);
   }
   return retryAt;
+}
+
+const CLAUDE_RESET_DATE_RE = /^([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?(?:\s+at|,)\s+(.+)$/i;
+const MONTH_ABBREVIATIONS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const HALF_YEAR_MS = 182 * 24 * 60 * 60 * 1000;
+
+// Claude names the date for a reset more than a day away, and the year only when it is not the current one.
+function parseClaudeResetDate(resetText: string, now: Date, timeZoneHint?: string | null): Date | null {
+  const match = resetText.trim().replace(/\s+/g, " ").match(CLAUDE_RESET_DATE_RE);
+  const month = MONTH_ABBREVIATIONS.indexOf(match?.[1]?.toLowerCase() ?? "") + 1;
+  const clock = parseClaudeClock(match?.[4] ?? "");
+  if (!match || month === 0 || !clock) return null;
+  const timeZone = normalizeResetTimeZone(timeZoneHint) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const resetIn = (year: number) => dateFromTimeZoneWallClock({ year, month, day: Number(match[2]), ...clock, timeZone });
+  if (match[3]) return resetIn(Number(match[3]));
+  const currentYear = readTimeZoneParts(now, timeZone).year;
+  const resetAt = resetIn(currentYear);
+  return resetAt && resetAt.getTime() < now.getTime() - HALF_YEAR_MS ? resetIn(currentYear + 1) : resetAt;
 }
 
 export function extractClaudeRetryNotBefore(
@@ -546,7 +569,7 @@ export function extractClaudeRetryNotBefore(
   const haystack = buildClaudeTransientHaystack(input);
   const match = haystack.match(CLAUDE_EXTRA_USAGE_RESET_RE);
   if (!match) return null;
-  return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+  return parseClaudeResetDate(match[1] ?? "", now, match[2]) ?? parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
 }
 
 export function isClaudeTransientUpstreamError(input: {
