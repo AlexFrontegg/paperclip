@@ -5,6 +5,7 @@ import { canRestoreMigratedNativeSession } from "./native-workspace-migration.js
 import { prepareCursorCloudRuntime } from "./cursor-cloud-runtime.js";
 import { resolveLocalRuntimeApiUrl } from "../../runtime-api.js";
 import { providerFailureFromError } from "../../vendor/paperclip-runner/index.js";
+import { readProviderFailure } from "@paperclipai/shared";
 import { nativeCancellationHasUnsettledOwner, notifyNativeCancellation, waitForNativeCancellation } from "./native-cancellation-delivery.js";
 import { readClaimedNativeStopRecovery } from "./native-cancellation-request.js";
 import { publishNativeHarnessBackup } from "./native-harness-backup-publication.js";
@@ -23,6 +24,7 @@ import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-wo
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
 import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
+import { handRunnerTurnToUsageLimitFallback, RUNNER_USAGE_LIMIT_HANDOFF_KEY } from "../usage-limit-fallback.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
@@ -7113,12 +7115,13 @@ export function nativeProviderUsageLimitFromEvent(
   event: Pick<PrpEvent, "sourceKind" | "eventType" | "payload">,
 ): boolean {
   const payload = record(event.payload);
-  return (
-    event.sourceKind === "runner" &&
-    event.eventType === "turn.failed" &&
-    payload.status === "failed" &&
-    record(payload.error).codexErrorInfo === "usageLimitExceeded"
-  );
+  if (event.sourceKind !== "runner" || event.eventType !== "turn.failed" || payload.status !== "failed") return false;
+  const error = record(payload.error);
+  if (error.codexErrorInfo === "usageLimitExceeded") return true;
+  // ACP harnesses type the same exhausted allowance as a provider failure.
+  // Context, turn and configured budget limits stay ordinary terminals.
+  const category = readProviderFailure(error.providerFailure)?.category;
+  return category === "quota_exhausted" || category === "rate_limit";
 }
 
 export function nativeSessionFailureDisposition(
@@ -10700,6 +10703,20 @@ async function executePaperclipNativeSessionWithinScope(
         failureCode,
         agentId: input.execution.binding.agentId,
       });
+      // The fallback takes over a Runner usage limit; the Runner's own checkpointed failed terminal is the only ambiguity allowed.
+      const usageLimitFallbackActivated = phase === "terminal_failure"
+        && !ownershipUnverified
+        && (recoveryEvidence.recoveryMode !== "ambiguous_state" || error instanceof NativeProviderTerminalFailure)
+        && input.runnerExecutionTarget?.kind !== "remote"
+        && await handRunnerTurnToUsageLimitFallback(input.db, {
+          runId: input.execution.binding.runId,
+          failureCode: sourceFailureCode,
+          providerFailure,
+          now,
+        }).catch((handOffError: unknown) => {
+          logger.warn({ err: handOffError, runId: input.execution.binding.runId }, "usage-limit fallback hand-off failed; the task is blocked as usual");
+          return false;
+        });
       const { exhausted } = recoveryProjection;
       const integrityFailure =
         sourceFailureCode === "native_event_replay_conflict";
@@ -10728,6 +10745,14 @@ async function executePaperclipNativeSessionWithinScope(
             ),
           )
           .for("update");
+        const stillOwnsTask =
+          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
+          ["in_progress", "in_review"].includes(failureTask.status) &&
+          (!failureTask.executionRunId ||
+            failureTask.executionRunId === input.execution.binding.runId) &&
+          (!failureTask.checkoutRunId ||
+            failureTask.checkoutRunId === input.execution.binding.runId);
+        const handedToUsageLimitFallback = usageLimitFallbackActivated && stillOwnsTask;
         await notifyExecutionRunWork(tx, { companyId: input.execution.binding.companyId });
         await notifyNativeFinalizationWork(tx, input.execution.binding);
         const updated = await tx
@@ -10759,9 +10784,12 @@ async function executePaperclipNativeSessionWithinScope(
               providerEventsExist: recoveryEvidence.providerEventsExist,
               checkpointExists: recoveryEvidence.checkpointExists,
               ...(providerCooldownAt ? { providerCooldownAt: providerCooldownAt.toISOString() } : {}),
+              ...(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true } : {}),
               recoveryOwner: recoveryProjection.recoveryOwner,
               nextAction:
-                sourceFailureCode === "native_permission_declined"
+                handedToUsageLimitFallback
+                  ? "The agent's usage-limit fallback continues this task until the primary account's limit resets."
+                  : sourceFailureCode === "native_permission_declined"
                   ? "Provider permission was declined. Inspect the task and give explicit direction before starting further provider work. Automatic recovery is stopped."
                   : sourceFailureCode === "native_provider_approval_required"
                   ? "Approval required. Review the operation and update the agent's permission setting before retrying. This runner has no interactive approval handler."
@@ -10941,7 +10969,8 @@ async function executePaperclipNativeSessionWithinScope(
             error: message,
             resultJson: sql`(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) - 'remoteRunnerRecovery')
               || ${JSON.stringify(remoteRunnerRecovery ? { remoteRunnerRecovery } : {})}::jsonb
-              || ${providerFailure ? sql`jsonb_build_object('providerFailure', coalesce(${heartbeatRuns.resultJson}->'providerFailure', ${JSON.stringify(providerFailure)}::jsonb))` : sql`'{}'::jsonb`}`,
+              || ${providerFailure ? sql`jsonb_build_object('providerFailure', coalesce(${heartbeatRuns.resultJson}->'providerFailure', ${JSON.stringify(providerFailure)}::jsonb))` : sql`'{}'::jsonb`}
+              || ${JSON.stringify(handedToUsageLimitFallback ? { [RUNNER_USAGE_LIMIT_HANDOFF_KEY]: true, ...(providerFailure ? { providerFailure } : {}) } : {})}::jsonb`,
             errorCode: ownershipUnverified
               ? NATIVE_OWNERSHIP_UNVERIFIED_ERROR_CODE
               : sourceFailureCode,
@@ -10959,15 +10988,8 @@ async function executePaperclipNativeSessionWithinScope(
         ) {
           terminalRunToReport = updatedRun;
         }
-        const stillOwnsTask =
-          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
-          ["in_progress", "in_review"].includes(failureTask.status) &&
-          (!failureTask.executionRunId ||
-            failureTask.executionRunId === input.execution.binding.runId) &&
-          (!failureTask.checkoutRunId ||
-            failureTask.checkoutRunId === input.execution.binding.runId);
         let failureBlockStatusVersion: number | undefined;
-        if (stillOwnsTask && recoveryProjection.issueStatus) {
+        if (stillOwnsTask && recoveryProjection.issueStatus && !handedToUsageLimitFallback) {
           const projected = await issueService(tx as unknown as Db).update(
             input.execution.binding.issueId,
             { status: recoveryProjection.issueStatus },
@@ -10986,7 +11008,7 @@ async function executePaperclipNativeSessionWithinScope(
             .set({ executionRunId: null, checkoutRunId: null, updatedAt: now })
             .where(eq(issues.id, input.execution.binding.issueId));
         }
-        if (!stillOwnsTask) return;
+        if (!stillOwnsTask || handedToUsageLimitFallback) return;
         await issueRecoveryActionService(
           tx as unknown as Db,
         ).upsertSourceScoped({

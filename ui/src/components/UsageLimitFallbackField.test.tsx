@@ -90,6 +90,22 @@ describe("UsageLimitFallbackField", () => {
     expect(onChange).toHaveBeenCalledWith({ enabled: true, adapterType: "codex_local", adapterConfig: {}, switchBack: "on_reset", switchWhenUnavailable: true });
   });
 
+  it.each([
+    [{ provider: "acpx", acpxAgent: "claude" }, "codex_local"],
+    [{ provider: "codex" }, "claude_local"],
+  ])("offers the fallback to a Paperclip Runner agent, defaulting to the other adapter (%o)", async (primaryAdapterConfig, fallbackAdapterType) => {
+    await mountField({ primaryAdapterType: "paperclip_runner", primaryAdapterConfig });
+    const toggle = container.querySelector<HTMLElement>("[data-testid='usage-limit-fallback-toggle']");
+    expect(toggle).not.toBeNull();
+    flushSync(() => toggle!.click());
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, adapterType: fallbackAdapterType }));
+  });
+
+  it("renders nothing for a Paperclip Runner agent running another agent", async () => {
+    await mountField({ primaryAdapterType: "paperclip_runner", primaryAdapterConfig: { provider: "acpx", acpxAgent: "pi" } });
+    expect(container.querySelector("[data-testid='usage-limit-fallback']")).toBeNull();
+  });
+
   it("shows the fallback account and model pickers for the chosen fallback adapter", async () => {
     const value: UsageLimitFallbackConfig = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-x" }, switchBack: "on_reset", switchWhenUnavailable: false };
     await mountField({ value });
