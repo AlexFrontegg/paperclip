@@ -490,6 +490,33 @@ describe("extractClaudeRetryNotBefore", () => {
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
   });
+
+  it.each([
+    ["You've hit your session limit · resets 9:50am (UTC)", "2026-11-08T09:50:00.000Z"],
+    ["You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)", "2026-11-12T06:49:00.000Z"],
+    ["You've hit your session limit · resets Nov 10 at 1:48am (America/New_York)", "2026-11-10T06:48:00.000Z"],
+    ["You've hit your weekly limit · resets Nov 12 at 6am (UTC)", "2026-11-12T06:00:00.000Z"],
+    ["You've hit your weekly limit · resets Nov 12, 5pm (UTC)", "2026-11-12T17:00:00.000Z"],
+  ])("parses the reset Claude Code prints: %s", (errorMessage, expected) => {
+    const now = new Date("2026-11-08T06:48:00.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(expected);
+  });
+
+  it.each([
+    ["You've hit your weekly limit · resets Jan 2 at 9am (UTC)", "2027-01-02T09:00:00.000Z"],
+    ["You've hit your weekly limit · resets Dec 30 at 9am (UTC)", "2026-12-30T09:00:00.000Z"],
+    ["You've hit your weekly limit · resets Jan 2, 2027 at 9am (UTC)", "2027-01-02T09:00:00.000Z"],
+    ["You've hit your weekly limit · resets Mar 1, 2028 at 9am (UTC)", "2028-03-01T09:00:00.000Z"],
+  ])("dates a reset in the year Claude prints, or next year once the date has passed: %s", (errorMessage, expected) => {
+    const now = new Date("2026-12-30T12:00:00.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(expected);
+  });
+
+  it("keeps a dated reset read a day late in its own year instead of moving it a year ahead", () => {
+    const now = new Date("2026-11-13T10:00:00.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage: "You've hit your weekly limit · resets Nov 12 at 6:49am (UTC)" }, now)?.toISOString())
+      .toBe("2026-11-12T06:49:00.000Z");
+  });
 });
 
 describe("claudeModelUsageTotals", () => {

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
-import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
@@ -76,11 +76,11 @@ const sharedAnthropicBinding = { provider: "anthropic", method: "subscription", 
 const sharedOpenAiBinding = { provider: "openai", method: "api_key", mode: "shared", connectionId: randomUUID(), grantId: randomUUID() };
 const codexFallback = { enabled: true, adapterType: "codex_local", adapterConfig: { model: "gpt-fallback-test" }, switchBack: "on_reset" };
 const claudeFallback = { enabled: true, adapterType: "claude_local", adapterConfig: { model: "claude-fallback-test" }, switchBack: "on_reset" };
-const outage = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
+const outage: Failure = { errorCode: "transient_upstream", errorFamily: "transient_upstream" };
 
-type Failure = { errorCode: string; errorFamily?: string };
+type Failure = { errorCode: string; errorFamily?: NonNullable<AdapterExecutionResult["errorFamily"]> };
 
-function failedExecution(failure: Failure) {
+function failedExecution(failure: Failure): AdapterExecutionResult {
   const family = failure.errorFamily ? { errorFamily: failure.errorFamily } : {};
   return {
     exitCode: 1,
@@ -529,6 +529,110 @@ describeEmbeddedPostgres("usage-limit fallback", () => {
     expect(dispatchOf(failed)?.lane).toBe("fallback");
     const retry = await retryOf(run!.id);
     expect(retry.scheduledRetryAt!.toISOString()).toBe(primaryBackAt);
+  });
+
+  /** A primary-lane Runner turn that stopped on Claude's session limit. */
+  async function recordPrimaryUsageLimit(agent: typeof agents.$inferSelect, finishedAt: Date) {
+    await db.insert(heartbeatRuns).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "failed",
+      runtimeMode: "native",
+      errorCode: "native_provider_usage_limit",
+      startedAt: new Date(finishedAt.getTime() - 60_000),
+      finishedAt,
+      resultJson: { providerFailure: {
+        schema: "paperclip.provider-failure.v1", provider: "anthropic", phase: "turn", category: "quota_exhausted",
+        message: "ACP agent reported a terminal limit failure.\nYou've hit your session limit", retryability: "requires_action",
+      } },
+    });
+  }
+
+  async function automationRun(agent: typeof agents.$inferSelect) {
+    return waitForRun((await heartbeat.invoke(agent.id, "automation", {}, "system"))!.id);
+  }
+
+  it("runs the fallback while the primary's provider limit holds only the primary's work", async () => {
+    const agent = await seedAgent();
+    await recordPrimaryUsageLimit(agent, new Date(Date.now() - 60_000));
+    await activeFallback(agent);
+    claudeHitsLimit = false;
+
+    const onFallback = await automationRun(agent);
+    expect(dispatchOf(onFallback)?.lane).toBe("fallback");
+    expect(onFallback.status).toBe("succeeded");
+
+    await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", new Date());
+    const onPrimary = await automationRun(agent);
+    expect(dispatchOf(onPrimary)?.lane).not.toBe("fallback");
+    expect(onPrimary).toMatchObject({ status: "cancelled", errorCode: "provider_limit_wait" });
+    expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local"]);
+  });
+
+  /** A fallback-lane run that stopped on the fallback account's own usage limit. */
+  async function recordFallbackUsageLimit(agent: typeof agents.$inferSelect) {
+    await db.insert(heartbeatRuns).values({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "failed",
+      errorCode: "provider_quota",
+      startedAt: new Date(Date.now() - 120_000),
+      finishedAt: new Date(Date.now() - 60_000),
+      runnerProfileJson: { adapterDispatch: { adapterType: "codex_local", lane: "fallback", primaryAdapterType: "claude_local", fallbackUntil: RESET_AT } },
+      resultJson: { errorFamily: "provider_quota", retryNotBefore: CODEX_RESET_AT },
+    });
+  }
+
+  it("lets fallback-lane work start despite the fallback account's own limit; only the failed run's retry waits", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    await recordFallbackUsageLimit(agent);
+
+    const onFallback = await automationRun(agent);
+    expect(dispatchOf(onFallback)?.lane).toBe("fallback");
+    expect(onFallback.status).toBe("succeeded");
+    expect(executions.map((execution) => execution.adapterType)).toEqual(["codex_local"]);
+  });
+
+  it("does not hold the primary for the fallback account's own limit", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    await recordFallbackUsageLimit(agent);
+    await suspendUsageLimitFallback(db, agent.id, "codex_auth_required", new Date());
+    claudeHitsLimit = false;
+
+    const onPrimary = await automationRun(agent);
+    expect(dispatchOf(onPrimary)?.lane).not.toBe("fallback");
+    expect(onPrimary.status).toBe("succeeded");
+    expect(executions.map((execution) => execution.adapterType)).toEqual(["claude_local"]);
+  });
+
+  it("runs the primary again after Return to primary, despite its earlier limit", async () => {
+    const agent = await seedAgent();
+    await recordPrimaryUsageLimit(agent, new Date(Date.now() - 60_000));
+    await activeFallback(agent);
+    await returnUsageLimitFallbackToPrimary(db, agent.id, new Date());
+    claudeHitsLimit = false;
+
+    const onPrimary = await automationRun(agent);
+    expect(dispatchOf(onPrimary)?.lane).not.toBe("fallback");
+    expect(onPrimary.status).toBe("succeeded");
+    expect(executions.map((execution) => execution.adapterType)).toEqual(["claude_local"]);
+  });
+
+  it("still holds the primary for a limit it reports after Return to primary", async () => {
+    const agent = await seedAgent();
+    await activeFallback(agent);
+    await returnUsageLimitFallbackToPrimary(db, agent.id, new Date(Date.now() - 60_000));
+    await recordPrimaryUsageLimit(agent, new Date());
+
+    const held = await automationRun(agent);
+    expect(held).toMatchObject({ status: "cancelled", errorCode: "provider_limit_wait" });
+    expect(executions).toEqual([]);
   });
 
   it("drops a fallback account attribution copied into a primary run", async () => {
