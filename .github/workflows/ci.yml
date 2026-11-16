@@ -44,6 +44,8 @@ jobs:
     name: Typecheck and build
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      PAPERCLIP_TYPECHECK_LOW_MEMORY: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -62,7 +64,9 @@ jobs:
   general:
     name: Tests (${{ matrix.group }} ${{ matrix.index }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      PAPERCLIP_VITEST_SERVER_MAX_WORKERS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +111,8 @@ jobs:
     name: Route and authorization tests (${{ matrix.index }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +145,8 @@ jobs:
     name: Native Runner integration
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      PAPERCLIP_VITEST_SERVER_MAX_WORKERS: "2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

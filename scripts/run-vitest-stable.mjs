@@ -19,6 +19,9 @@ const serializedShardDurations = loadShardDurations(
   path.join(scriptsDir, "serialized-shard-durations.json"),
 );
 const serverRoot = path.join(repoRoot, "server");
+// Frontegg CI runs on smaller machines and lowers how many server test files overlap.
+const serverFileWorkersOverride = process.env.PAPERCLIP_VITEST_SERVER_MAX_WORKERS;
+const serverFileWorkers = (defaultCount) => `--maxWorkers=${serverFileWorkersOverride ?? defaultCount}`;
 const serverSrcDir = path.join(repoRoot, "server", "src");
 const serverTestsDir = path.join(repoRoot, "server", "src", "__tests__");
 const serverScriptsDir = path.join(repoRoot, "server", "scripts");
@@ -516,7 +519,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
         // Each file owns its database, home, and processes. Keep cases serial,
         // but overlap long real lease windows in four isolated fork workers.
         ...(hasSharedTestDatabase ? serializedServerVitestArgs
-          : ["--pool=forks", "--isolate", "--fileParallelism", "--maxWorkers=4"]),
+          : ["--pool=forks", "--isolate", "--fileParallelism", serverFileWorkers(4)]),
         ...nativeRunnerSuites],
       "native runner vertical-slice suite",
     );
@@ -548,7 +551,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
           // An explicit shared test database cannot be isolated this way.
           ...(hasSharedTestDatabase
             ? serializedServerVitestArgs
-            : ["--pool=forks", "--isolate", "--fileParallelism", "--maxWorkers=3"]),
+            : ["--pool=forks", "--isolate", "--fileParallelism", serverFileWorkers(3)]),
           ...shardFiles,
         ],
         `${groupName} shard ${shardIndex + 1}/${shardCount}`,
@@ -725,7 +728,7 @@ try {
       const serverArgs = project !== "@paperclipai/server" ? []
         : options.mode === serializedModeName || hasSharedTestDatabase
           ? ["--pool=forks", "--isolate", ...serializedServerVitestArgs]
-          : ["--pool=forks", "--isolate", "--fileParallelism", "--maxWorkers=3"];
+          : ["--pool=forks", "--isolate", "--fileParallelism", serverFileWorkers(3)];
       await runVitest(["--project", project, ...serverArgs, ...files],
         `selected ${project}: ${files.length} files`, null, true);
     }
