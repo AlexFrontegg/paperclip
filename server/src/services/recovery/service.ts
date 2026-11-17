@@ -3427,6 +3427,7 @@ export function recoveryService(
       .where(
         and(
           eq(heartbeatRuns.companyId, action.companyId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${action.sourceIssueId}`,
           sql`${heartbeatRuns.contextSnapshot} ->> 'recoveryActionId' = ${action.id}`,
         ),
       )
