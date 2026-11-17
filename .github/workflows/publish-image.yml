@@ -67,6 +67,23 @@ jobs:
             echo 'The image builder needs at least 30 GiB free; select a larger hosted runner.' >&2
             exit 1
           fi
+      - name: Move Docker storage to the larger temporary disk
+        if: matrix.arch == 'amd64'
+        run: |
+          # Hosted x64 runners mount a separate temporary disk at /mnt; the image build no longer fits on the root disk.
+          df -h / /mnt
+          mnt_available_kb="$(df -Pk /mnt | awk 'NR == 2 {print $4}')"
+          if (( mnt_available_kb < 50 * 1024 * 1024 )); then
+            echo 'The /mnt disk has less than 50 GiB free; select a larger hosted runner.' >&2
+            exit 1
+          fi
+          sudo systemctl stop docker.socket docker
+          sudo mkdir -p /mnt/docker
+          docker_config=/etc/docker/daemon.json
+          current_config="$(sudo cat "$docker_config" 2>/dev/null || echo '{}')"
+          jq '. + {"data-root": "/mnt/docker"}' <<< "$current_config" | sudo tee "$docker_config" > /dev/null
+          sudo systemctl start docker
+          test "$(docker info --format '{{.DockerRootDir}}')" = /mnt/docker
       - name: Log in to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
