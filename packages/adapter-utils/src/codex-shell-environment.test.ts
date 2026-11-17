@@ -9,10 +9,10 @@ it("admits assigned service secrets by name while retaining unassigned secret ex
   for (const value of Object.values(assigned)) expect(JSON.stringify(names)).not.toContain(value);
 });
 
-it("keeps Codex authentication and runtime transports out of the service-secret opt-in", () => {
+it("keeps Codex authentication, observability and runtime transports out of the service-secret opt-in", () => {
   const configured = {
     SLACK_BOT_TOKEN: "assigned", OPENAI_API_KEY: "openai", CODEX_API_KEY: "codex",
-    PAPERCLIP_AI_PROVIDER_KEY: "managed",
+    PAPERCLIP_AI_PROVIDER_KEY: "managed", OTEL_EXPORTER_OTLP_HEADERS: "authorization=export",
     PAPERCLIP_NATIVE_MCP_TOKEN: "mcp",
   };
   const names = codexShellEnvironmentKeys(configured, configured, true);

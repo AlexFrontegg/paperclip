@@ -61,10 +61,16 @@ jobs:
           # The Rust build, installed providers, and multi-stage image need
           # more space than the default runner's preinstalled SDKs leave free.
           sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/lib/android /opt/ghc
+          # The build needs only Docker, curl, jq and the setup-node toolchain on the host.
+          sudo rm -rf /usr/local/.ghcup /usr/local/share/boost /usr/local/lib/node_modules /usr/lib/jvm \
+            /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft /opt/google /opt/az \
+            /usr/lib/google-cloud-sdk /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby
+          docker image prune --all --force > /dev/null
           df -h .
           available_kb="$(df -Pk . | awk 'NR == 2 {print $4}')"
-          if (( available_kb < 30 * 1024 * 1024 )); then
-            echo 'The image builder needs at least 30 GiB free; select a larger hosted runner.' >&2
+          if (( available_kb < 42 * 1024 * 1024 )); then
+            echo 'The image builder needs at least 42 GiB free; select a larger hosted runner.' >&2
             exit 1
           fi
       - name: Log in to Docker Hub

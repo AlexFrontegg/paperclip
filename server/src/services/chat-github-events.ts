@@ -21,6 +21,7 @@ import {
   effectiveGitHubReviewPolicy,
   githubReviewedAuthorCommentDecision,
   githubReviewSchedulingDecision,
+  type GitHubAutomaticPolicyContext,
 } from "./chat-github-review-policy.js";
 
 const id = z.union([
@@ -43,14 +44,16 @@ export function githubBodyMentionsBot(body: string, username: string | null): bo
 
 /**
  * A thread subscription must not turn a request for another connected bot
- * into work for this bot. Human mentions still follow ordinary thread policy,
- * and explicitly mentioning this bot (including alongside another) wins. */
-export async function githubMessageAddressesAnotherBot(
+ * into work for this bot. A leading mention explicitly selects a recipient,
+ * including Apps outside Paperclip. Incidental human mentions still follow
+ * thread policy, and explicitly mentioning this bot always wins. */
+export async function githubMessageAddressesAnotherRecipient(
   db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
   endpoint: Pick<typeof chatEndpoints.$inferSelect, "id" | "companyId" | "botUsername">,
   body: string,
 ): Promise<boolean> {
   if (!body.includes("@") || githubBodyMentionsBot(body, endpoint.botUsername)) return false;
+  if (/^\s*@[a-z\d](?:[a-z\d-]{0,38})(?:\[bot\])?(?![\w-])/i.test(body)) return true;
   const others = await db
     .select({ username: chatEndpoints.botUsername })
     .from(chatEndpoints)
@@ -225,8 +228,8 @@ export function githubAutomaticReviewEvent(
 
 export async function githubAutomaticAdmission(
   db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
-  endpoint: typeof chatEndpoints.$inferSelect,
-  context: GitHubAutomaticEventContext,
+  endpoint: Pick<typeof chatEndpoints.$inferSelect, "id" | "companyId">,
+  context: GitHubAutomaticPolicyContext,
 ) {
   const [saved] = await db
     .select()
@@ -325,7 +328,7 @@ const GITHUB_CONVERSATION_PATTERN =
 
 export async function githubReviewedAuthorCommentAdmission(
   db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
-  endpoint: typeof chatEndpoints.$inferSelect,
+  endpoint: Pick<typeof chatEndpoints.$inferSelect, "id" | "companyId" | "provider">,
   principalId: string,
   externalThreadId: string,
 ) {
