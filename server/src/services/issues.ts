@@ -60,7 +60,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
 import { nativeManualAdmissionHoldsExecution } from "./native-runtime/native-runner-ownership.js";
 import { markdownToPlainText, parseMarkdown } from "chat";
-import { listExternalReviewWaits } from "./native-runtime/external-review-wait.js";
+import { createExternalReviewWaitReader, type ExternalReviewWaitReader } from "./native-runtime/external-review-wait.js";
 import {
   and,
   asc,
@@ -4653,6 +4653,7 @@ async function listIssueReviewAttentionMap(
   dbOrTx: any,
   companyId: string,
   issueRows: IssueReviewAttentionInput[],
+  readExternalReviewWaits: ExternalReviewWaitReader = createExternalReviewWaitReader(dbOrTx, companyId),
 ): Promise<Map<string, IssueReviewAttention>> {
   const result = new Map<string, IssueReviewAttention>();
   for (const row of issueRows) result.set(row.id, reviewAttentionNone());
@@ -4896,7 +4897,7 @@ async function listIssueReviewAttentionMap(
     queuedWakeRequests: wakeRows,
     pendingInteractions: interactionRows,
     pendingApprovals: approvalRows,
-    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, reviewIds),
+    externalResponseWaits: await readExternalReviewWaits(reviewIds),
     openRecoveryIssues: recoveryPaths,
     now: new Date(),
   };
@@ -5743,6 +5744,7 @@ async function listIssueBlockedInboxAttentionMap(
   dbOrTx: any,
   companyId: string,
   issueRows: BlockedInboxIssueRow[],
+  readExternalReviewWaits: ExternalReviewWaitReader = createExternalReviewWaitReader(dbOrTx, companyId),
 ): Promise<Map<string, IssueBlockedInboxAttention>> {
   const rowIssueIds = [...new Set(issueRows.map((row) => row.id))];
   const result = new Map<string, IssueBlockedInboxAttention>();
@@ -6002,7 +6004,7 @@ async function listIssueBlockedInboxAttentionMap(
     });
 
   const findings = classifyIssueGraphLiveness({
-    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, graphIssues.filter(issue => issue.status === "in_review").map(issue => issue.id)),
+    externalResponseWaits: await readExternalReviewWaits(graphIssues.filter(issue => issue.status === "in_review").map(issue => issue.id)),
     issues: graphIssues.map((issue) => ({
       id: issue.id,
       companyId: issue.companyId,
@@ -6603,6 +6605,8 @@ async function listBlockedInboxIssues(
   const issueIds = withRuns.map((row) => row.id);
   const includeLiveDescendantSummary =
     filters?.includeLiveDescendantSummary === true;
+  // Both attention maps read external review waits for overlapping issues.
+  const readExternalReviewWaits = createExternalReviewWaitReader(dbOrTx, companyId);
   const [
     statsRows,
     readRows,
@@ -6622,8 +6626,8 @@ async function listBlockedInboxIssues(
     lastActivityStatsForIssues(dbOrTx, companyId, issueIds),
     blockedByMapForIssues(dbOrTx, companyId, issueIds),
     listIssueBlockerAttentionMap(dbOrTx, companyId, withRuns),
-    listIssueReviewAttentionMap(dbOrTx, companyId, withRuns),
-    listIssueBlockedInboxAttentionMap(dbOrTx, companyId, withRuns),
+    listIssueReviewAttentionMap(dbOrTx, companyId, withRuns, readExternalReviewWaits),
+    listIssueBlockedInboxAttentionMap(dbOrTx, companyId, withRuns, readExternalReviewWaits),
     includeLiveDescendantSummary
       ? liveDescendantCountMapForIssues(dbOrTx, companyId, issueIds)
       : Promise.resolve(new Map<string, number>()),
@@ -8515,15 +8519,17 @@ export function issueService(db: Db) {
       const archiveByIssueId = new Map(
         archiveRows.map((row) => [row.issueId, row]),
       );
+      // Both attention maps read external review waits for overlapping issues.
+      const readExternalReviewWaits = createExternalReviewWaitReader(db, companyId);
       const [
         blockerAttentionByIssueId,
         reviewAttentionByIssueId,
         blockedInboxAttentionByIssueId,
       ] = await Promise.all([
         filters?.listProjection === "index" ? Promise.resolve(new Map<string, IssueBlockerAttention>()) : listIssueBlockerAttentionMap(db, companyId, withRuns),
-        filters?.listProjection === "index" ? Promise.resolve(new Map<string, IssueReviewAttention>()) : listIssueReviewAttentionMap(db, companyId, withRuns),
+        filters?.listProjection === "index" ? Promise.resolve(new Map<string, IssueReviewAttention>()) : listIssueReviewAttentionMap(db, companyId, withRuns, readExternalReviewWaits),
         includeBlockedInboxAttention
-          ? listIssueBlockedInboxAttentionMap(db, companyId, withRuns)
+          ? listIssueBlockedInboxAttentionMap(db, companyId, withRuns, readExternalReviewWaits)
           : Promise.resolve(new Map<string, IssueBlockedInboxAttention>()),
       ]);
 
