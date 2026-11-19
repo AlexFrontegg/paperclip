@@ -94,6 +94,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Free runner disk for provider-pack tests
+        if: matrix.group == 'general-server-without-chat-or-native-runner'
+        run: |
+          # retained-provider-pack-source.ts requires 9 GiB free in the temporary directory.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /tmp
       - uses: ./.github/actions/setup-paperclip
       - name: Run a complete test partition
         env:
