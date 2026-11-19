@@ -56,7 +56,7 @@ import {
   resolveSessionCompactionPolicy,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
-import { isUuidLike } from "@paperclipai/shared";
+import { isUuidLike, PROVIDER_RATE_LIMITS_STATE_KEY } from "@paperclipai/shared";
 import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@paperclipai/shared";
 import { isUnsafeSessionWorkspaceCwd } from "../session-workspace-cwd.js";
 
@@ -330,6 +330,7 @@ const heartbeatRunExecutionEvidenceColumn = sql<Record<string, unknown> | null>`
     'nativeCancellation', ${heartbeatRuns.resultJson} -> 'nativeCancellation',
     'cancelledByActorType', ${heartbeatRuns.resultJson} -> 'cancelledByActorType',
     'cancelledByUserId', ${heartbeatRuns.resultJson} -> 'cancelledByUserId',
+    'reassignmentStopRequested', ${heartbeatRuns.resultJson} -> 'reassignmentStopRequested',
     'conversationContinuation', ${heartbeatRuns.resultJson} -> 'conversationContinuation',
     'cancellation', ${heartbeatRuns.resultJson} -> 'cancellation',
     'acpToolInventoryComplete', ${heartbeatRuns.resultJson} -> 'acpToolInventoryComplete',
@@ -374,7 +375,10 @@ const heartbeatRunIssueControlColumns = {
   runtimeModeResolvedAt: heartbeatRuns.runtimeModeResolvedAt,
   startedAt: heartbeatRuns.startedAt, createdAt: heartbeatRuns.createdAt,
   contextSnapshot: sql<Record<string, unknown> | null>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
-    then jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot}->'issueId') else null end`,
+    then jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot}->'issueId')
+      || case when ${heartbeatRuns.contextSnapshot} ? 'firstTurnQueuedInput'
+        then jsonb_build_object('firstTurnQueuedInput', ${heartbeatRuns.contextSnapshot}->'firstTurnQueuedInput') else '{}'::jsonb end
+    else null end`,
   runnerProfileJson: sql<Record<string, unknown> | null>`case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object'
     then jsonb_build_object('adapterDispatch', jsonb_build_object('adapterType', ${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->'adapterType'))
     else null end`,
@@ -1969,15 +1973,17 @@ export function createHeartbeatRunState(db: Db) {
         lastError: null,
         updatedAt: new Date(),
       };
-      // The usage-limit fallback and the last "Return to primary" are not sessions, so a full reset keeps them.
-      const keptFallbackState = sql`jsonb_strip_nulls(jsonb_build_object(
-        ${USAGE_LIMIT_FALLBACK_STATE_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_STATE_KEY},
-        ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}::text, ${agentRuntimeState.stateJson} -> ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}
-      ))`;
+      // The usage-limit fallback, the last "Return to primary" and provider rate limits describe accounts, not sessions, so a full reset keeps them.
+      const keptAccountState = sql`coalesce((
+        select jsonb_object_agg(kept.key, kept.value) from jsonb_each(${agentRuntimeState.stateJson}) as kept
+        where kept.value <> 'null'::jsonb and kept.key in (
+          ${USAGE_LIMIT_FALLBACK_STATE_KEY}, ${USAGE_LIMIT_FALLBACK_RETURNED_AT_KEY}, ${PROVIDER_RATE_LIMITS_STATE_KEY}
+        )
+      ), '{}'::jsonb)`;
 
       const updated = await db
         .update(agentRuntimeState)
-        .set(taskKey ? runtimePatch : { ...runtimePatch, stateJson: keptFallbackState })
+        .set(taskKey ? runtimePatch : { ...runtimePatch, stateJson: keptAccountState })
         .where(eq(agentRuntimeState.agentId, agentId))
         .returning()
         .then((rows) => rows[0] ?? null);

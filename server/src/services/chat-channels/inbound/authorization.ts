@@ -383,6 +383,7 @@ export function createChatInboundAuthority(db: Db, options: InboundAuthorityOpti
     const type = providerResourceType(
       endpoint.provider,
       chatSurfaceKind(endpoint.provider, thread),
+      thread.isDM,
     );
     const providerResourceId = canonicalProviderResourceId(
       endpoint.provider,
