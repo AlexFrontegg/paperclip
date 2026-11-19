@@ -140,7 +140,8 @@ test("a stalled web font does not hide an otherwise prepared conversation indefi
     await page.route("**/*.woff2", async route => { await fontReady; await route.abort(); });
     await page.goto(fixture.route, { waitUntil: "domcontentloaded" });
     await expect(page.getByTestId("task-chat-loading-frame")).toBeVisible();
-    await expect(page.getByTestId("task-chat-thread").locator(':scope > [aria-busy="false"]')).toBeVisible({ timeout: 5000 });
+    // The font stays stalled until cleanup, so any reveal proves the 3 s font wait gave up; hosted runners need more than 5 s.
+    await expect(page.getByTestId("task-chat-thread").locator(':scope > [aria-busy="false"]')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId("task-chat-composer-stack").locator('[contenteditable="true"]')).toBeEditable();
   } finally {
     release();
