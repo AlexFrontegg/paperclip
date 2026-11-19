@@ -14,7 +14,8 @@ function formatMigrationNumber(number) {
   return String(number).padStart(4, '0');
 }
 
-export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
+// Paperclip records applied migrations by content, so one the PR moves with identical SQL does not set the tip.
+export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles, movedBaseMigrations = new Set()) {
   const invalidFiles = [...baseMigrationFiles, ...prMigrationFiles]
     .filter((file) => !parseMigration(file));
 
@@ -32,7 +33,9 @@ export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
     return { passed: true, message: 'No new migrations in this PR.' };
   }
 
-  const baseMigrations = baseMigrationFiles.map(parseMigration);
+  const baseMigrations = baseMigrationFiles
+    .filter((file) => !movedBaseMigrations.has(file))
+    .map(parseMigration);
   const prMigrations = prMigrationFiles.map(parseMigration);
   const latestBaseMigration = baseMigrations.reduce(
     (latest, migration) => migration.number > latest.number ? migration : latest,
@@ -71,6 +74,15 @@ function gitPaths(args) {
     .filter(Boolean);
 }
 
+function migrationBlobs(sha) {
+  return new Map(gitPaths(['ls-tree', '-r', '-z', sha, '--', MIGRATIONS_DIRECTORY])
+    .map((entry) => {
+      const [meta, file] = entry.split('\t');
+      return [file, meta.split(' ')[2]];
+    })
+    .filter(([file]) => file.endsWith('.sql')));
+}
+
 function escapeWorkflowCommand(message) {
   return message
     .replaceAll('%', '%25')
@@ -90,10 +102,16 @@ function main() {
     'ls-tree', '-r', '--name-only', '-z', baseSha, '--', MIGRATIONS_DIRECTORY,
   ]).filter((file) => file.endsWith('.sql'));
   const prMigrationFiles = gitPaths([
-    'diff', '--name-only', '--diff-filter=A', '-z', `${baseSha}...${headSha}`, '--',
+    'diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', `${baseSha}...${headSha}`, '--',
     MIGRATIONS_DIRECTORY,
   ]).filter((file) => file.endsWith('.sql'));
-  const result = checkMigrationOrder(baseMigrationFiles, prMigrationFiles);
+  const baseBlobs = migrationBlobs(baseSha);
+  const headBlobs = migrationBlobs(headSha);
+  const addedBlobs = new Set(prMigrationFiles.map((file) => headBlobs.get(file)));
+  const movedBaseMigrations = new Set(
+    [...baseBlobs].filter(([file, blob]) => !headBlobs.has(file) && addedBlobs.has(blob)).map(([file]) => file),
+  );
+  const result = checkMigrationOrder(baseMigrationFiles, prMigrationFiles, movedBaseMigrations);
 
   if (result.passed) {
     console.log(result.message);
